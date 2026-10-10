@@ -427,6 +427,18 @@ pub struct WatchParams {
     pub buffer_ms: Option<u64>,
 }
 
+/// Whether a watch ticket points at our own endpoint identity.
+///
+/// iroh refuses to `connect` to an `EndpointId` equal to the local one
+/// ("Connecting to ourselves is not supported"), so watching your own broadcast
+/// (two GUIs sharing one config, or a same-GUI self-watch) fails on the shared
+/// endpoint. The comparison uses the live [`SharedState::secret`] — the exact
+/// identity `ensure_endpoint` binds and which `spawn_reset_ticket` mutates on an
+/// identity reset — so it never misclassifies mid-reset.
+fn is_self_watch(addr: &EndpointAddr, secret: &SecretKey) -> bool {
+    addr.id == secret.public()
+}
+
 /// Start a watch session, returning its task handle to store in the state.
 ///
 /// Mirrors [`spawn_broadcast`]: sets the mode to `Starting` synchronously, then
@@ -434,6 +446,12 @@ pub struct WatchParams {
 /// `Watching` only once the play address resolves and immediately before dialing
 /// (the closest honest "ready" signal available — [`ViewerConfig`] carries no
 /// player-launch callback).
+///
+/// When the ticket points at our own identity ([`is_self_watch`]), we cannot dial
+/// from the shared endpoint, so for this one session we bind a throwaway
+/// connect-only endpoint from a freshly generated [`SecretKey`]. It is never
+/// written to `config.secret_hex` nor stored in `SharedState::endpoint`, and it
+/// drops when the task ends (normally, on error, or when aborted by `stop`).
 pub fn spawn_watch(
     state: Arc<Mutex<SharedState>>,
     handle: Handle,
@@ -447,10 +465,39 @@ pub fn spawn_watch(
     }
     ctx.request_repaint();
     handle.spawn(async move {
-        let endpoint = match ensure_endpoint(&state, BindAddrs::default()).await {
-            Ok(endpoint) => endpoint,
-            Err(e) => return fail(&state, &ctx, format!("could not bind endpoint: {e:#}")),
+        // Read the live identity once, releasing the lock before any `.await`.
+        let is_self = is_self_watch(&params.addr, &state.lock().unwrap().secret);
+
+        let endpoint = if is_self {
+            // Watching our own broadcast: dial under a throwaway identity so iroh
+            // does not reject the self-connect. Ephemeral bind (no fixed addrs),
+            // no alpns (connect-only — the dial ALPN is carried by `ViewerConfig`),
+            // and the same verbosity as `ensure_endpoint` so the log panel shows it.
+            tracing::info!(
+                "ticket points at our own identity ({}) — watching under a throwaway id",
+                params.addr.id
+            );
+            let common = CommonArgs {
+                ipv4_addr: None,
+                ipv6_addr: None,
+                custom_alpn: None,
+                verbose: 1,
+                verbose_max: 3,
+            };
+            match crate::create_endpoint(SecretKey::generate(), &common, vec![]).await {
+                Ok(endpoint) => endpoint,
+                Err(e) => {
+                    return fail(&state, &ctx, format!("could not bind throwaway endpoint: {e:#}"))
+                }
+            }
+        } else {
+            match ensure_endpoint(&state, BindAddrs::default()).await {
+                Ok(endpoint) => endpoint,
+                Err(e) => return fail(&state, &ctx, format!("could not bind endpoint: {e:#}")),
+            }
         };
+        // Online before dialing — required for the throwaway endpoint to reach a
+        // relay-only self ticket, and unchanged for the shared endpoint path.
         if timeout(ONLINE_TIMEOUT, endpoint.online()).await.is_err() {
             tracing::warn!("failed to connect to the home relay");
         }
@@ -565,6 +612,26 @@ mod tests {
             "the mode must be `Starting` immediately, not `Watching`"
         );
         drop(rt);
+    }
+
+    /// Regression (AC1/AC2): a ticket carrying our own endpoint id must be detected
+    /// as a self-watch (so `spawn_watch` dials from a throwaway identity instead of
+    /// the shared endpoint, which iroh would reject with "Connecting to ourselves is
+    /// not supported"), while a ticket for any other id takes the normal path.
+    #[test]
+    fn self_watch_is_detected_from_the_ticket_endpoint_id() {
+        let secret = SecretKey::generate();
+        let own = EndpointAddr::new(secret.public());
+        let other = EndpointAddr::new(SecretKey::generate().public());
+
+        assert!(
+            is_self_watch(&own, &secret),
+            "a ticket with our own endpoint id must be treated as self-watch"
+        );
+        assert!(
+            !is_self_watch(&other, &secret),
+            "a ticket with a different endpoint id must use the normal path"
+        );
     }
 
     /// A cached endpoint is reused while open, but a closed one (as `listen_whip`
