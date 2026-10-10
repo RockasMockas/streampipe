@@ -129,15 +129,19 @@ impl App {
                 self.show_options = !self.show_options;
             }
             ui.separator();
-            let base = match snap.mode {
-                Mode::Idle => egui::Color32::GRAY,
-                Mode::Starting => egui::Color32::YELLOW,
-                Mode::Broadcasting => ACCENT,
-                Mode::Watching => egui::Color32::from_rgb(90, 160, 255),
+            let base = if snap.broadcast == Mode::Broadcasting {
+                // Broadcasting leads the colour; watching while live stays green too.
+                ACCENT
+            } else if snap.watch == Mode::Watching {
+                egui::Color32::from_rgb(90, 160, 255)
+            } else if snap.any_active() {
+                egui::Color32::YELLOW
+            } else {
+                egui::Color32::GRAY
             };
-            // The dot breathes only while live; `Starting` stays calm yellow and
-            // `Idle` flat gray, so a steady dot never reads as a running session.
-            let pulsing = matches!(snap.mode, Mode::Broadcasting | Mode::Watching);
+            // The dot breathes only while live; a `Starting` track stays calm yellow
+            // and `Idle` flat gray, so a steady dot never reads as a running session.
+            let pulsing = snap.broadcast == Mode::Broadcasting || snap.watch == Mode::Watching;
             let dot = if pulsing {
                 base.gamma_multiply(pulse_factor(secs))
             } else {
@@ -145,8 +149,9 @@ impl App {
             };
             ui.spacing_mut().item_spacing.x = 4.0;
             ui.colored_label(dot, "●");
-            ui.colored_label(base, snap.mode.status());
-            if let Some(err) = &snap.error {
+            ui.colored_label(base, snap.status());
+            let err = snap.broadcast_error.as_ref().or(snap.watch_error.as_ref());
+            if let Some(err) = err {
                 ui.colored_label(egui::Color32::from_rgb(220, 90, 90), truncate(err, 60));
             }
         });
@@ -328,13 +333,14 @@ impl App {
         self.copied = expire_copied(self.copied, TOAST);
         self.toast = self.toast.take().filter(|(_, at)| at.elapsed() < TOAST);
 
-        let (mode, refreshing) = {
+        let (broadcast, watch, refreshing) = {
             let g = self.state.lock().unwrap();
-            (g.mode, g.refreshing)
+            (g.broadcast, g.watch, g.refreshing)
         };
+        let any_active = broadcast.active() || watch.active();
         // Pick up any completion notice a background task left (relay refresh or
         // ticket reset) and raise it as a toast. Taken under the same brief lock that
-        // reads mode/refreshing.
+        // reads the modes/refreshing.
         let notice = self.state.lock().unwrap().notice.take();
         if let Some(msg) = notice {
             self.toast = Some((msg, Instant::now()));
@@ -342,8 +348,8 @@ impl App {
         // Persist a ticket minted while idle (via Refresh Relay / Reset Ticket) so the
         // saved "current ticket" survives restarts. Guarded to a real change so we
         // never rewrite config.json every frame. The live broadcast path persists its
-        // own ticket in the broadcast tab, so this only runs when idle.
-        if !mode.active() {
+        // own ticket in the broadcast tab, so this only runs when not broadcasting.
+        if !broadcast.active() {
             let g = self.state.lock().unwrap();
             if let Some(t) = g.ticket.as_ref() {
                 if Some(t) != self.config.broadcast_ticket.as_ref() {
@@ -353,9 +359,9 @@ impl App {
                 }
             }
         }
-        // Repaint while live, while a toast fades, or while a refresh is in flight so
-        // the button re-enables and the new ticket appears without user input.
-        if mode.active() || refreshing || self.copied.is_some() || self.toast.is_some() {
+        // Repaint while either track is live, while a toast fades, or while a refresh
+        // is in flight so controls re-enable and the new ticket appears without input.
+        if any_active || refreshing || self.copied.is_some() || self.toast.is_some() {
             ui.ctx().request_repaint_after(REPAINT);
         }
 
@@ -363,7 +369,7 @@ impl App {
         // player) and persist config. The endpoint and runtime are dropped in
         // `run` after `run_native` returns.
         if ui.ctx().input(|i| i.viewport().close_requested()) {
-            state::stop(&self.state, ui.ctx());
+            state::stop_all(&self.state, ui.ctx());
             self.config.save();
         }
 
@@ -668,7 +674,7 @@ mod tests {
     #[test]
     fn an_active_session_always_repaints() {
         let (mut app, _rt) = test_app();
-        app.state.lock().unwrap().mode = Mode::Broadcasting;
+        app.state.lock().unwrap().broadcast = Mode::Broadcasting;
         assert_awake(settled_repaint_delay(&mut app));
     }
 
@@ -694,7 +700,7 @@ mod tests {
         app.tab = Tab::Broadcast;
         {
             let mut g = app.state.lock().unwrap();
-            g.mode = Mode::Broadcasting;
+            g.broadcast = Mode::Broadcasting;
             // A realistically long ticket: the copy box must elide it so it neither
             // runs off the box nor past the window edge.
             g.ticket = Some("b".repeat(140));
@@ -773,7 +779,7 @@ mod tests {
     /// confound the comparison.
     fn options_interactive_rects(mode: Mode) -> usize {
         let (mut app, _rt) = test_app();
-        app.state.lock().unwrap().mode = mode;
+        app.state.lock().unwrap().broadcast = mode;
         let ctx = egui::Context::default();
         let raw = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
@@ -866,9 +872,16 @@ mod tests {
     /// (disabled button out, hint in). Filtering by the button's height isolates
     /// the button and makes the gating observable.
     fn watch_button_rects(ticket: &str) -> usize {
+        watch_button_rects_with(Mode::Idle, ticket)
+    }
+
+    /// As [`watch_button_rects`], but with the broadcast track forced to `broadcast`.
+    /// Used to prove the Watch action stays live while a broadcast runs.
+    fn watch_button_rects_with(broadcast: Mode, ticket: &str) -> usize {
         let (mut app, _rt) = test_app();
         app.tab = Tab::Watch;
         app.watch_ticket = ticket.to_string();
+        app.state.lock().unwrap().broadcast = broadcast;
         let ctx = egui::Context::default();
         let raw = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
@@ -885,6 +898,23 @@ mod tests {
             .iter()
             .filter(|r| (34.0..=38.0).contains(&r.height()))
             .count()
+    }
+
+    /// The core of the new feature: while broadcasting, the Watch tab's primary
+    /// action stays enabled, so you can watch a stream in the same instance (your
+    /// own broadcast, or a friend's) without stopping the broadcast.
+    #[test]
+    fn watch_button_stays_live_while_broadcasting() {
+        assert_eq!(
+            watch_button_rects_with(Mode::Broadcasting, "abc"),
+            1,
+            "a real ticket keeps the Watch button interactive during a broadcast"
+        );
+        assert_eq!(
+            watch_button_rects_with(Mode::Broadcasting, "   "),
+            0,
+            "a blank ticket still disables it, broadcast or not"
+        );
     }
 
     #[test]
@@ -985,7 +1015,7 @@ mod tests {
         );
         assert_eq!(app.watch_ticket, "not-a-real-ticket", "ticket text untouched");
         assert_eq!(
-            app.state.lock().unwrap().mode,
+            app.state.lock().unwrap().watch,
             Mode::Idle,
             "an invalid ticket surfaces an inline error but never starts"
         );
@@ -1001,7 +1031,7 @@ mod tests {
         let ctx = egui::Context::default();
         frame(&ctx, &mut app, focused_raw(vec![enter_key()]));
         assert_eq!(
-            app.state.lock().unwrap().mode,
+            app.state.lock().unwrap().watch,
             Mode::Idle,
             "Enter on a blank ticket does not start a session"
         );

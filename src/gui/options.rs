@@ -45,8 +45,10 @@ impl App {
 
     /// The two sections of the Options window.
     fn options_content(&mut self, ui: &mut Ui) {
-        // The ticket is reset live, so grey it out while a session is active.
-        let active = super::state::snapshot(&self.state).mode.active();
+        // The ticket is reset live (rebinding the shared endpoint), so grey it out
+        // while either track is live — a running broadcast or watch would be torn
+        // down by a rebind of the endpoint it is using.
+        let active = super::state::snapshot(&self.state).any_active();
         egui::CollapsingHeader::new("Broadcasting")
             .default_open(true)
             .show(ui, |ui| {

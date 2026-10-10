@@ -32,9 +32,9 @@ impl App {
     /// Render the Start Broadcasting tab.
     pub fn broadcast_tab(&mut self, ui: &mut Ui) {
         let snap = state::snapshot(&self.state);
-        let active = snap.mode.active();
-        let broadcasting = snap.mode == Mode::Broadcasting;
-        let starting = snap.mode == Mode::Starting;
+        let active = snap.broadcast.active();
+        let broadcasting = snap.broadcast == Mode::Broadcasting;
+        let starting = snap.broadcast == Mode::Starting;
         // Read window focus up front so the idle start button can autofocus itself
         // on the first focused frame (immutable read; the layout borrows follow).
         let window_focused = ui.input(|i| i.focused);
@@ -186,7 +186,7 @@ impl App {
             }
         }
 
-        if let Some(err) = &snap.error {
+        if let Some(err) = &snap.broadcast_error {
             ui.add_space(6.0);
             ui.colored_label(egui::Color32::from_rgb(220, 90, 90), err);
         }
@@ -217,7 +217,7 @@ impl App {
                 .add_sized([bw, 36.0], egui::Button::new("■  Stop Broadcasting"))
                 .clicked()
             {
-                state::stop(&self.state, ui.ctx());
+                state::stop(&self.state, ui.ctx(), state::Track::Broadcast);
                 self.config.save();
             }
         } else {
@@ -301,7 +301,7 @@ impl App {
         let bind = match parse_bind(&self.config) {
             Ok(bind) => bind,
             Err(e) => {
-                self.state.lock().unwrap().error = Some(e);
+                self.state.lock().unwrap().broadcast_error = Some(e);
                 ctx.request_repaint();
                 return;
             }
@@ -323,7 +323,7 @@ impl App {
         let bind = match parse_bind(&self.config) {
             Ok(bind) => bind,
             Err(e) => {
-                self.state.lock().unwrap().error = Some(e);
+                self.state.lock().unwrap().broadcast_error = Some(e);
                 ctx.request_repaint();
                 return;
             }
@@ -465,7 +465,7 @@ impl App {
         let host = self.config.broadcast_host.trim().to_string();
         let port = self.config.broadcast_port;
         if host.is_empty() {
-            self.state.lock().unwrap().error = Some("enter a WHIP host".into());
+            self.state.lock().unwrap().broadcast_error = Some("enter a WHIP host".into());
             ctx.request_repaint();
             return;
         }
@@ -479,7 +479,7 @@ impl App {
         let bind = match parse_bind(&self.config) {
             Ok(bind) => bind,
             Err(e) => {
-                self.state.lock().unwrap().error = Some(e);
+                self.state.lock().unwrap().broadcast_error = Some(e);
                 ctx.request_repaint();
                 return;
             }
@@ -499,7 +499,7 @@ impl App {
             },
             self.stats_tx.clone(),
         );
-        self.state.lock().unwrap().session = Some(handle);
+        self.state.lock().unwrap().broadcast_session = Some(handle);
     }
 }
 

@@ -45,9 +45,9 @@ impl App {
     /// Render the Watch Stream tab.
     pub fn watch_tab(&mut self, ui: &mut Ui) {
         let snap = state::snapshot(&self.state);
-        let busy = snap.mode.active();
-        let watching = snap.mode == Mode::Watching;
-        let starting = snap.mode == Mode::Starting;
+        let busy = snap.watch.active();
+        let watching = snap.watch == Mode::Watching;
+        let starting = snap.watch == Mode::Starting;
 
         ui.strong("Stream ticket");
 
@@ -144,9 +144,9 @@ impl App {
                     .add(egui::Button::new("■  Stop").min_size(egui::vec2(140.0, 30.0)))
                     .clicked()
                 {
-                    state::stop(&self.state, ui.ctx());
+                    state::stop(&self.state, ui.ctx(), state::Track::Watch);
                 }
-                ui.label(watch_action_label(snap.mode));
+                ui.label(watch_action_label(snap.watch));
             });
         } else {
             // Full-width primary action, matching the Broadcast tab's Start button.
@@ -164,7 +164,7 @@ impl App {
             }
         }
 
-        if let Some(err) = &snap.error {
+        if let Some(err) = &snap.watch_error {
             ui.add_space(6.0);
             ui.colored_label(egui::Color32::from_rgb(220, 90, 90), err);
         }
@@ -177,7 +177,7 @@ impl App {
             Ok(ticket) => ticket,
             Err(e) => {
                 // Inline error, no spawn.
-                self.state.lock().unwrap().error = Some(format!("invalid ticket: {e}"));
+                self.state.lock().unwrap().watch_error = Some(format!("invalid ticket: {e}"));
                 ctx.request_repaint();
                 return;
             }
@@ -210,7 +210,7 @@ impl App {
                 buffer_ms,
             },
         );
-        self.state.lock().unwrap().session = Some(handle);
+        self.state.lock().unwrap().watch_session = Some(handle);
     }
 
     /// Keep the Watch tab's live fields in sync with the config after Options
