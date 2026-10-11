@@ -769,17 +769,28 @@ impl App {
         }
         self.log_panel(ui);
         // A subtle vertical gradient is the central panel's ground: the panel's own
-        // fill is cleared, and the gradient (painted on the background order, behind
-        // the content) is what the eye reads as the window. Slightly lighter at the
-        // top, slightly darker at the bottom, so the surface reads as lit from above
-        // rather than a flat fill.
-        let central = egui::CentralPanel::default()
+        // fill is cleared, and the gradient is what the eye reads as the window.
+        // Slightly lighter at the top, slightly darker at the bottom, so the surface
+        // reads as lit from above rather than a flat fill.
+        egui::CentralPanel::default()
             .frame(
                 egui::Frame::central_panel(ui.style())
                     .fill(egui::Color32::TRANSPARENT)
                     .inner_margin(egui::Margin::symmetric(16, 12)),
             )
             .show(ui, |ui| {
+                // The ground gradient is painted on the *same* layer as the panel
+                // content (via `ui.painter()`) and *before* any content is added, so
+                // it is always behind the content: shapes in one paint list draw in
+                // the order they are added. It must not be painted on a separate
+                // background layer — in egui 0.36 the panel content itself already
+                // lives on the background order (the root UI's layer), so a second
+                // background layer has no guaranteed order relative to the content
+                // and can land on top of it, painting the whole panel blank.
+                // `ui.clip_rect()` is the panel's full visible rect (the frame's
+                // inner margin only insets the layout, not the clip), so the ground
+                // covers the whole panel, margin included.
+                central_gradient(ui.painter(), ui.clip_rect(), 1.0);
                 self.tab_bar(ui);
                 ui.add_space(8.0);
                 // The top of the tab content, so the fade-in overlay covers only the
@@ -790,8 +801,9 @@ impl App {
                     Tab::Broadcast => self.broadcast_tab(ui),
                 }
                 // Fade the new tab's content in after a switch: an overlay matching
-                // the ground, fading out over ~160 ms. A no-op at full alpha, so an
-                // idle window paints nothing extra.
+                // the ground, fading out over ~160 ms. Painted after the content (on
+                // the same layer) so it covers it while fading. A no-op at full
+                // alpha, so an idle window paints nothing extra.
                 if self.tab_fade < 1.0 {
                     let overlay = egui::Rect::from_min_max(
                         egui::pos2(ui.max_rect().min.x, content_top),
@@ -800,13 +812,6 @@ impl App {
                     central_gradient(ui.painter(), overlay, 1.0 - self.tab_fade);
                 }
             });
-        {
-            let painter = ui.ctx().layer_painter(egui::LayerId::new(
-                egui::Order::Background,
-                egui::Id::new("central_panel_gradient"),
-            ));
-            central_gradient(&painter, central.response.rect, 1.0);
-        }
         // Drawn last, on its own foreground layer, so it floats over the panels
         // without taking part in their layout.
         self.toast_overlay(ui);
@@ -919,14 +924,16 @@ fn top_bevel(painter: &egui::Painter, rect: egui::Rect, corner_radius: u8) {
 /// surface lit from above rather than a flat fill. The two endpoints average to
 /// the panel fill, so it is a depth cue, not a recolor.
 ///
-/// Drawn on the background order (behind the panel content) over a *transparent*
-/// panel fill: an opaque fill would sit on the middle order and hide the gradient,
-/// so the panel fill is cleared and the gradient becomes the ground the content
-/// sits on.
+/// The ground gradient is painted with the panel content's own painter, *before*
+/// any content is added, so it sits behind the content on the same paint list. It
+/// must not be painted on a separate background layer: in egui 0.36 the panel
+/// content already lives on the background order (the root UI's layer), so a
+/// second background layer has no guaranteed order relative to the content and
+/// can land on top of it, painting the whole panel blank.
 ///
 /// `alpha` scales the whole gradient's opacity: at 1.0 it is the ground itself; at
-/// a lower value it is the tab fade-in's reveal overlay (painted on the middle
-/// order over the content), which matches the ground so the fade is seamless.
+/// a lower value it is the tab fade-in's reveal overlay (painted after the content,
+/// so it covers it while fading), which matches the ground so the fade is seamless.
 fn central_gradient(painter: &egui::Painter, rect: egui::Rect, alpha: f32) {
     let top = egui::Color32::from_rgb(27, 29, 34).gamma_multiply(alpha);
     let bottom = egui::Color32::from_rgb(21, 23, 27).gamma_multiply(alpha);
@@ -3321,6 +3328,54 @@ mod tests {
         assert_eq!(
             count, 2,
             "soft_glow should paint a 2-layer halo in the given colour"
+        );
+    }
+
+    /// Regression: the central panel's ground gradient must be painted *behind* the
+    /// panel content, not on top of it. The gradient is a 4-vertex, 6-index mesh
+    /// covering the central panel; the panel content (e.g. the tab labels) is text in
+    /// the upper area. If the gradient were painted on a separate background layer
+    /// (whose order relative to the content is not guaranteed in egui 0.36, where the
+    /// panel content already lives on the background order), it could land *after*
+    /// the content in the paint list and cover the whole panel, leaving a blank
+    /// window. Assert the gradient precedes the content so it stays behind it.
+    #[test]
+    fn the_central_panel_gradient_paints_behind_its_content() {
+        let (mut app, _rt) = test_app();
+        app.tab = Tab::Broadcast;
+        let size = egui::vec2(760.0, 560.0);
+        let shapes = render_shapes(&mut app, size);
+        let mut gradient_idx = None;
+        let mut content_idx = None;
+        for (i, s) in shapes.iter().enumerate() {
+            match &s.shape {
+                egui::epaint::Shape::Mesh(m)
+                    if m.vertices.len() == 4 && m.indices.len() == 6 =>
+                {
+                    gradient_idx = Some(i);
+                }
+                // Central panel content lives in the upper area; the status bar is
+                // at the very bottom (y ~ 541). Track the first such shape: the
+                // gradient must precede even that one to be behind all the content.
+                egui::epaint::Shape::Text(t)
+                    if t.pos.y < 500.0 && content_idx.is_none() =>
+                {
+                    content_idx = Some(i);
+                }
+                _ => {}
+            }
+        }
+        let (g, c) = match (gradient_idx, content_idx) {
+            (Some(g), Some(c)) => (g, c),
+            _ => panic!(
+                "expected both the central panel gradient (4-vertex mesh) and its text \
+                 content to be painted"
+            ),
+        };
+        assert!(
+            g < c,
+            "the central panel gradient (index {g}) must be painted before its content \
+             (index {c}) so it sits behind it, not on top of it"
         );
     }
 }
