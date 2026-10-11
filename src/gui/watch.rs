@@ -124,6 +124,17 @@ impl App {
         // `config.last_ticket` at startup and updated on each watch), so no
         // separate history picker is needed.
 
+        // A friendly "where do I get a ticket?" hint below the box while it is
+        // empty, so a first-time viewer knows what to do. The box's own hint text
+        // only says "paste a ticket here", not where one comes from; this fills
+        // that gap. Weak and dim so it reads as a gentle nudge, not a competing
+        // instruction. It recedes on its own once a ticket is pasted (or a
+        // session is up, which always has a non-blank ticket).
+        if self.watch_ticket.trim().is_empty() {
+            ui.add_space(4.0);
+            ui.weak("No ticket yet? Start a broadcast, or ask a friend to share theirs.");
+        }
+
         ui.add_space(8.0);
         // Match the Broadcast tab's "Advanced settings" sizing: a larger (1.3×)
         // proportional font and matching input-box height, so the controls read as

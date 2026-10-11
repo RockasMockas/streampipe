@@ -791,6 +791,11 @@ impl App {
                 // inner margin only insets the layout, not the clip), so the ground
                 // covers the whole panel, margin included.
                 central_gradient(ui.painter(), ui.clip_rect(), 1.0);
+                // A soft ambient "light from above" glow at the top centre, behind the
+                // brand title and tab strip (the same lit-from-above cue as the ground
+                // gradient and the top bevels). Painted before any content, so it sits
+                // behind it on the same paint list.
+                ambient_glow(ui.painter(), ui.clip_rect());
                 self.tab_bar(ui);
                 ui.add_space(8.0);
                 // The top of the tab content, so the fade-in overlay covers only the
@@ -945,6 +950,28 @@ fn central_gradient(painter: &egui::Painter, rect: egui::Rect, alpha: f32) {
     mesh.add_triangle(0, 1, 2);
     mesh.add_triangle(0, 2, 3);
     painter.add(egui::Shape::mesh(mesh));
+}
+
+/// A subtle ambient "light from above" glow at the top centre of the central panel:
+/// a few concentric, semi-transparent circles whose overlap brightens the centre,
+/// so the brand title and tab strip read as lit from above (the same cue as the
+/// ground gradient and the top bevels). Painted on the panel's own painter, *before*
+/// any content is added, so it sits behind the content (the same rule as
+/// [`central_gradient`]). The fill is a slightly lighter shade of the ground at a
+/// very low alpha (not a `gamma_multiply` of a dark colour, which would darken the
+/// top rather than light it): a depth cue, not a recolor.
+fn ambient_glow(painter: &egui::Painter, rect: egui::Rect) {
+    let center = egui::pos2(rect.center().x, rect.top());
+    // A slightly lighter shade of the ground (the ground's top is ~27,29,34), so the
+    // glow reads as light from above rather than a darkening.
+    let color = egui::Color32::from_rgba_unmultiplied(58, 64, 74, 3);
+    // Six concentric circles, each larger than the last, at the same low alpha. The
+    // overlap brightens the centre (where all six coincide) and fades out radially
+    // (where only the outermost reach), so the result reads as a soft radial glow
+    // rather than a set of rings.
+    for radius in [40.0, 65.0, 90.0, 115.0, 140.0, 165.0] {
+        painter.circle_filled(center, radius, color);
+    }
 }
 
 /// A soft halo behind the primary action button: three stacked rounded rects that
@@ -3376,6 +3403,136 @@ mod tests {
             g < c,
             "the central panel gradient (index {g}) must be painted before its content \
              (index {c}) so it sits behind it, not on top of it"
+        );
+    }
+
+    /// The bitrate sparkline carries a subtle peak marker (a small dot at the recent
+    /// peak, with a faint vertical line down to the baseline), so a wobbly stream's
+    /// headroom is visible at a glance (how far the current bitrate is from the
+    /// recent peak). The marker is skipped when the peak is the newest sample (the
+    /// "now" dot already marks that point).
+    #[test]
+    fn the_sparkline_marks_the_recent_peak() {
+        let (mut app, _rt) = test_app();
+        app.tab = Tab::Broadcast;
+        {
+            let mut g = app.state.lock().unwrap();
+            g.broadcast = Mode::Broadcasting;
+            // A peak in the middle (not the newest sample), so the peak marker is drawn.
+            g.video_kbps_history =
+                std::collections::VecDeque::from(vec![100.0, 400.0, 150.0]);
+            g.stats = Some(StreamStats {
+                video_kbps: 150.0,
+                ..Default::default()
+            });
+        }
+        let size = egui::vec2(760.0, 560.0);
+        let shapes = render_shapes(&mut app, size);
+        // The peak marker's dot: a small filled circle at the peak, in a dimmed accent.
+        let peak_dot = shapes.iter().any(|s| match &s.shape {
+            egui::epaint::Shape::Circle(c) => {
+                (c.radius - 1.8).abs() < 0.01
+                    && c.fill == ACCENT.gamma_multiply(0.55)
+                    && c.stroke.width == 0.0
+            }
+            _ => false,
+        });
+        assert!(peak_dot, "the sparkline should paint its peak marker's dot");
+        // The peak marker's faint vertical line: a 1.0 px vline in a dimmed accent.
+        let peak_line = shapes.iter().any(|s| match &s.shape {
+            egui::epaint::Shape::LineSegment { points, stroke } => {
+                (points[0].x - points[1].x).abs() < 0.5
+                    && (stroke.width - 1.0).abs() < 0.01
+                    && stroke.color == ACCENT.gamma_multiply(0.18)
+            }
+            _ => false,
+        });
+        assert!(
+            peak_line,
+            "the sparkline should paint its peak marker's vertical line"
+        );
+
+        // Peak at the newest sample: the peak marker is skipped (the "now" dot marks it).
+        let (mut app, _rt) = test_app();
+        app.tab = Tab::Broadcast;
+        {
+            let mut g = app.state.lock().unwrap();
+            g.broadcast = Mode::Broadcasting;
+            // The newest sample is the peak, so the peak marker is skipped.
+            g.video_kbps_history =
+                std::collections::VecDeque::from(vec![100.0, 150.0, 400.0]);
+            g.stats = Some(StreamStats {
+                video_kbps: 400.0,
+                ..Default::default()
+            });
+        }
+        let shapes = render_shapes(&mut app, size);
+        let peak_dot = shapes.iter().any(|s| match &s.shape {
+            egui::epaint::Shape::Circle(c) => {
+                (c.radius - 1.8).abs() < 0.01
+                    && c.fill == ACCENT.gamma_multiply(0.55)
+                    && c.stroke.width == 0.0
+            }
+            _ => false,
+        });
+        assert!(
+            !peak_dot,
+            "the peak marker is skipped when the peak is the newest sample"
+        );
+    }
+
+    /// The central panel paints a subtle ambient "light from above" glow at the top
+    /// centre: six concentric circles at a very low alpha, so the brand title and tab
+    /// strip read as lit from above (the same cue as the ground gradient and the top
+    /// bevels).
+    #[test]
+    fn the_central_panel_paints_an_ambient_light_glow() {
+        let (mut app, _rt) = test_app();
+        let size = egui::vec2(760.0, 560.0);
+        let shapes = render_shapes(&mut app, size);
+        let glow_color = egui::Color32::from_rgba_unmultiplied(58, 64, 74, 3);
+        let count = shapes
+            .iter()
+            .filter(|s| match &s.shape {
+                egui::epaint::Shape::Circle(c) => {
+                    c.fill == glow_color && c.stroke.width == 0.0
+                }
+                _ => false,
+            })
+            .count();
+        assert_eq!(
+            count, 6,
+            "the central panel should paint its 6-circle ambient glow"
+        );
+    }
+
+    /// The Watch tab shows a friendly "where do I get a ticket?" hint below the box
+    /// while it is empty, so a first-time viewer knows what to do. The hint recedes
+    /// once a ticket is pasted.
+    #[test]
+    fn the_watch_tab_shows_a_ticket_hint_when_empty() {
+        let hint = "No ticket yet? Start a broadcast, or ask a friend to share theirs.";
+        // Empty ticket: the hint is shown.
+        let (mut app, _rt) = test_app();
+        app.tab = Tab::Watch;
+        let size = egui::vec2(760.0, 560.0);
+        let shapes = render_shapes(&mut app, size);
+        assert!(
+            shapes.iter().any(|s| matches!(&s.shape,
+                egui::epaint::Shape::Text(t) if t.galley.text() == hint
+            )),
+            "an empty ticket should show the hint"
+        );
+        // A pasted ticket: the hint recedes.
+        let (mut app, _rt) = test_app();
+        app.tab = Tab::Watch;
+        app.watch_ticket = "a-persisted-ticket".into();
+        let shapes = render_shapes(&mut app, size);
+        assert!(
+            !shapes.iter().any(|s| matches!(&s.shape,
+                egui::epaint::Shape::Text(t) if t.galley.text() == hint
+            )),
+            "a pasted ticket should hide the hint"
         );
     }
 }

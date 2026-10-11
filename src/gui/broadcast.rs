@@ -765,6 +765,27 @@ fn bitrate_sparkline(ui: &mut Ui, samples: &[f64], secs: f32) {
     for w in points.windows(2) {
         ui.painter().line_segment([w[0], w[1]], egui::Stroke::new(1.5, ACCENT));
     }
+    // A subtle peak marker: a faint vertical line from the recent peak down to the
+    // baseline, with a small dot at the peak, so a wobbly stream's headroom is
+    // visible at a glance (how far the current bitrate is from the recent peak).
+    // It is drawn before the "now" dot so the live edge stays on top, and is
+    // skipped when the peak *is* the newest sample (the "now" dot already marks
+    // that point, so a second mark there would only clutter the live edge).
+    if let Some((peak_idx, _)) = samples
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+    {
+        if peak_idx + 1 < samples.len() {
+            let peak = points[peak_idx];
+            ui.painter().vline(
+                peak.x,
+                peak.y..=rect.bottom(),
+                egui::Stroke::new(1.0, ACCENT.gamma_multiply(0.18)),
+            );
+            ui.painter().circle_filled(peak, 1.8, ACCENT.gamma_multiply(0.55));
+        }
+    }
     // A small dot on the newest sample, so "where the stream is right now" has a
     // mark of its own rather than only the line's right edge. A soft sonar pulse
     // around the dot (the same language as the status and viewers dots) makes the
@@ -774,9 +795,11 @@ fn bitrate_sparkline(ui: &mut Ui, samples: &[f64], secs: f32) {
         sonar_pulse(ui.painter(), *last, 3.0, secs, 2.0, ACCENT);
     }
     // The tooltip carries the current value, so a hover reads the number without
-    // leaving the chart.
+    // leaving the chart. The recent peak is included too (the peak marker's value),
+    // so a hover reads both where the stream is now and its recent high.
+    let peak = samples.iter().copied().fold(0.0, f64::max);
     resp.on_hover_text(format!(
-        "video bitrate, last two minutes — now {now:.0} kbit/s"
+        "video bitrate, last two minutes — now {now:.0} kbit/s, peak {peak:.0} kbit/s"
     ));
 }
 
