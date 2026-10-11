@@ -37,6 +37,8 @@ const FLASH: Duration = Duration::from_millis(450);
 const ACCENT: egui::Color32 = egui::Color32::from_rgb(80, 200, 120);
 /// The "watching" accent: the watch status dot and the connecting spinner.
 const WATCH_ACCENT: egui::Color32 = egui::Color32::from_rgb(90, 160, 255);
+/// The "error" red: failed sessions, the stop halo, and the error callout.
+const ERROR: egui::Color32 = egui::Color32::from_rgb(220, 90, 90);
 /// How long the tab content's fade-in takes, so a tab switch fades the new content
 /// in rather than hard-cutting. Short enough to feel instant, long enough to read.
 const TAB_FADE_SECS: f32 = 0.16;
@@ -205,7 +207,7 @@ impl App {
             ui.colored_label(base, snap.status());
             let err = snap.broadcast_error.as_ref().or(snap.watch_error.as_ref());
             if let Some(err) = err {
-                ui.colored_label(egui::Color32::from_rgb(220, 90, 90), truncate(err, 60));
+                ui.colored_label(ERROR, truncate(err, 60));
             }
         });
     }
@@ -435,16 +437,37 @@ impl App {
         egui::Panel::bottom("log")
             .exact_size(h)
             .show(ui, |ui| {
+                // A slim header: the panel's name and a close button, so the panel
+                // can be dismissed without knowing the Ctrl/Cmd+L shortcut. The
+                // close is the same toggle as the shortcut, so the height tween
+                // slides the panel shut either way.
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Log").weak());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if close_button(ui) {
+                            self.log_open = false;
+                            ui.ctx().request_repaint();
+                        }
+                    });
+                });
+                ui.separator();
                 let lines = log::snapshot(&self.log);
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .stick_to_bottom(true)
                     .show(ui, |ui| {
+                        let default = ui.style().visuals.text_color();
                         if lines.is_empty() {
                             ui.weak("no log output yet");
                         }
                         for line in lines {
-                            ui.label(egui::RichText::new(line).monospace().size(12.0));
+                            let color = log_line_color(&line, default);
+                            ui.label(
+                                egui::RichText::new(line)
+                                    .monospace()
+                                    .size(12.0)
+                                    .color(color),
+                            );
                         }
                     });
             });
@@ -919,6 +942,86 @@ fn section_tick(ui: &mut Ui, text: &str, color: egui::Color32) {
             .rect_filled(bar.translate(egui::vec2(0.0, 2.0)), egui::CornerRadius::same(1), color);
         ui.label(egui::RichText::new(text).strong());
     });
+}
+
+/// A soft error callout: a muted red-tinted rounded surface with a red left bar
+/// (the section-tick's language, in the error hue) and the message in the error
+/// red, so a failure reads as a deliberate surface rather than a stray line of
+/// text. The tint is dark enough to recede against the ground; the bar and the
+/// text carry the signal. Long messages wrap within the surface.
+fn error_callout(ui: &mut Ui, text: &str) {
+    let frame = egui::Frame::group(ui.style())
+        .fill(ERROR.gamma_multiply(0.12))
+        .stroke(egui::Stroke::new(1.0, ERROR.gamma_multiply(0.35)))
+        .inner_margin(egui::Margin::symmetric(10, 8));
+    let inner = frame.show(ui, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            // The left bar, centred on the first line's text (the same nudge as
+            // [`section_tick`], which it mirrors in the error hue).
+            let (bar, _) = ui.allocate_exact_size(egui::vec2(3.0, 14.0), egui::Sense::hover());
+            ui.painter().rect_filled(
+                bar.translate(egui::vec2(0.0, 1.0)),
+                egui::CornerRadius::same(1),
+                ERROR,
+            );
+            ui.label(egui::RichText::new(text).color(ERROR));
+        });
+    });
+    // The same light catch the copy boxes and stats panel carry, so the callout
+    // reads as a surface lit from above like the rest of the app.
+    top_bevel(ui.painter(), inner.response.rect, frame.corner_radius.nw);
+}
+
+/// The display colour of a log line, by its level: tracing's default format is
+/// `LEVEL target: message`, so the level is the line's first word. Errors read in
+/// the app's error red, warnings in a muted amber, debug and trace recede to a dim
+/// grey, and everything else (info, and lines without a level prefix) takes the
+/// normal text colour.
+fn log_line_color(line: &str, default: egui::Color32) -> egui::Color32 {
+    match line.split_whitespace().next() {
+        Some("ERROR") => ERROR,
+        Some("WARN") => egui::Color32::from_rgb(214, 178, 94),
+        Some("DEBUG") | Some("TRACE") => egui::Color32::from_rgb(122, 126, 132),
+        _ => default,
+    }
+}
+
+/// A small hand-painted "×" for the log panel's header: two crossing strokes in a
+/// dim grey that brightens on hover, so the panel can be dismissed without knowing
+/// the Ctrl/Cmd+L shortcut. Hand-painted (rather than a text button) so it does not
+/// depend on a glyph the bundled faces may not carry — the same reason the copy
+/// box's glyph is drawn by hand.
+fn close_button(ui: &mut Ui) -> bool {
+    let size = 16.0;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
+    let hovered = resp.hovered();
+    if hovered {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let color = if hovered {
+        egui::Color32::from_rgb(200, 200, 205)
+    } else {
+        egui::Color32::from_rgb(130, 133, 140)
+    };
+    // A 4 px inset keeps the strokes inside the slot; two diagonals cross at the
+    // slot's centre.
+    let m = 4.0;
+    ui.painter().line_segment(
+        [
+            egui::pos2(rect.min.x + m, rect.min.y + m),
+            egui::pos2(rect.max.x - m, rect.max.y - m),
+        ],
+        egui::Stroke::new(1.5, color),
+    );
+    ui.painter().line_segment(
+        [
+            egui::pos2(rect.min.x + m, rect.max.y - m),
+            egui::pos2(rect.max.x - m, rect.min.y + m),
+        ],
+        egui::Stroke::new(1.5, color),
+    );
+    resp.clicked()
 }
 
 /// One step of the tab underline's exponential ease: `current` moves toward
@@ -2297,4 +2400,189 @@ mod tests {
             "the Save button should paint a 3-layer accent halo"
         );
     }
+
+    /// Log lines are coloured by their level prefix (tracing's `LEVEL target:
+    /// message` format): errors in the app's error red, warnings in a muted amber,
+    /// debug and trace receded to a dim grey, and everything else (info, and lines
+    /// without a level prefix) in the normal text colour.
+    #[test]
+    fn log_line_color_maps_levels_to_their_colours() {
+        let default = egui::Color32::from_rgb(200, 200, 200);
+        let amber = egui::Color32::from_rgb(214, 178, 94);
+        let dim = egui::Color32::from_rgb(122, 126, 132);
+        assert_eq!(
+            log_line_color("ERROR streampipe::whip: bind failed", default),
+            ERROR
+        );
+        assert_eq!(
+            log_line_color("WARN streampipe::udp: dropping datagram", default),
+            amber
+        );
+        assert_eq!(
+            log_line_color("DEBUG streampipe::rtp: reordering", default),
+            dim
+        );
+        assert_eq!(
+            log_line_color("TRACE streampipe::rtp: packet", default),
+            dim
+        );
+        assert_eq!(
+            log_line_color("INFO streampipe::state: endpoint online", default),
+            default
+        );
+        assert_eq!(
+            log_line_color("a manual line without a level", default),
+            default
+        );
+        assert_eq!(log_line_color("", default), default);
+    }
+
+    /// The error callout paints a muted red-tinted surface with a red left bar
+    /// (the section-tick's language in the error hue) and the message in the error
+    /// red, so a failure reads as a deliberate surface rather than a stray line of
+    /// text.
+    #[test]
+    fn the_error_callout_paints_a_tinted_surface_with_a_red_bar() {
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(300.0, 60.0),
+            )),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(raw, |ui| {
+            error_callout(ui, "invalid ticket: bad base64");
+        });
+        out.textures_delta.clear();
+        // The tinted surface: a filled rect in the muted red tint.
+        let tint = ERROR.gamma_multiply(0.12);
+        assert!(
+            out.shapes
+                .iter()
+                .any(|s| matches!(&s.shape, egui::epaint::Shape::Rect(r) if r.fill == tint)),
+            "the callout should paint its muted red-tinted surface"
+        );
+        // The left bar: a small filled rect in the full error red.
+        let bar = out
+            .shapes
+            .iter()
+            .any(|s| matches!(&s.shape,
+                egui::epaint::Shape::Rect(r)
+                    if r.fill == ERROR && r.rect.width() < 6.0 && r.rect.height() < 16.0
+            ));
+        assert!(bar, "the callout should paint its red left bar");
+        // The message, laid out in the error red.
+        let msg = out
+            .shapes
+            .iter()
+            .find(|s| matches!(&s.shape,
+                egui::epaint::Shape::Text(t) if t.galley.text() == "invalid ticket: bad base64"
+            ))
+            .expect("the callout should paint its message");
+        let color = match &msg.shape {
+            egui::epaint::Shape::Text(t) => {
+                t.galley.job.sections.first().map(|sec| sec.format.color)
+            }
+            _ => None,
+        };
+        assert_eq!(color, Some(ERROR), "the message should be the error red");
+    }
+
+    /// The log panel's header carries a close button (two crossing 1.5 px strokes),
+    /// and clicking it closes the panel — the same toggle as Ctrl/Cmd+L, so the
+    /// panel can be dismissed without knowing the shortcut.
+    #[test]
+    fn the_log_panel_close_button_closes_the_panel() {
+        let (mut app, _rt) = test_app();
+        app.log_open = true;
+        // Fully open: the height tween runs on the wall clock, which barely advances
+        // between headless passes, so the tween is pinned at its open target.
+        app.log_anim = 1.0;
+        let size = egui::vec2(760.0, 560.0);
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                size,
+            )),
+            ..Default::default()
+        };
+        // Render once to locate the close button: on an idle app the only 1.5 px
+        // line segments are its two crossing strokes (the hairlines, bevels and
+        // separators are all 1.0, and the sparkline and spinner are not drawn
+        // while idle).
+        let mut out = ctx.run_ui(raw.clone(), |ui| app.draw(ui));
+        out.textures_delta.clear();
+        let segs: Vec<[egui::Pos2; 2]> = out
+            .shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::epaint::Shape::LineSegment { points, stroke }
+                    if (stroke.width - 1.5).abs() < 0.01 =>
+                {
+                    Some(*points)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(2, segs.len(), "the close button paints two crossing strokes");
+        let min_x = segs
+            .iter()
+            .flat_map(|p| [p[0].x, p[1].x])
+            .fold(f32::INFINITY, f32::min);
+        let max_x = segs
+            .iter()
+            .flat_map(|p| [p[0].x, p[1].x])
+            .fold(f32::NEG_INFINITY, f32::max);
+        let min_y = segs
+            .iter()
+            .flat_map(|p| [p[0].y, p[1].y])
+            .fold(f32::INFINITY, f32::min);
+        let max_y = segs
+            .iter()
+            .flat_map(|p| [p[0].y, p[1].y])
+            .fold(f32::NEG_INFINITY, f32::max);
+        let center = egui::pos2((min_x + max_x) / 2.0, (min_y + max_y) / 2.0);
+
+        // Press over the button, then release: a click.
+        let press = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                size,
+            )),
+            events: vec![
+                egui::Event::PointerMoved(center),
+                egui::Event::PointerButton {
+                    button: egui::PointerButton::Primary,
+                    pos: center,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(press, |ui| app.draw(ui));
+        out.textures_delta.clear();
+        let release = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                size,
+            )),
+            events: vec![egui::Event::PointerButton {
+                button: egui::PointerButton::Primary,
+                pos: center,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(release, |ui| app.draw(ui));
+        out.textures_delta.clear();
+        assert!(
+            !app.log_open,
+            "clicking the close button must close the log panel"
+        );
+    }
 }
+

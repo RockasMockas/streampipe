@@ -8,7 +8,8 @@ use eframe::egui::{self, Context, Ui};
 use super::{
     config::{player_key, PLAYERS},
     state::{self, Mode, WatchParams},
-    App, ACCENT, WATCH_ACCENT, pointer_over, primary_button_glow, section_tick, spinner,
+    App, ACCENT, ERROR, WATCH_ACCENT, error_callout, pointer_over, primary_button_glow,
+    section_tick, spinner,
 };
 
 /// Parse a buffer field (milliseconds) into an option; blank or invalid is
@@ -145,12 +146,7 @@ impl App {
                 let stop_rect =
                     egui::Rect::from_min_size(ui.cursor().min, egui::vec2(140.0, 30.0));
                 let hovered = pointer_over(ui, stop_rect);
-                primary_button_glow(
-                    ui.painter(),
-                    stop_rect,
-                    egui::Color32::from_rgb(220, 90, 90),
-                    hovered,
-                );
+                primary_button_glow(ui.painter(), stop_rect, ERROR, hovered);
                 if ui
                     .add(egui::Button::new("■  Stop").min_size(egui::vec2(140.0, 30.0)))
                     .clicked()
@@ -197,7 +193,7 @@ impl App {
 
         if let Some(err) = &snap.watch_error {
             ui.add_space(6.0);
-            ui.colored_label(egui::Color32::from_rgb(220, 90, 90), err);
+            error_callout(ui, err);
         }
     }
 

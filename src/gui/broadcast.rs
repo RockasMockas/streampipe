@@ -13,8 +13,8 @@ use super::{
     config::Config,
     flash_alpha,
     state::{self, BindAddrs, BroadcastParams, Mode},
-    App, ACCENT, FLASH, pointer_over, primary_button_glow, section_tick, sonar_pulse, spinner,
-    stat_ease, top_bevel,
+    App, ACCENT, ERROR, FLASH, error_callout, pointer_over, primary_button_glow, section_tick,
+    sonar_pulse, spinner, stat_ease, top_bevel,
 };
 
 /// Horizontal room kept clear at the right edge of a copy box for the copy glyph,
@@ -189,7 +189,7 @@ impl App {
 
         if let Some(err) = &snap.broadcast_error {
             ui.add_space(6.0);
-            ui.colored_label(egui::Color32::from_rgb(220, 90, 90), err);
+            error_callout(ui, err);
         }
 
         // The primary action is pinned to the bottom of the tab, full width, so it
@@ -231,12 +231,7 @@ impl App {
             // red the tab uses for errors).
             let stop_rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(bw, 36.0));
             let hovered = pointer_over(ui, stop_rect);
-            primary_button_glow(
-                ui.painter(),
-                stop_rect,
-                egui::Color32::from_rgb(220, 90, 90),
-                hovered,
-            );
+            primary_button_glow(ui.painter(), stop_rect, ERROR, hovered);
             if ui
                 .add_sized([bw, 36.0], egui::Button::new("■  Stop Broadcasting"))
                 .clicked()
@@ -663,9 +658,10 @@ fn sparkline_points(samples: &[f64], rect: egui::Rect) -> Vec<egui::Pos2> {
         .collect()
 }
 
-/// A small video-bitrate sparkline for the statistics panel: a soft accent
-/// area fill under a 1.5 px line. Purely decorative of data the panel already
-/// shows as a number, so it is non-interactive apart from a hover tooltip.
+/// A small video-bitrate sparkline for the statistics panel: a vertical
+/// gradient area fill under a 1.5 px line, with a small "now" dot on the newest
+/// sample. Purely decorative of data the panel already shows as a number, so it
+/// is non-interactive apart from a hover tooltip.
 fn bitrate_sparkline(ui: &mut Ui, samples: &[f64]) {
     let width = ui.available_width();
     let height = 26.0;
@@ -674,14 +670,21 @@ fn bitrate_sparkline(ui: &mut Ui, samples: &[f64]) {
         return;
     }
     let points = sparkline_points(samples, rect);
-    // Soft area fill under the line: a triangle fan from the bottom edge.
-    let fill = ACCENT.gamma_multiply(0.10);
+    // Area fill under the line: a triangle fan from the bottom edge whose alpha
+    // is a function of height — strongest just below the line, fading to nothing
+    // at the bottom edge. A colour that is linear in y interpolates exactly across
+    // each triangle, so the gradient is smooth. The same "lit from above" cue as
+    // the panel ground and the top bevels.
+    let fill = |y: f32| {
+        let t = ((rect.max.y - y) / rect.height()).clamp(0.0, 1.0);
+        ACCENT.gamma_multiply(0.22 * t)
+    };
     let mut mesh = egui::epaint::Mesh::default();
-    mesh.colored_vertex(egui::pos2(rect.left(), rect.bottom()), fill);
-    mesh.colored_vertex(egui::pos2(rect.right(), rect.bottom()), fill);
+    mesh.colored_vertex(egui::pos2(rect.left(), rect.bottom()), fill(rect.bottom()));
+    mesh.colored_vertex(egui::pos2(rect.right(), rect.bottom()), fill(rect.bottom()));
     for (i, &p) in points.iter().enumerate() {
         let v = 2 + i as u32;
-        mesh.colored_vertex(p, fill);
+        mesh.colored_vertex(p, fill(p.y));
         if i + 1 < points.len() {
             mesh.add_triangle(0, v, v + 1);
         }
@@ -691,7 +694,17 @@ fn bitrate_sparkline(ui: &mut Ui, samples: &[f64]) {
     for w in points.windows(2) {
         ui.painter().line_segment([w[0], w[1]], egui::Stroke::new(1.5, ACCENT));
     }
-    resp.on_hover_text("video bitrate, last two minutes");
+    // A small dot on the newest sample, so "where the stream is right now" has a
+    // mark of its own rather than only the line's right edge.
+    if let Some(last) = points.last() {
+        ui.painter().circle_filled(*last, 2.5, ACCENT);
+    }
+    // The tooltip carries the current value, so a hover reads the number without
+    // leaving the chart.
+    let now = samples.last().copied().unwrap_or(0.0);
+    resp.on_hover_text(format!(
+        "video bitrate, last two minutes — now {now:.0} kbit/s"
+    ));
 }
 
 /// Middle-elide a monospace string so its rendered width fits `max_width`: the
@@ -886,5 +899,58 @@ mod tests {
             "a 20 kbit/s stream must not scale to the full height, got y={}",
             quiet[1].y
         );
+    }
+
+    /// The sparkline's area fill is a vertical gradient (the bottom-edge vertices
+    /// are fully transparent, the line vertices carry the accent's alpha, so the
+    /// fill reads as lit from the line down to nothing), and the newest sample
+    /// carries a small filled "now" dot.
+    #[test]
+    fn the_sparkline_fills_with_a_vertical_gradient_and_marks_the_now_point() {
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(300.0, 60.0),
+            )),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(raw, |ui| {
+            bitrate_sparkline(ui, &[60.0, 120.0, 60.0]);
+        });
+        out.textures_delta.clear();
+
+        // The area fill: one mesh; its two bottom-edge vertices are transparent,
+        // and the line vertices are more opaque the higher they sit — the gradient.
+        let mesh = out
+            .shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                egui::epaint::Shape::Mesh(m) => Some(m.as_ref()),
+                _ => None,
+            })
+            .expect("the sparkline paints its area mesh");
+        let bottom = &mesh.vertices[0];
+        assert_eq!(bottom.color.a(), 0, "the fill fades to nothing at the bottom edge");
+        let line_vertex = &mesh.vertices[2];
+        assert!(
+            line_vertex.color.a() > bottom.color.a(),
+            "the fill must be strongest near the line, got a={}",
+            line_vertex.color.a()
+        );
+        assert!(
+            line_vertex.color.a() < 255,
+            "the fill stays a soft tint, not an opaque block"
+        );
+
+        // The "now" dot: a small filled circle (a stroked ring would have a width).
+        let dot = out
+            .shapes
+            .iter()
+            .any(|s| matches!(&s.shape,
+                egui::epaint::Shape::Circle(c)
+                    if c.stroke.width == 0.0 && (2.0..3.0).contains(&c.radius) && c.fill.a() > 0
+            ));
+        assert!(dot, "the newest sample should carry a filled 'now' dot");
     }
 }
