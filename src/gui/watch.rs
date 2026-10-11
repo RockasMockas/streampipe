@@ -204,12 +204,25 @@ impl App {
                 .step_by(1.0)
                 .show_value(false);
             let resp = ui.add_enabled_ui(!busy, |ui| ui.add(slider));
-            resp.inner.on_hover_text(
+            let slider = resp.inner.on_hover_text(
                 "where the player window starts: mpv gets --volume=N, VLC --gain=N/100 \
                  (VLC 3 has no --volume), ffplay -volume N-20: its scale is louder per \
                  point than the other two, so it starts 20 points lower and all three \
                  sound about the same for one setting.",
             );
+            // Persist the setting as soon as the gesture lands: `drag_stopped` is the
+            // release at the end of a drag, `changed && !dragged` is a click-jump on
+            // the track or an arrow key. So the app reopens at the last volume the
+            // user set, not merely the last one they pressed Watch with. Guarded to a
+            // real change: dragging back to the same number writes nothing, and the
+            // guard keeps the disk out of the per-frame path.
+            if slider.drag_stopped() || (slider.changed() && !slider.dragged()) {
+                let volume = self.watch_volume.min(100);
+                if self.config.volume != volume {
+                    self.config.volume = volume;
+                    self.config.save();
+                }
+            }
         });
 
         if let Some(path) = self.config.player_paths.get(self.watch_player) {

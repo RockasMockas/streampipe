@@ -1665,12 +1665,18 @@ mod tests {
     use iroh::SecretKey;
 
     use super::*;
+    use super::config::DEFAULT_VOLUME;
 
     /// An `App` wired to throwaway state, plus the runtime it borrows a handle
     /// from (kept alive by the caller).
     fn test_app() -> (App, tokio::runtime::Runtime) {
+        test_app_with(Config::default())
+    }
+
+    /// The same, seeded from an arbitrary config (so a test can check what the app
+    /// restores from disk).
+    fn test_app_with(config: Config) -> (App, tokio::runtime::Runtime) {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let config = Config::default();
         let whip = state::whip_url(&config.broadcast_host, config.broadcast_port);
         let shared = Arc::new(Mutex::new(SharedState::new(SecretKey::generate(), whip)));
         let (stats_tx, _stats_rx) = mpsc::unbounded_channel();
@@ -1832,6 +1838,44 @@ mod tests {
             track.right() >= size.x - 44.0,
             "the slider should reach the right edge, got {track:?}"
         );
+    }
+
+    /// The volume slider opens at half on a fresh install, and at whatever the user
+    /// last set once it has been persisted.
+    ///
+    /// `App::new` seeds `watch_volume` from the config that was loaded off disk, the
+    /// Watch tab writes it back the moment the slider is released (and again on
+    /// Watch / on close), so the number survives closing and reopening the app.
+    #[test]
+    fn the_volume_slider_opens_at_half_and_reopens_where_it_was_left() {
+        // Fresh install: nothing on disk, so the slider opens at half, not full.
+        let (app, _rt) = test_app();
+        assert_eq!(app.watch_volume, DEFAULT_VOLUME);
+        assert_eq!(app.watch_volume, 50);
+
+        // A config that persisted 37 % seeds the slider at 37 %.
+        let (app, _rt) = test_app_with(Config {
+            volume: 37,
+            ..Config::default()
+        });
+        assert_eq!(app.watch_volume, 37);
+
+        // `sync_watch_from_config` (run after the Settings panel edits the config)
+        // pulls the slider back to the stored value.
+        let (mut app, _rt) = test_app_with(Config {
+            volume: 37,
+            ..Config::default()
+        });
+        app.watch_volume = 80;
+        app.sync_watch_from_config();
+        assert_eq!(app.watch_volume, 37);
+
+        // A hand-edited config above the slider's range is clamped, never wrapped.
+        let (app, _rt) = test_app_with(Config {
+            volume: 200,
+            ..Config::default()
+        });
+        assert_eq!(app.watch_volume, 100);
     }
 
     /// Render the live broadcast tab with viewers at the minimum window size, to

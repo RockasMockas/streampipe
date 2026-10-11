@@ -23,9 +23,14 @@ const APP_DIR: &str = "streampipe";
 /// The config file name inside [`APP_DIR`].
 const CONFIG_FILE: &str = "config.json";
 
-/// The initial player volume the app starts with: full volume, which is also
-/// "change nothing" for every player (all of them default to 100 %).
-pub const DEFAULT_VOLUME: u8 = 100;
+/// The initial player volume the app starts with when nothing was saved yet:
+/// half volume.
+///
+/// Only the first run (or a config written before this setting existed) uses it.
+/// Every value the user sets on the Watch tab is persisted, so from the second
+/// launch on the slider reopens where they left it; this is the fallback, and a
+/// mid-scale start is a friendlier one than full volume on a shared machine.
+pub const DEFAULT_VOLUME: u8 = 50;
 
 /// The players the GUI offers, in dropdown order.
 pub const PLAYERS: [Player; 4] = [Player::Mpv, Player::Vlc, Player::Ffplay, Player::None];
@@ -300,6 +305,11 @@ fn tmp_path(path: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
+    /// Serializes the tests that redirect `$XDG_CONFIG_HOME`: it is a process-wide
+    /// variable, so two of them setting it at once would read each other's config
+    /// dir and make the assertions flicker.
+    static CONFIG_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn defaults_match_acceptance() {
         let cfg = Config::default();
@@ -308,6 +318,10 @@ mod tests {
         assert_eq!(cfg.default_player(), Player::Mpv);
         assert!(cfg.last_ticket.is_empty());
         assert!(cfg.secret_hex.is_none());
+        // The volume starts at half, not full: a mid-scale default is what a fresh
+        // install opens with, and the last value set is persisted from then on.
+        assert_eq!(cfg.volume, DEFAULT_VOLUME);
+        assert_eq!(DEFAULT_VOLUME, 50);
     }
 
     #[test]
@@ -316,6 +330,7 @@ mod tests {
             broadcast_port: 9001,
             default_player: "vlc".into(),
             buffer_ms: Some(250),
+            volume: 37,
             ..Config::default()
         };
         cfg.player_paths.mpv = Some("/opt/mpv".into());
@@ -326,11 +341,54 @@ mod tests {
         assert_eq!(back.broadcast_port, 9001);
         assert_eq!(back.default_player(), Player::Vlc);
         assert_eq!(back.buffer_ms, Some(250));
+        assert_eq!(back.volume, 37);
         assert_eq!(back.player_paths.mpv.as_deref(), Some("/opt/mpv"));
         // newest first, deduped
         assert_eq!(back.ticket_history[0], "ticket-b");
         assert_eq!(back.ticket_history[1], "ticket-a");
         assert_eq!(back.last_ticket, "ticket-b");
+    }
+
+    /// The last volume the user set goes to disk and comes back from it.
+    ///
+    /// `Config::save` writes the JSON, `Config::load` reads it, and the app seeds
+    /// the Watch-tab slider from the loaded value (`App::new`), so a value set in
+    /// one process is what the next process shows. A config written before the
+    /// setting existed (or no config at all) opens at the half-volume default.
+    #[test]
+    fn volume_survives_a_restart() {
+        let _guard = CONFIG_ENV.lock().unwrap();
+        // Redirect the config dir into a temp folder so the test never writes to the
+        // real user config.
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", dir.path());
+        let path = config_path();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        // No file yet: the app opens at half volume.
+        assert!(!path.exists());
+        assert_eq!(Config::load().volume, DEFAULT_VOLUME);
+
+        // The user drags to 37 % and the app persists it (Watch tab: on release,
+        // and again on start / on close).
+        let mut cfg = Config::default();
+        cfg.volume = 37;
+        cfg.save();
+        assert!(path.exists(), "the config was written");
+
+        // A fresh process reads it back.
+        let reopened = Config::load();
+        assert_eq!(reopened.volume, 37, "the slider reopens where it was left");
+
+        // An old config without the key still loads, at the default.
+        fs::write(&path, "{}").unwrap();
+        assert_eq!(Config::load().volume, DEFAULT_VOLUME);
+
+        // A hand-edited config naming a louder setting than the slider can show
+        // still loads; `App::new` seeds the slider with `min(100)`, so it is
+        // clamped to full rather than wrapped to a quiet value.
+        fs::write(&path, "{\"volume\":180}").unwrap();
+        assert_eq!(Config::load().volume.min(100), 100);
     }
 
     #[test]
@@ -388,6 +446,7 @@ mod tests {
 
     #[test]
     fn secret_round_trips() {
+        let _guard = CONFIG_ENV.lock().unwrap();
         // Redirect the config dir into a temp folder so the test never writes
         // to the real user config, then confirm the secret is generated once
         // and reused.

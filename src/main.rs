@@ -503,14 +503,14 @@ pub struct ConnectWhipArgs {
     #[clap(long)]
     pub buffer: Option<u64>,
 
-    /// The player's initial volume, in percent (0=mute, 100=full).
+    /// The player's initial volume, in percent (0=mute, 100=full). Defaults to 50.
     ///
     /// Every player can be told where to start, so the launched window opens at
     /// this level: mpv gets `--volume=N`, VLC `--gain=N/100` (VLC 3 dropped its
     /// old `--volume`), ffplay `-volume N-20`. ffplay's scale is louder per point
     /// than the other two, so it starts 20 points below the level you set and all
     /// three land at about the same loudness for one setting.
-    #[clap(long, default_value_t = 100u8, value_parser = clap::value_parser!(u8).range(0..=100))]
+    #[clap(long, default_value_t = 50u8, value_parser = clap::value_parser!(u8).range(0..=100))]
     pub volume: u8,
 
     #[clap(flatten)]
