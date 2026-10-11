@@ -1,3 +1,4 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 //! Command line arguments.
 mod gui;
 mod udp;
@@ -1589,6 +1590,19 @@ fn main() -> Result<()> {
     if std::env::args_os().count() == 1 {
         gui::run();
         return Ok(());
+    }
+
+    // From here on the binary acts as a CLI. On Windows it is built as a
+    // GUI-subsystem application (see the crate attribute above), so the OS
+    // gives it no console. Attach to the parent console to make stdout and
+    // stderr visible when it is run from `cmd.exe` / PowerShell.
+    #[cfg(target_os = "windows")]
+    unsafe {
+        extern "system" {
+            fn AttachConsole(dwProcessId: u32) -> i32;
+        }
+        // ATTACH_PARENT_PROCESS = 0xFFFFFFFF
+        AttachConsole(0xFFFFFFFF);
     }
 
     let args = Args::parse();
