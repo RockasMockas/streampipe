@@ -740,6 +740,16 @@ async fn handle_viewer(accepting: Accepting, tx: mpsc::Sender<ViewerEvent>) -> R
         tokio::spawn(async move {
             // The id of the next fragmented datagram.
             let mut frag_id: u16 = 0;
+            // Pace QUIC datagrams onto the wire: a 300+ KB keyframe would
+            // otherwise burst as a wall of datagrams that overruns the viewer's
+            // OS UDP receive buffer (Linux ~212 KB), dropping QUIC packets before
+            // they ever reach the viewer logic. A token bucket caps a burst to 42 KB
+            // and refills at 8 KB/ms (64 Mbps), spreading a large keyframe over a few
+            // tens of ms while staying well below OS socket ceilings.
+            const BURST_CAP: usize = 42 * 1024;
+            const TOKEN_RATE: usize = 8 * 1024; // bytes per ms (64 Mbps)
+            let mut tokens = BURST_CAP;
+            let mut last_fill = tokio::time::Instant::now();
             while let Some(frame) = frame_rx.recv().await {
                 let (tag, payload) = match frame {
                     Frame::Header(b) => (TAG_SESSION, b),
@@ -750,6 +760,37 @@ async fn handle_viewer(accepting: Accepting, tx: mpsc::Sender<ViewerEvent>) -> R
                 let mut buf = Vec::with_capacity(1 + payload.len());
                 buf.push(tag);
                 buf.extend_from_slice(&payload);
+                // Wait for enough tokens to cover this datagram's bytes.
+                let required = buf.len().min(BURST_CAP);
+                loop {
+                    let now = tokio::time::Instant::now();
+                    let elapsed_micros = now.duration_since(last_fill).as_micros() as u64;
+                    if elapsed_micros >= 100_000 {
+                        // Idle for >= 100ms: snap to full, prevent huge multiplier.
+                        tokens = BURST_CAP;
+                        last_fill = now;
+                    } else {
+                        let added = ((elapsed_micros * (TOKEN_RATE as u64)) / 1000) as usize;
+                        let consumed_micros = (added as u64 * 1000) / (TOKEN_RATE as u64);
+                        // Only credit tokens when enough time elapsed to advance
+                        // last_fill by at least 1us, so fractional time is never
+                        // double-counted across fast loop iterations.
+                        if consumed_micros > 0 {
+                            tokens += added;
+                            if tokens >= BURST_CAP {
+                                tokens = BURST_CAP;
+                                last_fill = now;
+                            } else {
+                                last_fill += std::time::Duration::from_micros(consumed_micros);
+                            }
+                        }
+                    }
+                    if tokens >= required {
+                        tokens -= required;
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
                 // The limit can move with the path MTU estimate, so ask on
                 // every packet rather than once.
                 let max = conn.max_datagram_size().unwrap_or(max);
@@ -1739,15 +1780,17 @@ pub async fn connect_whip(endpoint: Endpoint, cfg: ViewerConfig) -> Result<()> {
             // where FFmpeg ignores -buffer_size, so it is bounded by the OS default
             // SO_RCVBUF (~50-212 KB). When the reorder stage flushes a held burst it
             // can dump >100 KB at once and overrun that socket, dropping packets.
-            // A token bucket caps a burst to 42 KB and refills at 32 KB/ms. The cap
-            // is strictly below the OS default UDP SO_RCVBUF (50 KB macOS, 64 KB
-            // Windows), so a dense flush never overruns the kernel socket and gets its
-            // tail dropped (the "RTP: missed X packets" / decode-error symptom). The
-            // refill rate is high enough that a Windows ~15.6 ms sleep overshoot fully
-            // refills the 42 KB bucket, giving a reliable ~21.5 Mbps ceiling there and
-            // >100 Mbps on Linux/macOS, without clipping accumulated tokens.
+            // A token bucket caps a burst to 42 KB and refills at 8 KB/ms (64 Mbps).
+            // The cap is strictly below the OS default UDP SO_RCVBUF (50 KB macOS, 64
+            // KB Windows), so a dense flush never overruns the kernel socket and gets
+            // its tail dropped (the "RTP: missed X packets" / decode-error symptom). On
+            // Windows a ~15.6 ms sleep overshoot credits ~125 KB, which the bucket caps
+            // at 42 KB, settling into a steady ~21.5 Mbps (42 KB per 15.6 ms) without
+            // clipping throughput. Tokens are only credited once enough time has
+            // elapsed to advance last_fill by >=1us, so fractional time is never
+            // double-counted (which would inflate the rate quadratically).
             const BURST_CAP: usize = 42 * 1024;
-            const TOKEN_RATE: usize = 32 * 1024; // bytes per ms
+            const TOKEN_RATE: usize = 8 * 1024; // bytes per ms (64 Mbps)
             let mut tokens = BURST_CAP;
             let mut last_fill = tokio::time::Instant::now();
             while let Some(msg) = forward_rx.recv().await {
@@ -1762,8 +1805,7 @@ pub async fn connect_whip(endpoint: Endpoint, cfg: ViewerConfig) -> Result<()> {
                         let required = packet.len().min(BURST_CAP);
                         loop {
                             let now = tokio::time::Instant::now();
-                            let elapsed_micros =
-                                now.duration_since(last_fill).as_micros() as u64;
+                            let elapsed_micros = now.duration_since(last_fill).as_micros() as u64;
                             if elapsed_micros >= 100_000 {
                                 // Idle for >= 100ms: snap to full, prevent huge multiplier
                                 tokens = BURST_CAP;
@@ -1771,17 +1813,16 @@ pub async fn connect_whip(endpoint: Endpoint, cfg: ViewerConfig) -> Result<()> {
                             } else {
                                 let added =
                                     ((elapsed_micros * (TOKEN_RATE as u64)) / 1000) as usize;
-                                if added > 0 {
+                                let consumed_micros = (added as u64 * 1000) / (TOKEN_RATE as u64);
+                                // Only credit tokens when enough time elapsed to advance
+                                // last_fill by at least 1us, so fractional time is never
+                                // double-counted across fast loop iterations.
+                                if consumed_micros > 0 {
                                     tokens += added;
                                     if tokens >= BURST_CAP {
                                         tokens = BURST_CAP;
                                         last_fill = now;
                                     } else {
-                                        // Advance last_fill by the exact time these tokens took
-                                        // to accrue, carrying any microsecond remainder in the
-                                        // bank so pacing stays true to TOKEN_RATE.
-                                        let consumed_micros =
-                                            (added as u64 * 1000) / (TOKEN_RATE as u64);
                                         last_fill +=
                                             std::time::Duration::from_micros(consumed_micros);
                                     }
