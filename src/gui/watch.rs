@@ -10,7 +10,7 @@ use super::{
     state::{self, Mode, WatchParams},
     App, ACCENT, ERROR, WATCH_ACCENT, error_callout, pointer_over, pointer_pressed_over,
     primary_button_glow,
-    section_tick, spinner,
+    section_tick, soft_glow, spinner,
 };
 
 /// Parse a buffer field (milliseconds) into an option; blank or invalid is
@@ -58,10 +58,17 @@ impl App {
         let ticket_id = egui::Id::new("watch_ticket_input");
         let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
         let window_focused = ui.input(|i| i.focused);
+        // Whether the ticket box owns keyboard focus (read from the previous
+        // frame), so the frame's stroke and a soft glow can mark it as the active
+        // input — a focus ring the box otherwise lacks (only a blinking caret would
+        // show it). A disabled (busy) box can never be focused, so the ring also
+        // recedes on its own while a session is up.
+        let focused = ui.ctx().memory(|m| m.has_focus(ticket_id));
 
         // A framed surface via the TextEdit's OWN frame (not an outer group, which
         // would double the border and eat width). `return_key(None)` suppresses the
-        // stray newline Enter would otherwise insert into a multiline box.
+        // stray newline Enter would otherwise insert into a multiline box. The
+        // stroke brightens while focused, so the active input reads as lit.
         let textedit = egui::TextEdit::multiline(&mut self.watch_ticket)
             .id(ticket_id)
             .hint_text("Paste stream ticket here to start watching broadcasted stream...")
@@ -69,7 +76,10 @@ impl App {
             .frame(
                 egui::Frame::group(ui.style())
                     .fill(egui::Color32::from_rgba_unmultiplied(80, 200, 120, 14))
-                    .stroke(egui::Stroke::new(1.0, ACCENT.gamma_multiply(0.4)))
+                    .stroke(egui::Stroke::new(
+                        1.0,
+                        ACCENT.gamma_multiply(if focused { 0.75 } else { 0.4 }),
+                    ))
                     .inner_margin(egui::Margin::symmetric(6, 4)),
             );
         let resp = ui
@@ -77,6 +87,15 @@ impl App {
                 ui.add_sized([ui.available_width(), 54.0], textedit)
             })
             .inner;
+        // A soft accent glow around the focused box (the same halo language as the
+        // copy box's hover), so the active input reads as lit by the accent.
+        if focused {
+            soft_glow(
+                ui.painter(),
+                resp.rect,
+                ui.style().visuals.widgets.inactive.corner_radius,
+            );
+        }
 
         // Autofocus the ticket only when it already holds a prefilled ticket, on a
         // window that has keyboard focus, and once per switch. Autofocusing an empty

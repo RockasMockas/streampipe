@@ -15,7 +15,7 @@ use super::{
     state::{self, BindAddrs, BroadcastParams, Mode},
     App, ACCENT, ERROR, FLASH, error_callout, pointer_over, pointer_pressed_over,
     primary_button_glow, section_tick,
-    sonar_pulse, spinner, stat_ease, top_bevel,
+    sonar_pulse, soft_glow, spinner, stat_ease, top_bevel,
 };
 
 /// Horizontal room kept clear at the right edge of a copy box for the copy glyph,
@@ -457,20 +457,33 @@ impl App {
         // but dimmer: the box is a secondary surface, not the hero action). Drawn
         // before the glyph so the glyph sits on top of the glow.
         if hovered {
-            copy_box_glow(ui.painter(), rect, frame.corner_radius);
+            soft_glow(ui.painter(), rect, frame.corner_radius);
         }
         // A small "copy" glyph (two overlapping sheets) at the right edge, painted
         // non-interactively so it never steals the box's click. It brightens on hover
-        // (0.5 -> 0.8) so the "click to copy" affordance reads at a glance, and the
-        // copy flash (0..1) lifts it to full strength the moment the text is copied.
-        let glyph = ACCENT.gamma_multiply((if hovered { 0.8f32 } else { 0.5f32 }).max(flash));
-        for sheet in copy_glyph_rects(rect) {
-            ui.painter().rect_stroke(
-                sheet,
-                1.0,
-                egui::Stroke::new(1.0, glyph),
-                egui::StrokeKind::Inside,
-            );
+        // (0.5 -> 0.8) so the "click to copy" affordance reads at a glance. The moment
+        // the text is copied it cross-fades into a checkmark for the flash's life —
+        // the confirmation right at the point of action, not only in the toast far
+        // below — and fades back to the sheets as the flash fades. `flash` (0..1)
+        // drives both sides: the checkmark's strength and the sheets' dimming.
+        let rest = if hovered { 0.8f32 } else { 0.5f32 };
+        let sheets = rest.max(flash) * (1.0 - flash);
+        if flash > 0.005 {
+            for seg in checkmark_segments(rect) {
+                ui.painter()
+                    .line_segment(seg, egui::Stroke::new(1.5, ACCENT.gamma_multiply(flash)));
+            }
+        }
+        if sheets > 0.005 {
+            let glyph = ACCENT.gamma_multiply(sheets);
+            for sheet in copy_glyph_rects(rect) {
+                ui.painter().rect_stroke(
+                    sheet,
+                    1.0,
+                    egui::Stroke::new(1.0, glyph),
+                    egui::StrokeKind::Inside,
+                );
+            }
         }
         let resp = ui.interact(rect, ui.id().with(("copy", key)), egui::Sense::click());
         if resp.hovered() {
@@ -775,22 +788,6 @@ fn fit_monospace(ui: &Ui, text: &str, max_width: f32) -> String {
     format!("{head_s}…{tail_s}")
 }
 
-/// A soft accent glow around a copy box on hover, so the "click to copy" affordance
-/// reads as lit and alive under the mouse. Two stacked rounded rects fall off from
-/// the box's edge (nearest strongest, farthest faintest), the same halo language as
-/// the hero buttons but dimmer: the copy box is a secondary surface, not the hero
-/// action, so the glow recedes. `corner` matches the box's own corner radius so the
-/// glow hugs the box's rounded outline. Purely decorative: it takes no layout space.
-fn copy_box_glow(
-    painter: &egui::Painter,
-    rect: egui::Rect,
-    corner: egui::CornerRadius,
-) {
-    for (expand, alpha) in [(4.0, 0.03), (2.0, 0.06)] {
-        painter.rect_filled(rect.expand(expand), corner, ACCENT.gamma_multiply(alpha));
-    }
-}
-
 /// The two sheets of the copy glyph, anchored at the right edge of a copy box.
 ///
 /// Returns `[back, front]`: two small overlapping rounded rects, the front offset
@@ -804,6 +801,23 @@ fn copy_glyph_rects(rect: egui::Rect) -> [egui::Rect; 2] {
     let front = egui::Rect::from_center_size(egui::pos2(cx + offset, cy - offset), size);
     let back = egui::Rect::from_center_size(egui::pos2(cx - offset, cy + offset), size);
     [back, front]
+}
+
+/// The two strokes of the checkmark the copy glyph becomes the moment its text is
+/// copied: a short down-stroke into a long up-stroke, centred on the glyph's
+/// position (the same anchor as [`copy_glyph_rects`]), so the confirmation reads as
+/// a "done" mark right at the point of action. Kept inside the box's right gutter,
+/// so it never overflows the value line or the window.
+fn checkmark_segments(rect: egui::Rect) -> [[egui::Pos2; 2]; 2] {
+    let cx = rect.right() - 16.0;
+    let cy = rect.center().y;
+    let a = egui::pos2(cx - 4.0, cy);
+    let b = egui::pos2(cx - 1.0, cy + 3.0);
+    let c = egui::pos2(cx + 4.5, cy - 3.5);
+    [
+        [a, b],
+        [b, c],
+    ]
 }
 
 /// Format a number of seconds as `42s`, `7m13s` or `1h02m03s`.

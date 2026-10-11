@@ -694,8 +694,21 @@ impl App {
         // before the `log` bottom panel, so the log stacks above it. A slightly
         // darker fill and a faint top hairline make it read as a deliberate status
         // bar rather than a strip of the same background as the content above.
+        // The bar's fill is tinted by the live session's accent (green while
+        // broadcasting, blue while watching, warm while a session is coming up),
+        // mirroring the status dot's colour, so the whole bar carries the session's
+        // state at a glance. Idle keeps the plain dark ground.
+        let bar_tint = if broadcast == Mode::Broadcasting {
+            Some(ACCENT)
+        } else if watch == Mode::Watching {
+            Some(WATCH_ACCENT)
+        } else if any_active {
+            Some(egui::Color32::YELLOW)
+        } else {
+            None
+        };
         let bar_frame = egui::Frame::side_top_panel(ui.style())
-            .fill(egui::Color32::from_rgb(19, 21, 25));
+            .fill(status_bar_fill(egui::Color32::from_rgb(19, 21, 25), bar_tint));
         // The frame's top inner margin, so the hairline can sit exactly on the
         // bar's top edge (the boundary with the content above).
         let bar_top_margin = bar_frame.inner_margin.topf();
@@ -930,6 +943,34 @@ fn primary_button_glow(
     for (expand, alpha) in [(6.0, a1), (4.0, a2), (2.0, a3)] {
         painter.rect_filled(rect.expand(expand), corner, color.gamma_multiply(alpha));
     }
+}
+
+/// A soft accent glow around a secondary interactive surface: two stacked rounded
+/// rects that fall off from the edge (nearest strongest, farthest faintest). The
+/// shared halo language for the copy box's hover and the ticket box's focus, so
+/// both read as lit by the accent under the same cue. Dimmer than the hero
+/// buttons' halo: the surfaces it lights are secondary, not the hero action.
+/// Purely decorative: it takes no layout space. `corner` matches the surface's own
+/// corner radius so the glow hugs its rounded outline.
+pub(crate) fn soft_glow(painter: &egui::Painter, rect: egui::Rect, corner: egui::CornerRadius) {
+    for (expand, alpha) in [(4.0, 0.03), (2.0, 0.06)] {
+        painter.rect_filled(rect.expand(expand), corner, ACCENT.gamma_multiply(alpha));
+    }
+}
+
+/// The status bar's fill, tinted by the live session's accent so the bar carries
+/// the session's state at a glance: a green cast while broadcasting, a blue cast
+/// while watching, a warm cast while a session is coming up, and the plain dark
+/// ground when idle. The tint is blended in at a low alpha (6%), so it reads as a
+/// subtle state cue rather than a recolor; when there is no tint the base fill is
+/// returned unchanged, so the bar's resting look is byte-identical to before.
+fn status_bar_fill(base: egui::Color32, tint: Option<egui::Color32>) -> egui::Color32 {
+    let Some(t) = tint else {
+        return base;
+    };
+    let a = 0.06;
+    let mix = |b: u8, t: u8| -> u8 { (b as f32 * (1.0 - a) + t as f32 * a).round() as u8 };
+    egui::Color32::from_rgb(mix(base.r(), t.r()), mix(base.g(), t.g()), mix(base.b(), t.b()))
 }
 
 /// Whether the pointer is over `rect` this frame, for a hand-painted widget's hover
@@ -2821,6 +2862,135 @@ mod tests {
         assert!(
             glyph_count >= 2,
             "hovering the copy box should brighten its copy glyph"
+        );
+    }
+
+    /// While a session is live, the status bar's fill carries a subtle tint of the
+    /// session's accent (green while broadcasting, blue while watching), mirroring
+    /// the status dot, so the bar reads as part of the live session. Idle keeps the
+    /// plain dark ground (byte-identical to before the tint).
+    #[test]
+    fn the_status_bar_tints_with_the_live_session() {
+        let size = egui::vec2(760.0, 560.0);
+        // The status bar's fill: the only opaque, dark, full-width rect at the very
+        // bottom of the window. The Stop/Watch button's fill is a low-alpha accent
+        // tint (alpha < 255), so the opaque + dark filter isolates the bar.
+        let bar_fill = |shapes: &[egui::epaint::ClippedShape]| -> Option<egui::Color32> {
+            shapes.iter().find_map(|s| match &s.shape {
+                egui::epaint::Shape::Rect(r)
+                    if r.rect.width() > 400.0
+                        && r.rect.min.y > size.y - 50.0
+                        && r.fill.a() == 255
+                        && r.fill.r() < 50 =>
+                {
+                    Some(r.fill)
+                }
+                _ => None,
+            })
+        };
+        let idle_fill = egui::Color32::from_rgb(19, 21, 25);
+
+        // Idle: the plain ground, unchanged.
+        let (mut app, _rt) = test_app();
+        assert_eq!(
+            bar_fill(&render_shapes(&mut app, size)),
+            Some(idle_fill),
+            "an idle status bar keeps the plain dark ground"
+        );
+
+        // Broadcasting: a green cast.
+        let (mut app, _rt) = test_app();
+        app.state.lock().unwrap().broadcast = Mode::Broadcasting;
+        let f = bar_fill(&render_shapes(&mut app, size)).expect("the bar paints its fill");
+        assert_ne!(f, idle_fill, "a live session tints the bar");
+        assert!(f.g() > idle_fill.g(), "the broadcast tint is greener, got {f:?}");
+
+        // Watching: a blue cast.
+        let (mut app, _rt) = test_app();
+        app.state.lock().unwrap().watch = Mode::Watching;
+        let f = bar_fill(&render_shapes(&mut app, size)).expect("the bar paints its fill");
+        assert_ne!(f, idle_fill, "a live session tints the bar");
+        assert!(f.b() > idle_fill.b(), "the watch tint is bluer, got {f:?}");
+    }
+
+    /// The moment its text is copied, a copy box's glyph becomes a checkmark (two
+    /// 1.5 px strokes in the full accent) instead of the two sheets, so the
+    /// confirmation lands right at the point of action, not only in the toast far
+    /// below. A box that was not just copied keeps its sheets.
+    #[test]
+    fn the_copy_glyph_becomes_a_checkmark_on_copy() {
+        let (mut app, _rt) = test_app();
+        app.tab = Tab::Broadcast;
+        app.state.lock().unwrap().broadcast = Mode::Broadcasting;
+        let size = egui::vec2(760.0, 560.0);
+        // A checkmark stroke: a 1.5 px line segment in the accent green. The
+        // checkmark is painted at `ACCENT.gamma_multiply(flash)`, and the flash
+        // decays in real time over the render, so the exact shade is not stable —
+        // but the hue always is (the accent's green channel leads), so the hue is
+        // what is checked, not the exact colour.
+        let is_check_stroke = |s: &egui::epaint::ClippedShape| -> bool {
+            matches!(&s.shape, egui::epaint::Shape::LineSegment { stroke, .. }
+                if (stroke.width - 1.5).abs() < 0.01
+                    && stroke.color.g() > stroke.color.r()
+                    && stroke.color.g() > stroke.color.b())
+        };
+
+        // Nothing copied yet: no checkmark strokes (the glyph is two sheets, which
+        // are stroked rects, not line segments).
+        let before = render_shapes(&mut app, size);
+        assert_eq!(
+            before.iter().filter(|s| is_check_stroke(s)).count(),
+            0,
+            "an un-copied box has no checkmark"
+        );
+
+        // Just copied: the flash is live, so the copied box's glyph cross-fades into
+        // a checkmark. Only the copied box (key "whip") morphs; the ticket box keeps
+        // its sheets, so exactly two checkmark strokes appear.
+        app.copied = Some(("whip", Instant::now()));
+        let after = render_shapes(&mut app, size);
+        let check = after.iter().filter(|s| is_check_stroke(s)).count();
+        assert_eq!(
+            check, 2,
+            "the copied box's glyph should be a checkmark (two strokes), got {check}"
+        );
+    }
+
+    /// A focused ticket box paints its focus ring: the frame's stroke brightens to
+    /// the focus shade (and a soft glow is lit), so the active input reads as lit
+    /// rather than relying on a blinking caret alone. A prefilled ticket autofocuses
+    /// on a window-focused frame, so the ring is observable headlessly.
+    #[test]
+    fn the_focused_ticket_box_paints_a_focus_ring() {
+        let (mut app, _rt) = test_app();
+        app.tab = Tab::Watch;
+        app.watch_ticket = "a-persisted-ticket".into();
+        let size = egui::vec2(760.0, 560.0);
+        let focused_raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), size)),
+            focused: true,
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        // Two frames let the autofocus settle (a prefilled ticket grabs focus on a
+        // window-focused frame).
+        for _ in 0..2 {
+            let mut out = ctx.run_ui(focused_raw.clone(), |ui| app.draw(ui));
+            out.textures_delta.clear();
+        }
+        assert!(
+            ctx.memory(|m| m.focused()).is_some(),
+            "a prefilled ticket autofocuses"
+        );
+        // A focused frame paints the box's bright focus stroke.
+        let mut out = ctx.run_ui(focused_raw, |ui| app.draw(ui));
+        out.textures_delta.clear();
+        let focus_stroke = ACCENT.gamma_multiply(0.75);
+        assert!(
+            out.shapes.iter().any(|s| matches!(&s.shape,
+                egui::epaint::Shape::Rect(r) if r.stroke.width > 0.0 && r.stroke.color == focus_stroke
+            )),
+            "the focused ticket box should paint its bright focus stroke"
         );
     }
 }
