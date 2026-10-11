@@ -87,8 +87,26 @@ impl App {
                     }
 
                     ui.add_space(8.0);
+                    ui.label(egui::RichText::new("Bearer token").size(big));
                     let mut token = self.config.bearer_token.clone().unwrap_or_default();
-                    field(ui, "Bearer token", Some("none"), &mut token);
+                    // Mask the secret by default (password dots) so a bearer token is not
+                    // left legible on screen; the eye toggle reveals it in cleartext.
+                    let eye_w = 34.0;
+                    let field_w =
+                        (ui.available_width() - eye_w - ui.spacing().item_spacing.x).max(0.0);
+                    ui.horizontal(|ui| {
+                        ui.add_sized(
+                            [field_w, box_h],
+                            egui::TextEdit::singleline(&mut token)
+                                .font(prop.clone())
+                                .vertical_align(egui::Align::Center)
+                                .password(!self.show_bearer)
+                                .hint_text(egui::RichText::new("none").size(big)),
+                        );
+                        if eye_toggle(ui, self.show_bearer, egui::vec2(eye_w, box_h)) {
+                            self.show_bearer = !self.show_bearer;
+                        }
+                    });
                     if token != self.config.bearer_token.clone().unwrap_or_default() {
                         self.config.bearer_token = if token.trim().is_empty() {
                             None
@@ -998,6 +1016,39 @@ fn format_elapsed(secs: u64) -> String {
     }
 }
 
+/// A small hand-painted eye toggle for the masked bearer-token field: a circle (the
+/// eyeball) with a filled pupil when the secret is shown, and a lid line drawn across
+/// it when masked. Hand-painted (circle + line, no font glyph) so it does not depend
+/// on a symbol the bundled faces may not carry — the same reason the copy glyph, the
+/// close button and the trend arrow are drawn by hand. It brightens on hover so the
+/// toggle reads as a live control. Returns `true` on the frame it is clicked.
+fn eye_toggle(ui: &mut Ui, open: bool, size: egui::Vec2) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let c = rect.center();
+    // Brighten on hover so the toggle reads as a live control.
+    let color = if resp.hovered() {
+        egui::Color32::from_rgb(214, 216, 222)
+    } else {
+        egui::Color32::from_rgb(150, 155, 165)
+    };
+    let stroke = egui::Stroke::new(1.3, color);
+    // The eyeball: a circle centred in the slot.
+    let r = (size.x.min(size.y)) * 0.28;
+    ui.painter().circle_stroke(c, r, stroke);
+    if open {
+        // Open: a filled pupil at the centre.
+        ui.painter().circle_filled(c, r * 0.42, color);
+    } else {
+        // Closed: a lid line drawn straight across the eyeball.
+        ui.painter()
+            .line_segment([egui::pos2(c.x - r, c.y), egui::pos2(c.x + r, c.y)], stroke);
+    }
+    resp.clicked()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1321,5 +1372,49 @@ mod tests {
             avg_segs >= 2,
             "the sparkline should paint a dashed average line (got {avg_segs} segments)"
         );
+    }
+
+    /// The eye toggle paints a circle (the eyeball) always, plus a pupil when open and
+    /// a lid line when closed, so the two states read as distinct.
+    #[test]
+    fn the_eye_toggle_paints_an_open_or_closed_eye() {
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(40.0, 40.0),
+            )),
+            ..Default::default()
+        };
+        let open: Vec<_> = {
+            let mut out =
+                ctx.run_ui(raw.clone(), |ui| { eye_toggle(ui, true, egui::vec2(34.0, 34.0)); });
+            out.textures_delta.clear();
+            out.shapes
+        };
+        let closed: Vec<_> = {
+            let mut out =
+                ctx.run_ui(raw, |ui| { eye_toggle(ui, false, egui::vec2(34.0, 34.0)); });
+            out.textures_delta.clear();
+            out.shapes
+        };
+        // Open: an eye circle stroke + a filled pupil (a circle with fill, no stroke).
+        let open_has_pupil = open.iter().any(|s| match &s.shape {
+            egui::epaint::Shape::Circle(c) => c.stroke.is_empty() && c.fill.a() > 0,
+            _ => false,
+        });
+        assert!(open_has_pupil, "an open eye paints a filled pupil");
+        // Closed: an eye circle stroke + a horizontal lid line, and no filled pupil.
+        let closed_has_lid = closed.iter().any(|s| {
+            matches!(&s.shape,
+                egui::epaint::Shape::LineSegment { points, .. }
+                    if (points[0].y - points[1].y).abs() < 0.01)
+        });
+        let closed_has_pupil = closed.iter().any(|s| match &s.shape {
+            egui::epaint::Shape::Circle(c) => c.stroke.is_empty(),
+            _ => false,
+        });
+        assert!(closed_has_lid, "a closed eye paints a lid line");
+        assert!(!closed_has_pupil, "a closed eye paints no pupil");
     }
 }

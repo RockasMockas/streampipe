@@ -82,6 +82,10 @@ pub struct App {
     show_options: bool,
     /// Whether the bottom log panel is expanded.
     log_open: bool,
+    /// Whether the WHIP bearer token is shown in cleartext on the Broadcast tab's
+    /// Advanced settings. Masked (password dots) by default so a shared secret is not
+    /// left legible on screen; the eye toggle by the field flips it.
+    show_bearer: bool,
     /// The ticket text on the Watch tab.
     watch_ticket: String,
     /// The player selected on the Watch tab.
@@ -167,6 +171,7 @@ impl App {
             tab: Tab::Watch,
             show_options: false,
             log_open: false,
+            show_bearer: false,
             watch_player,
             watch_buffer,
             watch_volume,
