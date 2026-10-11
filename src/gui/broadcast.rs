@@ -710,11 +710,34 @@ fn sparkline_points(samples: &[f64], rect: egui::Rect) -> Vec<egui::Pos2> {
 fn bitrate_sparkline(ui: &mut Ui, samples: &[f64]) {
     let width = ui.available_width();
     let height = 26.0;
+    if samples.len() < 2 || width <= 0.0 {
+        return;
+    }
+    let now = samples.last().copied().unwrap_or(0.0);
+    // A small "now" value, right-aligned above the chart, so the current bitrate is
+    // readable at a glance without hovering (the tooltip keeps the fuller two-minute
+    // context). Weak and monospaced so it reads as a caption, not a competing number.
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.label(
+            egui::RichText::new(format!("now {now:.0} kbit/s"))
+                .monospace()
+                .size(10.0)
+                .weak(),
+        );
+    });
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
-    if samples.len() < 2 || rect.width() <= 0.0 {
+    if rect.width() <= 0.0 {
         return;
     }
     let points = sparkline_points(samples, rect);
+    // A faint baseline along the bottom edge, so the area fill and the line read as
+    // sitting on a ground rather than floating. Dimmer than the line, so it never
+    // competes with the data.
+    ui.painter().hline(
+        rect.left()..=rect.right(),
+        rect.bottom(),
+        egui::Stroke::new(1.0, ACCENT.gamma_multiply(0.25)),
+    );
     // Area fill under the line: a triangle fan from the bottom edge whose alpha
     // is a function of height — strongest just below the line, fading to nothing
     // at the bottom edge. A colour that is linear in y interpolates exactly across
@@ -746,7 +769,6 @@ fn bitrate_sparkline(ui: &mut Ui, samples: &[f64]) {
     }
     // The tooltip carries the current value, so a hover reads the number without
     // leaving the chart.
-    let now = samples.last().copied().unwrap_or(0.0);
     resp.on_hover_text(format!(
         "video bitrate, last two minutes — now {now:.0} kbit/s"
     ));

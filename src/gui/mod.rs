@@ -208,6 +208,15 @@ impl App {
                 sonar_pulse(ui.painter(), dot_resp.rect.center(), 4.0, secs, 2.0, base);
             }
             ui.colored_label(base, snap.status());
+            // A compact "LIVE" badge next to the status label while a session is
+            // live, so the live state reads at a glance rather than only as a small
+            // breathing dot. The badge breathes in the same curve as the dot, so the
+            // two read as one signal. A stroked pill (not a line segment), so it
+            // never disturbs the line-segment-based tests.
+            if pulsing {
+                ui.add_space(2.0);
+                live_badge(ui, base, pulse_factor(secs));
+            }
             let err = snap.broadcast_error.as_ref().or(snap.watch_error.as_ref());
             if let Some(err) = err {
                 ui.colored_label(ERROR, truncate(err, 60));
@@ -488,12 +497,19 @@ impl App {
                                 base.b(),
                                 (base.a() as f32 * alpha) as u8,
                             );
-                            ui.label(
-                                egui::RichText::new(line)
-                                    .monospace()
-                                    .size(12.0)
-                                    .color(color),
-                            );
+                            // A level chip (ERR/WARN) leads the line when one applies,
+                            // so a problem pops out of the wall of grey log text. The
+                            // chip fades in with the line (the same `alpha`).
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 5.0;
+                                log_level_chip(ui, line, alpha);
+                                ui.label(
+                                    egui::RichText::new(line)
+                                        .monospace()
+                                        .size(12.0)
+                                        .color(color),
+                                );
+                            });
                         }
                     });
             });
@@ -1021,6 +1037,40 @@ fn sonar_pulse(
     painter.circle_stroke(center, radius, egui::Stroke::new(1.0, color.gamma_multiply(alpha)));
 }
 
+/// A compact "LIVE" badge for the status bar: a small outlined pill in the session's
+/// accent, so the live state reads at a glance rather than only as a small breathing
+/// dot. `color` is the session's accent (green while broadcasting, blue while
+/// watching) and `breath` (0.6..=1.0) is the same pulse factor that drives the dot,
+/// so the badge and the dot breathe in lockstep. The pill is a stroked rect (not a
+/// line segment) and the text is a laid-out galley, so neither disturbs the
+/// line-segment-based tests. Purely decorative: it takes a hover-sense slot but is
+/// never clicked.
+fn live_badge(ui: &mut Ui, color: egui::Color32, breath: f32) {
+    let font_id = egui::FontId::proportional(10.0);
+    let galley = ui.painter().layout_no_wrap("LIVE".to_string(), font_id, egui::Color32::PLACEHOLDER);
+    let tw = galley.rect.width();
+    let th = galley.rect.height();
+    let pad_x = 5.0;
+    let pad_y = 2.0;
+    let (rect, _resp) = ui.allocate_exact_size(
+        egui::vec2(tw + pad_x * 2.0, th + pad_y * 2.0),
+        egui::Sense::hover(),
+    );
+    // A faint fill and a breathing outline in the session's accent: the outline
+    // carries the signal, the fill keeps it from shouting.
+    let corner = egui::CornerRadius::same(4);
+    ui.painter()
+        .rect_filled(rect, corner, color.gamma_multiply(0.10));
+    ui.painter()
+        .rect_stroke(rect, corner, egui::Stroke::new(1.0, color.gamma_multiply(breath)), egui::StrokeKind::Inside);
+    // Centre the text in the pill.
+    let text_pos = egui::pos2(
+        rect.center().x - tw * 0.5,
+        rect.center().y - th * 0.5,
+    );
+    ui.painter().galley(text_pos, galley, color.gamma_multiply(breath.max(0.8)));
+}
+
 /// A section heading: a small accent-coloured rounded bar to the left of a bold
 /// label, so the label reads as a deliberate section marker rather than a plain
 /// strong label. The bar and label sit in a horizontal row, so the bar sits neatly
@@ -1077,10 +1127,56 @@ fn error_callout(ui: &mut Ui, text: &str) {
 fn log_line_color(line: &str, default: egui::Color32) -> egui::Color32 {
     match line.split_whitespace().next() {
         Some("ERROR") => ERROR,
-        Some("WARN") => egui::Color32::from_rgb(214, 178, 94),
+        Some("WARN") => WARN_AMBER,
         Some("DEBUG") | Some("TRACE") => egui::Color32::from_rgb(122, 126, 132),
         _ => default,
     }
+}
+
+/// The muted amber a `WARN` line is coloured with (shared by [`log_line_color`] and
+/// [`log_level_chip`], so a warning's text and its chip always match).
+const WARN_AMBER: egui::Color32 = egui::Color32::from_rgb(214, 178, 94);
+
+/// A small level chip for a log line: a compact rounded tag in the line's level
+/// colour ("ERR" in the error red, "WARN" in the muted amber), so an error or warning
+/// pops out of a wall of grey log text instead of reading as just another line. INFO
+/// and level-less lines get no chip. `alpha` fades the chip in with the line it tags
+/// (the same fade window the line uses), so the chip and the line appear together.
+/// Returns `true` if a chip was painted. The chip is a stroked rect plus a laid-out
+/// galley (no line segments), so it never disturbs the line-segment-based tests.
+fn log_level_chip(ui: &mut Ui, line: &str, alpha: f32) -> bool {
+    let (text, color) = match line.split_whitespace().next() {
+        Some("ERROR") => ("ERR", ERROR),
+        Some("WARN") => ("WARN", WARN_AMBER),
+        _ => return false,
+    };
+    // A faint fill and a steady outline in the level colour; the text is near-full
+    // strength so the tag is legible. All three scale with `alpha` so the chip fades
+    // in with its line. The text is laid out with its own (non-placeholder) colour,
+    // so the galley carries the chip's hue.
+    let corner = egui::CornerRadius::same(3);
+    let fill = egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), (26.0 * alpha) as u8);
+    let stroke = egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), (120.0 * alpha) as u8);
+    let text_color = egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), (230.0 * alpha) as u8);
+    let font_id = egui::FontId::monospace(10.0);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_string(), font_id, text_color);
+    let pad_x = 4.0;
+    let pad_y = 1.5;
+    let (rect, _resp) = ui.allocate_exact_size(
+        egui::vec2(galley.rect.width() + pad_x * 2.0, galley.rect.height() + pad_y * 2.0),
+        egui::Sense::hover(),
+    );
+    ui.painter().rect_filled(rect, corner, fill);
+    ui.painter()
+        .rect_stroke(rect, corner, egui::Stroke::new(1.0, stroke), egui::StrokeKind::Inside);
+    let text_pos = egui::pos2(
+        rect.center().x - galley.rect.width() * 0.5,
+        rect.center().y - galley.rect.height() * 0.5,
+    );
+    ui.painter().galley(text_pos, galley, text_color);
+    true
 }
 
 /// A small hand-painted "×" for the log panel's header: two crossing strokes in a
@@ -2991,6 +3087,120 @@ mod tests {
                 egui::epaint::Shape::Rect(r) if r.stroke.width > 0.0 && r.stroke.color == focus_stroke
             )),
             "the focused ticket box should paint its bright focus stroke"
+        );
+    }
+
+    /// While a session is live, the status bar carries a compact "LIVE" badge (a
+    /// stroked pill in the session's accent), so the live state reads at a glance
+    /// rather than only as a small breathing dot. While idle, no badge is painted.
+    #[test]
+    fn the_status_bar_paints_a_live_badge_when_live() {
+        let size = egui::vec2(760.0, 560.0);
+        let has_live_badge = |shapes: &[egui::epaint::ClippedShape]| -> bool {
+            shapes
+                .iter()
+                .any(|s| matches!(&s.shape, egui::epaint::Shape::Text(t) if t.galley.text() == "LIVE"))
+        };
+
+        // Live (broadcasting): the badge is painted.
+        let (mut app, _rt) = test_app();
+        app.state.lock().unwrap().broadcast = Mode::Broadcasting;
+        assert!(
+            has_live_badge(&render_shapes(&mut app, size)),
+            "a live broadcast should paint a LIVE badge in the status bar"
+        );
+
+        // Live (watching): the badge is painted too.
+        let (mut app, _rt) = test_app();
+        app.state.lock().unwrap().watch = Mode::Watching;
+        assert!(
+            has_live_badge(&render_shapes(&mut app, size)),
+            "a live watch should paint a LIVE badge in the status bar"
+        );
+
+        // Idle: no badge.
+        let (mut app, _rt) = test_app();
+        assert!(
+            !has_live_badge(&render_shapes(&mut app, size)),
+            "an idle status bar should not paint a LIVE badge"
+        );
+    }
+
+    /// The bitrate sparkline carries a small "now … kbit/s" caption above the chart,
+    /// so the current bitrate is readable at a glance without hovering.
+    #[test]
+    fn the_sparkline_carries_a_now_value_caption() {
+        let (mut app, _rt) = test_app();
+        app.tab = Tab::Broadcast;
+        {
+            let mut g = app.state.lock().unwrap();
+            g.broadcast = Mode::Broadcasting;
+            // Two or more samples so the sparkline (and its caption) is drawn; the
+            // newest sample is the "now" value the caption reads out.
+            g.video_kbps_history = std::collections::VecDeque::from(vec![100.0, 200.0, 150.0]);
+            g.stats = Some(StreamStats {
+                video_kbps: 150.0,
+                ..Default::default()
+            });
+        }
+        let size = egui::vec2(760.0, 560.0);
+        let shapes = render_shapes(&mut app, size);
+        assert!(
+            shapes
+                .iter()
+                .any(|s| matches!(&s.shape, egui::epaint::Shape::Text(t) if t.galley.text() == "now 150 kbit/s")),
+            "the sparkline should paint its 'now' value caption"
+        );
+    }
+
+    /// The log panel leads an error line with a red "ERR" chip and a warning line
+    /// with an amber "WARN" chip, so problems pop out of the wall of grey log text.
+    /// An info line gets no chip. The lines are backdated to fully opaque so the
+    /// chip colours are deterministic.
+    #[test]
+    fn the_log_panel_marks_errors_and_warnings_with_chips() {
+        let (mut app, _rt) = test_app();
+        app.log_open = true;
+        app.log_anim = 1.0;
+        log::push(&app.log, "ERROR streampipe::whip: bind failed");
+        log::push(&app.log, "WARN streampipe::udp: dropping datagram");
+        log::push(&app.log, "INFO streampipe::state: endpoint online");
+        // Backdate every line past the fade window so each is fully opaque (alpha 1),
+        // making the chip colours exact.
+        {
+            let mut ring = app.log.lock().unwrap();
+            for entry in ring.iter_mut() {
+                entry.1 = Instant::now() - Duration::from_secs(5);
+            }
+        }
+        let size = egui::vec2(760.0, 560.0);
+        let shapes = render_shapes(&mut app, size);
+        // A chip's laid-out colour is its galley's first section's format colour.
+        let chip_color = |text: &str| -> Option<egui::Color32> {
+            shapes.iter().find_map(|s| match &s.shape {
+                egui::epaint::Shape::Text(t) if t.galley.text() == text => {
+                    t.galley.job.sections.first().map(|sec| sec.format.color)
+                }
+                _ => None,
+            })
+        };
+        let err_expected = egui::Color32::from_rgba_unmultiplied(ERROR.r(), ERROR.g(), ERROR.b(), 230);
+        let warn_expected =
+            egui::Color32::from_rgba_unmultiplied(WARN_AMBER.r(), WARN_AMBER.g(), WARN_AMBER.b(), 230);
+        assert_eq!(
+            chip_color("ERR"),
+            Some(err_expected),
+            "an error line should carry a red ERR chip"
+        );
+        assert_eq!(
+            chip_color("WARN"),
+            Some(warn_expected),
+            "a warning line should carry an amber WARN chip"
+        );
+        assert_eq!(
+            chip_color("INFO"),
+            None,
+            "an info line should carry no chip"
         );
     }
 }
