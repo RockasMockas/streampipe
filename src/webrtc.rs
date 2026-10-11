@@ -143,10 +143,16 @@ impl Player {
             Player::Mpv => {
                 let mut cmd = vec![
                     bin("mpv"),
+                    // Ignore the user's config so the flags below are the whole
+                    // story: no config-file options can quietly re-add buffering.
+                    "--no-config".to_string(),
                     "--force-window=immediate".to_string(),
                     // A live stream must start at the live edge, never resume a
                     // watched position from a previous run.
                     "--no-resume-playback".to_string(),
+                    // Play as fast as the stream arrives, not on a wall clock, so
+                    // late-started frames are caught up instead of queued.
+                    "--untimed".to_string(),
                 ];
                 match buffer {
                     Some(ms) => {
@@ -2477,6 +2483,8 @@ mod tests {
         let path = Path::new("/tmp/x.sdp");
         let mpv = Player::Mpv.command(path, None, None);
         assert_eq!(mpv[0], "mpv");
+        assert!(mpv.contains(&"--no-config".to_string()));
+        assert!(mpv.contains(&"--untimed".to_string()));
         assert!(mpv.contains(&"--profile=low-latency".to_string()));
         assert!(mpv.contains(&"--no-resume-playback".to_string()));
         assert_eq!(mpv.last().unwrap(), "/tmp/x.sdp");
