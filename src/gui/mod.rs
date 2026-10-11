@@ -79,9 +79,15 @@ pub struct App {
     /// Whether the next window-focused frame should autofocus the active tab's
     /// primary control (the ticket box on Watch, the start button on Broadcast).
     /// Set on open and on every tab switch; cleared the first time a window that
-    /// actually has keyboard focus consumes it, so it never steals focus from a
+    /// that actually has keyboard focus consumes it, so it never steals focus from a
     /// widget the user has already chosen.
     focus_primary: bool,
+    /// The tab underline's slide position: 0.0 = Watch, 1.0 = Broadcast.
+    /// Tweened in [`App::draw`] so a tab switch slides the underline across the
+    /// strip instead of jumping between the two tabs.
+    tab_slide: f32,
+    /// The previous frame's wall clock, for the tab underline tween's frame delta.
+    last_frame: Instant,
 }
 
 impl App {
@@ -114,6 +120,8 @@ impl App {
             toast: None,
             pulse: Instant::now(),
             focus_primary: true,
+            tab_slide: 0.0,
+            last_frame: Instant::now(),
         }
     }
 
@@ -239,14 +247,15 @@ impl App {
         // legible even when the selectable_label background is subtle. A slim,
         // rounded bar inset from each tab edge reads as deliberate rather than a
         // heavy full-width block.
-        let active_rect = if self.tab == Tab::Watch {
-            watch.rect
-        } else {
-            bc.rect
-        };
+        // The underline's position is tweened by [`App::draw`] (`tab_slide`), so a
+        // tab switch slides it across the strip instead of jumping between tabs.
+        // Both tabs are equal width, so only the x range interpolates.
+        let t = self.tab_slide;
+        let x0 = watch.rect.min.x + (bc.rect.min.x - watch.rect.min.x) * t;
+        let x1 = watch.rect.max.x + (bc.rect.max.x - watch.rect.max.x) * t;
         let underline = egui::Rect::from_min_max(
-            egui::pos2(active_rect.min.x + 5.0, active_rect.max.y - 2.0),
-            egui::pos2(active_rect.max.x - 5.0, active_rect.max.y),
+            egui::pos2(x0 + 5.0, watch.rect.max.y - 2.0),
+            egui::pos2(x1 - 5.0, watch.rect.max.y),
         );
         ui.painter().rect_filled(underline, egui::CornerRadius::same(1), ACCENT);
         ui.separator();
@@ -301,12 +310,16 @@ impl App {
         let elapsed = at.elapsed();
         // Fade the whole pill out over its remaining lifetime.
         let alpha = (1.0 - elapsed.as_secs_f32() / TOAST.as_secs_f32()).clamp(0.0, 1.0);
+        // The pill also rises 8 px as it appears: an ease-out over the first 200 ms,
+        // so the confirmation feels placed rather than stamped in place.
+        let enter = (elapsed.as_secs_f32() / 0.2).clamp(0.0, 1.0);
+        let rise = (1.0 - enter * enter) * 8.0;
         let frame = egui::Frame::popup(ui.style())
             .fill(egui::Color32::from_rgb(30, 42, 36).gamma_multiply(alpha))
             .stroke(egui::Stroke::new(1.0, ACCENT.gamma_multiply(alpha)))
             .inner_margin(egui::Margin::symmetric(14, 6));
         egui::Area::new(egui::Id::new("copy_toast"))
-            .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -24.0])
+            .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -24.0 + rise])
             .order(egui::Order::Foreground)
             .interactable(false)
             .show(ui.ctx(), |ui| {
@@ -345,6 +358,18 @@ impl App {
         if let Some(msg) = notice {
             self.toast = Some((msg, Instant::now()));
         }
+        // Slide the tab underline toward the selected tab. The tween runs on wall
+        // clock so it advances at the display's frame rate, and it only ever moves
+        // right after a tab switch (which itself repaints). It stops requesting
+        // frames the moment it settles, so an idle window still falls asleep.
+        let now = Instant::now();
+        let dt = (now - self.last_frame).as_secs_f32().clamp(0.0, 0.1);
+        self.last_frame = now;
+        let target = f32::from(self.tab == Tab::Broadcast);
+        let tab_moving = (self.tab_slide - target).abs() > 0.002;
+        if tab_moving {
+            self.tab_slide = tab_slide_step(self.tab_slide, target, dt);
+        }
         // Persist a ticket minted while idle (via Refresh Relay / Reset Ticket) so the
         // saved "current ticket" survives restarts. Guarded to a real change so we
         // never rewrite config.json every frame. The live broadcast path persists its
@@ -363,6 +388,11 @@ impl App {
         // is in flight so controls re-enable and the new ticket appears without input.
         if any_active || refreshing || self.copied.is_some() || self.toast.is_some() {
             ui.ctx().request_repaint_after(REPAINT);
+        }
+        // The underline slide wants frames at the display rate, not the 250 ms
+        // session cadence, so it gets its own as-soon-as-possible repaint.
+        if tab_moving {
+            ui.ctx().request_repaint();
         }
 
         // On close, abort any live session (frees the WHIP port, kills the
@@ -478,6 +508,22 @@ fn flash_alpha(elapsed: Duration, window: Duration) -> f32 {
         return 0.0;
     }
     (1.0 - elapsed.as_secs_f32() / window.as_secs_f32()).clamp(0.0, 1.0)
+}
+
+/// One step of the tab underline's exponential ease: `current` moves toward
+/// `target` by a fraction of the remaining distance that grows with `dt`
+/// (wall-clock seconds), so the slide's speed is independent of frame rate.
+///
+/// A step never overshoots, and once within `0.002` of the target (about a
+/// pixel at the widest window) it snaps on, so the caller can stop requesting
+/// repaints and an idle window falls asleep again.
+fn tab_slide_step(current: f32, target: f32, dt: f32) -> f32 {
+    let next = current + (target - current) * (1.0 - (-dt * 30.0).exp());
+    if (next - target).abs() <= 0.002 {
+        target
+    } else {
+        next
+    }
 }
 
 /// Install the app's tuned dark theme once, before the first frame.
@@ -859,6 +905,41 @@ mod tests {
                 > flash_alpha(Duration::from_millis(200), FLASH),
             "monotonically decreasing"
         );
+    }
+
+    /// The tab underline's tween approaches its target monotonically, settles
+    /// exactly on it after a realistic number of 60 fps frames (so the repaint
+    /// guard can disarm and an idle window falls asleep), and stays settled.
+    #[test]
+    fn tab_slide_settles_on_the_target_without_overshooting() {
+        // A single 60 fps step moves partway but never past the target.
+        let step = tab_slide_step(0.0, 1.0, 1.0 / 60.0);
+        assert!(step > 0.0 && step < 1.0, "one frame is partway, got {step}");
+
+        // Stepping at 60 fps settles exactly on the target; the slide should take
+        // well under a second of frames, never overshoot, and never stall.
+        let mut pos = 0.0;
+        let mut frames = 0;
+        while pos != 1.0 {
+            pos = tab_slide_step(pos, 1.0, 1.0 / 60.0);
+            frames += 1;
+            assert!(pos <= 1.0, "no overshoot at frame {frames}, got {pos}");
+            assert!(frames < 60, "the slide must settle within 1 s, took {frames} frames");
+        }
+        assert!(
+            frames < 45,
+            "settling took {frames} frames (~{} ms at 60 fps)",
+            frames * 1000 / 60
+        );
+
+        // Settled stays settled: the repaint guard can disarm.
+        assert_eq!(tab_slide_step(1.0, 1.0, 1.0 / 60.0), 1.0);
+        // The reverse direction (Broadcast -> Watch) settles the same way.
+        let mut pos = 1.0;
+        while pos != 0.0 {
+            pos = tab_slide_step(pos, 0.0, 1.0 / 60.0);
+        }
+        assert_eq!(pos, 0.0);
     }
 
     /// Count the interactive rects on the Watch tab that are the size of the

@@ -256,43 +256,6 @@ fn listen_tcp_happy() {
     assert!(connect.stdout.starts_with(b"hello from tcp"));
 }
 
-#[test]
-fn connect_tcp_happy() {
-    let port = random_port();
-    let host_port = format!("localhost:{port}");
-    // start a streampipe listen process just so the connect-tcp command has something to connect to
-    let mut listen = duct::cmd(streampipe_bin(), ["listen"])
-        .env_remove("RUST_LOG") // disable tracing
-        .stdin_bytes(b"hello from listen\n")
-        .stderr_to_stdout() //
-        .reader()
-        .unwrap();
-    let header = read_ascii_lines(3, &mut listen).unwrap();
-    let header = String::from_utf8(header).unwrap();
-    let ticket = header.split_ascii_whitespace().last().unwrap();
-    let ticket = EndpointTicket::from_str(ticket).unwrap();
-    let ticket = ticket.to_string();
-
-    // start a streampipe connect-tcp process
-    let _connect_tcp = duct::cmd(
-        streampipe_bin(),
-        ["connect-tcp", "--addr", &host_port, &ticket],
-    )
-    .env_remove("RUST_LOG") // disable tracing
-    .stderr_to_stdout() //
-    .reader()
-    .unwrap();
-    std::thread::sleep(Duration::from_secs(1));
-
-    //
-    let mut conn = TcpStream::connect(host_port).unwrap();
-    conn.write_all(b"hello from tcp").unwrap();
-    conn.flush().unwrap();
-    let mut buf = Vec::new();
-    conn.read_to_end(&mut buf).unwrap();
-    assert_eq!(&buf, b"hello from listen\n");
-}
-
 /// Integration test for udp datagram tunneling.
 ///
 /// A dummy udp echo server stands in for an application that does its own

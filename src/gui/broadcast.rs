@@ -457,6 +457,13 @@ impl App {
                     ui.strong(egui::RichText::new(format_elapsed(stats.elapsed_secs)).monospace());
                     ui.end_row();
                 });
+            // A sparkline of the recent video bitrate, so a wobbly stream is visible
+            // at a glance without reading the number. Drawn only once two samples
+            // exist (the first 5-second tick alone is not enough to form a line).
+            if snap.video_kbps_history.len() >= 2 {
+                ui.add_space(6.0);
+                bitrate_sparkline(ui, &snap.video_kbps_history);
+            }
         });
     }
 
@@ -552,6 +559,54 @@ fn viewers_cell(ui: &mut Ui, viewers: usize, secs: f32) {
                 .color(count),
         );
     });
+}
+
+/// Map bitrate samples (kbit/s, oldest first) to pixel points spanning `rect`:
+/// the oldest sample at the left edge, newest at the right, auto-scaled to the
+/// window's peak with a 60 kbit/s floor so a quiet but steady stream still
+/// shows its shape instead of hugging the bottom edge.
+fn sparkline_points(samples: &[f64], rect: egui::Rect) -> Vec<egui::Pos2> {
+    let max = samples.iter().copied().fold(0.0, f64::max).max(60.0);
+    samples
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| {
+            let x = rect.min.x + rect.width() * i as f32 / (samples.len() - 1) as f32;
+            let y = rect.max.y - 2.0 - (v / max) as f32 * (rect.height() - 6.0);
+            egui::pos2(x, y)
+        })
+        .collect()
+}
+
+/// A small video-bitrate sparkline for the statistics panel: a soft accent
+/// area fill under a 1.5 px line. Purely decorative of data the panel already
+/// shows as a number, so it is non-interactive apart from a hover tooltip.
+fn bitrate_sparkline(ui: &mut Ui, samples: &[f64]) {
+    let width = ui.available_width();
+    let height = 26.0;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+    if samples.len() < 2 || rect.width() <= 0.0 {
+        return;
+    }
+    let points = sparkline_points(samples, rect);
+    // Soft area fill under the line: a triangle fan from the bottom edge.
+    let fill = ACCENT.gamma_multiply(0.10);
+    let mut mesh = egui::epaint::Mesh::default();
+    mesh.colored_vertex(egui::pos2(rect.left(), rect.bottom()), fill);
+    mesh.colored_vertex(egui::pos2(rect.right(), rect.bottom()), fill);
+    for (i, &p) in points.iter().enumerate() {
+        let v = 2 + i as u32;
+        mesh.colored_vertex(p, fill);
+        if i + 1 < points.len() {
+            mesh.add_triangle(0, v, v + 1);
+        }
+    }
+    ui.painter().add(egui::Shape::mesh(mesh));
+    // The line itself, one segment at a time.
+    for w in points.windows(2) {
+        ui.painter().line_segment([w[0], w[1]], egui::Stroke::new(1.5, ACCENT));
+    }
+    resp.on_hover_text("video bitrate, last two minutes");
 }
 
 /// Middle-elide a monospace string so its rendered width fits `max_width`: the
@@ -720,5 +775,31 @@ mod tests {
             assert!(w <= 200.0, "elided display width {w} must fit 200");
         });
         out.textures_delta.clear();
+    }
+
+    /// `sparkline_points` spans the rect edge to edge, puts the peak sample above
+    /// the troughs, keeps every point inside the rect, and floors the scale at
+    /// 60 kbit/s so a quiet stream does not hug the bottom edge.
+    #[test]
+    fn sparkline_points_span_the_rect_and_scale_to_the_peak() {
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(100.0, 26.0));
+        let samples = [60.0, 120.0, 60.0];
+        let pts = sparkline_points(&samples, rect);
+        assert_eq!(pts.len(), samples.len());
+        assert_eq!(pts[0].x, rect.left(), "oldest sample at the left edge");
+        assert_eq!(pts[2].x, rect.right(), "newest sample at the right edge");
+        assert!(pts[1].y < pts[0].y, "the peak sample sits above the troughs");
+        for p in &pts {
+            assert!(rect.contains(*p), "point {p:?} escapes the rect");
+        }
+
+        // A quiet stream (below the 60 kbit/s floor) stays low: its peak maps
+        // well clear of the top of the rect.
+        let quiet = sparkline_points(&[10.0, 20.0], rect);
+        assert!(
+            quiet[1].y > rect.height() * 0.5,
+            "a 20 kbit/s stream must not scale to the full height, got y={}",
+            quiet[1].y
+        );
     }
 }

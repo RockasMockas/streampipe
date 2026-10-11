@@ -15,6 +15,7 @@
 //! reuse and only dropped when the app quits.
 
 use std::{
+    collections::VecDeque,
     net::{SocketAddrV4, SocketAddrV6},
     path::PathBuf,
     sync::{Arc, Mutex},
@@ -30,6 +31,10 @@ use iroh::{Endpoint, EndpointAddr, SecretKey};
 use tokio::{runtime::Handle, sync::mpsc, task::JoinHandle, time::timeout};
 
 use crate::{udp, CommonArgs, ONLINE_TIMEOUT};
+
+/// How many video-bitrate samples the stats sparkline keeps (oldest first).
+/// At the 5-second stats tick that is a two-minute window.
+const MAX_KBPS_SAMPLES: usize = 24;
 
 /// What the GUI is currently doing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +98,9 @@ pub struct SharedState {
     pub(crate) watch: Mode,
     /// The live statistics of a broadcast, `None` when not broadcasting.
     pub(crate) stats: Option<StreamStats>,
+    /// Recent video-bitrate samples (kbit/s), oldest first, for the stats
+    /// sparkline. Fed by [`consume_stats`]; cleared when the broadcast ends.
+    pub(crate) video_kbps_history: VecDeque<f64>,
     /// The current broadcast ticket, shown after the endpoint is online.
     pub(crate) ticket: Option<String>,
     /// Whether a ticket refresh is in flight (rebinding the endpoint to pick up a
@@ -122,6 +130,7 @@ impl SharedState {
             broadcast: Mode::Idle,
             watch: Mode::Idle,
             stats: None,
+            video_kbps_history: VecDeque::new(),
             ticket: None,
             refreshing: false,
             notice: None,
@@ -141,6 +150,7 @@ pub struct UiSnapshot {
     pub broadcast: Mode,
     pub watch: Mode,
     pub stats: Option<StreamStats>,
+    pub video_kbps_history: Vec<f64>,
     pub ticket: Option<String>,
     pub whip_url: String,
     pub broadcast_error: Option<String>,
@@ -183,6 +193,7 @@ pub fn snapshot(state: &Arc<Mutex<SharedState>>) -> UiSnapshot {
         broadcast: g.broadcast,
         watch: g.watch,
         stats: g.stats,
+        video_kbps_history: g.video_kbps_history.iter().copied().collect(),
         ticket: g.ticket.clone(),
         whip_url: g.whip_url.clone(),
         broadcast_error: g.broadcast_error.clone(),
@@ -258,6 +269,7 @@ fn fail(state: &Arc<Mutex<SharedState>>, ctx: &egui::Context, track: Track, msg:
             Track::Broadcast => {
                 g.broadcast = Mode::Idle;
                 g.stats = None;
+                g.video_kbps_history.clear();
                 g.broadcast_error = Some(msg);
             }
             Track::Watch => {
@@ -364,6 +376,7 @@ pub fn spawn_broadcast(
         let mut g = state.lock().unwrap();
         g.broadcast = Mode::Idle;
         g.stats = None;
+        g.video_kbps_history.clear();
         if let Err(e) = result {
             g.broadcast_error = Some(format!("{e:#}"));
         }
@@ -632,6 +645,7 @@ pub fn stop(state: &Arc<Mutex<SharedState>>, ctx: &egui::Context, track: Track) 
             Track::Broadcast => {
                 g.broadcast = Mode::Idle;
                 g.stats = None;
+                g.video_kbps_history.clear();
                 g.broadcast_session.take()
             }
             Track::Watch => {
@@ -654,6 +668,7 @@ pub fn stop_all(state: &Arc<Mutex<SharedState>>, ctx: &egui::Context) {
         g.broadcast = Mode::Idle;
         g.watch = Mode::Idle;
         g.stats = None;
+        g.video_kbps_history.clear();
         (g.broadcast_session.take(), g.watch_session.take())
     };
     if let Some(session) = broadcast {
@@ -675,7 +690,15 @@ pub async fn consume_stats(
     ctx: egui::Context,
 ) {
     while let Some(stats) = rx.recv().await {
-        state.lock().unwrap().stats = Some(stats);
+        {
+            let mut g = state.lock().unwrap();
+            g.stats = Some(stats);
+            // Keep the sparkline's window bounded, oldest first.
+            g.video_kbps_history.push_back(stats.video_kbps);
+            while g.video_kbps_history.len() > MAX_KBPS_SAMPLES {
+                g.video_kbps_history.pop_front();
+            }
+        }
         ctx.request_repaint();
     }
 }
@@ -759,6 +782,7 @@ mod tests {
             broadcast,
             watch,
             stats: None,
+            video_kbps_history: Vec::new(),
             ticket: None,
             whip_url: String::new(),
             broadcast_error: None,
@@ -773,6 +797,43 @@ mod tests {
         // A single live track is still "active"; both idle is not.
         assert!(snap(Mode::Idle, Mode::Starting).any_active());
         assert!(!snap(Mode::Idle, Mode::Idle).any_active());
+    }
+
+    /// `consume_stats` appends each sample to the sparkline history, oldest
+    /// first, and keeps the window bounded at [`MAX_KBPS_SAMPLES`], evicting
+    /// the oldest first.
+    #[tokio::test]
+    async fn consume_stats_feeds_and_bounds_the_bitrate_history() {
+        let state = Arc::new(Mutex::new(SharedState::new(
+            SecretKey::generate(),
+            whip_url("127.0.0.1", 8080),
+        )));
+        let (tx, rx) = mpsc::unbounded_channel();
+        let task = tokio::spawn(consume_stats(rx, state.clone(), egui::Context::default()));
+        let total = MAX_KBPS_SAMPLES + 5;
+        for i in 0..total {
+            tx.send(StreamStats {
+                video_kbps: i as f64,
+                ..Default::default()
+            })
+            .unwrap();
+        }
+        drop(tx);
+        task.await.unwrap();
+        let h = state
+            .lock()
+            .unwrap()
+            .video_kbps_history
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        assert_eq!(h.len(), MAX_KBPS_SAMPLES, "the window is bounded");
+        assert_eq!(
+            h[0],
+            (total - MAX_KBPS_SAMPLES) as f64,
+            "the oldest samples were evicted, oldest first"
+        );
+        assert_eq!(h[h.len() - 1], (total - 1) as f64, "the newest sample is last");
     }
 
     /// Stopping the broadcast track must leave a live watch track (and vice versa)
