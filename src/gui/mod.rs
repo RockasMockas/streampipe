@@ -221,6 +221,24 @@ impl App {
             if let Some(err) = err {
                 ui.colored_label(ERROR, truncate(err, 60));
             }
+            // A subtle keyboard-shortcut hint after the status, so the (otherwise
+            // hidden) shortcuts are discoverable without a manual. Weak and dim so it
+            // reads as a gentle nudge, not a competing label. Only shown when it fits
+            // in the remaining space, so it never overflows at narrow window widths.
+            let hint = "Ctrl+L log · Ctrl+, settings";
+            let hint_w = ui
+                .painter()
+                .layout_no_wrap(
+                    hint.to_string(),
+                    egui::FontId::proportional(11.0),
+                    egui::Color32::PLACEHOLDER,
+                )
+                .rect
+                .width();
+            if ui.available_width() >= hint_w + 8.0 {
+                ui.add_space(10.0);
+                ui.label(egui::RichText::new(hint).weak().size(11.0));
+            }
         });
     }
 
@@ -796,6 +814,11 @@ impl App {
                 // gradient and the top bevels). Painted before any content, so it sits
                 // behind it on the same paint list.
                 ambient_glow(ui.painter(), ui.clip_rect());
+                // A subtle radial vignette behind the content, so the eye is gently
+                // drawn to the centre of the panel (the same depth cue as the ground
+                // gradient and the ambient glow). Painted before any content, so it
+                // sits behind it on the same paint list.
+                vignette(ui.painter(), ui.clip_rect());
                 self.tab_bar(ui);
                 ui.add_space(8.0);
                 // The top of the tab content, so the fade-in overlay covers only the
@@ -972,6 +995,45 @@ fn ambient_glow(painter: &egui::Painter, rect: egui::Rect) {
     for radius in [40.0, 65.0, 90.0, 115.0, 140.0, 165.0] {
         painter.circle_filled(center, radius, color);
     }
+}
+
+/// A subtle radial vignette: a darkening that is transparent at the centre and
+/// fades in toward the edges, so the eye is gently drawn to the centre of the panel
+/// (the same depth / "lit from above" language as the ground gradient and the
+/// ambient glow). The falloff is radial from the centre, so the corners (the farthest
+/// points) are the darkest and the mid-edges are lighter — a proper vignette, not a
+/// flat border. Painted on the panel's own painter, *before* any content is added, so
+/// it sits behind the content (the same rule as [`central_gradient`]). A depth cue,
+/// not a recolor: the edge alpha is very low.
+fn vignette(painter: &egui::Painter, rect: egui::Rect) {
+    let center = rect.center();
+    // The radius reaches the farthest corner, so the whole panel is covered (the
+    // mid-edges sit inside the circle and read lighter than the corners).
+    let radius = (rect.size() * 0.5).length();
+    if radius <= 0.0 {
+        return;
+    }
+    // A dark neutral, transparent at the centre and faint at the edges.
+    let clear = egui::Color32::from_rgba_unmultiplied(12, 14, 18, 0);
+    let edge = egui::Color32::from_rgba_unmultiplied(12, 14, 18, 16);
+    let n = 32;
+    let mut mesh = egui::epaint::Mesh::default();
+    // The centre vertex (transparent).
+    mesh.colored_vertex(center, clear);
+    // The outer ring vertices (the faint edge), one per segment.
+    for i in 0..n {
+        let a = std::f32::consts::TAU * i as f32 / n as f32;
+        let p = center + egui::vec2(a.cos() * radius, a.sin() * radius);
+        mesh.colored_vertex(p, edge);
+    }
+    // A fan: one triangle from the centre to each outer segment, wrapping the last
+    // segment back to the first outer vertex.
+    for i in 0..n {
+        let a = 1 + i as u32;
+        let b = 1 + ((i + 1) % n) as u32;
+        mesh.add_triangle(0, a, b);
+    }
+    painter.add(egui::Shape::mesh(mesh));
 }
 
 /// A soft halo behind the primary action button: three stacked rounded rects that
@@ -3720,6 +3782,97 @@ mod tests {
         assert!(
             top > bottom,
             "the icon's top ({top}) should be lighter than its bottom ({bottom})"
+        );
+    }
+
+    /// The central panel paints a subtle radial vignette (a fan mesh of 32 segments:
+    /// 33 vertices, 96 indices) behind its content, so the eye is gently drawn to the
+    /// centre of the panel (the same depth cue as the ground gradient and the ambient
+    /// glow). The vertex/index count is unique to the vignette: the ground gradient is
+    /// a 4-vertex quad and the spinner is a 96-vertex arc.
+    #[test]
+    fn the_central_panel_paints_a_subtle_vignette() {
+        let (mut app, _rt) = test_app();
+        let size = egui::vec2(760.0, 560.0);
+        let shapes = render_shapes(&mut app, size);
+        let vignette = shapes.iter().any(|s| match &s.shape {
+            egui::epaint::Shape::Mesh(m) => m.vertices.len() == 33 && m.indices.len() == 96,
+            _ => false,
+        });
+        assert!(
+            vignette,
+            "the central panel should paint its subtle radial vignette"
+        );
+    }
+
+    /// The "Waiting for OBS to start streaming…" hint (a live broadcast that has not
+    /// yet received media from OBS) carries a small breathing dot (a filled circle of
+    /// radius 4.0 in the live accent), so the wait reads as an active signal rather
+    /// than a static label. A broadcast that is already receiving media (or has
+    /// viewers) shows no such dot.
+    #[test]
+    fn the_waiting_for_obs_hint_carries_a_breathing_dot() {
+        // Live, no viewers, not receiving, no history: the "Waiting for OBS" hint
+        // (and its breathing dot) is shown.
+        let (mut app, _rt) = test_app();
+        app.tab = Tab::Broadcast;
+        app.state.lock().unwrap().broadcast = Mode::Broadcasting;
+        let size = egui::vec2(760.0, 560.0);
+        let shapes = render_shapes(&mut app, size);
+        // The breathing dot: a filled circle (stroke.width == 0) of radius 4.0. The
+        // ambient-glow circles are far larger and the sonar rings are stroked, so a
+        // filled radius-4.0 circle isolates the dot.
+        let dot = shapes.iter().any(|s| match &s.shape {
+            egui::epaint::Shape::Circle(c) => {
+                (c.radius - 4.0).abs() < 0.01 && c.stroke.width == 0.0 && c.fill.a() > 0
+            }
+            _ => false,
+        });
+        assert!(
+            dot,
+            "the 'Waiting for OBS' hint should carry a breathing dot"
+        );
+
+        // Receiving media: the hint (and its dot) is dropped.
+        let (mut app, _rt) = test_app();
+        app.tab = Tab::Broadcast;
+        {
+            let mut g = app.state.lock().unwrap();
+            g.broadcast = Mode::Broadcasting;
+            g.stats = Some(StreamStats {
+                video_kbps: 5000.0,
+                ..Default::default()
+            });
+        }
+        let shapes = render_shapes(&mut app, size);
+        let dot = shapes.iter().any(|s| match &s.shape {
+            egui::epaint::Shape::Circle(c) => {
+                (c.radius - 4.0).abs() < 0.01 && c.stroke.width == 0.0 && c.fill.a() > 0
+            }
+            _ => false,
+        });
+        assert!(
+            !dot,
+            "a broadcast already receiving media should drop the waiting dot"
+        );
+    }
+
+    /// The status bar carries a subtle keyboard-shortcut hint on its right edge, so
+    /// the (otherwise hidden) Ctrl+L / Ctrl+, shortcuts are discoverable without a
+    /// manual.
+    #[test]
+    fn the_status_bar_shows_a_keyboard_shortcut_hint() {
+        let (mut app, _rt) = test_app();
+        let size = egui::vec2(760.0, 560.0);
+        let shapes = render_shapes(&mut app, size);
+        let hint = "Ctrl+L log · Ctrl+, settings";
+        assert!(
+            shapes
+                .iter()
+                .any(|s| matches!(&s.shape,
+                    egui::epaint::Shape::Text(t) if t.galley.text() == hint
+                )),
+            "the status bar should show a keyboard shortcut hint"
         );
     }
 }

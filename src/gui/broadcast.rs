@@ -14,7 +14,7 @@ use super::{
     flash_alpha,
     state::{self, BindAddrs, BroadcastParams, Mode},
     App, ACCENT, ERROR, FLASH, error_callout, pointer_over, pointer_pressed_over,
-    primary_button_glow, section_tick,
+    primary_button_glow, pulse_factor, section_tick,
     sonar_pulse, soft_glow, spinner, stat_ease, top_bevel,
 };
 
@@ -225,7 +225,21 @@ impl App {
                     ),
                 );
             } else if !receiving {
-                ui.label("Waiting for OBS to start streaming to whip address...");
+                // A small breathing dot (the same "live reads as an active signal"
+                // language as the status and viewers dots) so the wait for OBS to
+                // deliver reads as an active wait rather than a static label. The dot
+                // breathes on the shared pulse clock and carries a soft sonar ring.
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    let secs = self.pulse.elapsed().as_secs_f32();
+                    let (dot_rect, _) =
+                        ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+                    let center = dot_rect.center();
+                    let dot = ACCENT.gamma_multiply(pulse_factor(secs));
+                    ui.painter().circle_filled(center, 4.0, dot);
+                    sonar_pulse(ui.painter(), center, 4.0, secs, 2.0, ACCENT);
+                    ui.label("Waiting for OBS to start streaming to whip address...");
+                });
             }
             // A subtle red halo behind the Stop button, so the one control that tears
             // down a live stream reads as a "stop" action at a glance (the same muted
