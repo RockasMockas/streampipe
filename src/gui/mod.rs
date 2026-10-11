@@ -28,11 +28,17 @@ use self::{
     state::{Mode, SharedState},
 };
 
-/// The repaint interval used while a session is live or a toast is showing, so
-/// logs and stats refresh without a per-event repaint storm.
+/// The repaint interval used while a session is live, so logs and stats refresh
+/// without a per-event repaint storm. Too coarse for an animation: a fading toast
+/// gets its own, much shorter cadence ([`TOAST_FRAME`]).
 const REPAINT: Duration = Duration::from_millis(250);
 /// How long a "Copied" toast stays visible.
 const TOAST: Duration = Duration::from_millis(1500);
+/// The repaint interval while a toast is on screen: ~60 fps, i.e. display rate.
+///
+/// The fade is an animation, and on [`REPAINT`] a [`TOAST`]-long one only gets six
+/// frames — the pill visibly steps down through six greys instead of dissolving.
+const TOAST_FRAME: Duration = Duration::from_millis(16);
 /// How long a copy box's click flash brightens its fill and glyph. Shorter than
 /// [`TOAST`] so the repaint guard stays armed through the whole flash.
 const FLASH: Duration = Duration::from_millis(450);
@@ -686,10 +692,20 @@ impl App {
                 }
             }
         }
-        // Repaint while either track is live, while a toast fades, or while a refresh
-        // is in flight so controls re-enable and the new ticket appears without input.
-        if any_active || refreshing || self.copied.is_some() || self.toast.is_some() {
+        // Repaint while either track is live, or while a refresh is in flight, so
+        // controls re-enable and the new ticket appears without input.
+        if any_active || refreshing {
             ui.ctx().request_repaint_after(REPAINT);
+        }
+        // A fading toast is an animation, not a status poll: on the 250 ms session
+        // cadence a 1.5 s fade only gets six frames, so the pill visibly steps down
+        // through six greys instead of dissolving. While either is up, ask for the
+        // next frame at ~60 fps instead — `request_repaint_after` keeps the shortest
+        // duration asked for, so this wins over the session request just above. The
+        // expiry at the top of `draw` disarms the guard as soon as the fade is over,
+        // so an idle window still falls asleep (see the regression test for that).
+        if self.copied.is_some() || self.toast.is_some() {
+            ui.ctx().request_repaint_after(TOAST_FRAME);
         }
         // The underline slide wants frames at the display rate, not the 250 ms
         // session cadence, so it gets its own as-soon-as-possible repaint.
@@ -1765,6 +1781,37 @@ mod tests {
         let (mut app, _rt) = test_app();
         app.state.lock().unwrap().broadcast = Mode::Broadcasting;
         assert_awake(settled_repaint_delay(&mut app));
+    }
+
+    /// The toast fade is an animation, so it has to be repainted at display rate.
+    /// It used to ride on the 250 ms session cadence, which gives a 1.5 s dissolve
+    /// only six frames: the pill visibly steps down through six greys (and pops out
+    /// at the end) instead of fading.
+    #[test]
+    fn a_fading_toast_repaints_at_display_rate() {
+        // The action toast (raised by "Save", a relay refresh, a ticket reset).
+        let (mut app, _rt) = test_app();
+        app.toast = Some(("Saved".to_string(), Instant::now()));
+        let delay = settled_repaint_delay(&mut app);
+        assert_awake(delay);
+        assert!(
+            delay <= TOAST_FRAME,
+            "a live toast should repaint at ~60 fps, not on the {REPAINT:?} session \
+             cadence, got {delay:?}"
+        );
+
+        // The copy toast, same cadence.
+        let (mut app, _rt) = test_app();
+        app.copied = Some(("whip", Instant::now()));
+        assert!(
+            settled_repaint_delay(&mut app) <= TOAST_FRAME,
+            "a live copy toast should repaint at ~60 fps too"
+        );
+
+        // Nothing live: the guard must stay disarmed, or an idle window burns frames
+        // for ever (the regression the two tests above cover).
+        let (mut app, _rt) = test_app();
+        assert_eq!(settled_repaint_delay(&mut app), Duration::MAX);
     }
 
     /// Render one real frame of the UI headlessly and return what was painted.
@@ -2986,7 +3033,7 @@ mod tests {
     /// The Settings footer is a matched pair of actions: "Save" in the accent green
     /// and "Close" in a neutral grey, both the same 90x30 box with the same halo
     /// language, so they read as one set with the green one leading. Clicking Save
-    /// writes the config and raises the floating "Saved ✓" pill; clicking Close
+    /// writes the config and raises the floating "Saved" pill; clicking Close
     /// dismisses the panel.
     #[test]
     fn the_settings_footer_is_a_matched_pair_and_save_raises_a_toast() {
@@ -3063,7 +3110,7 @@ mod tests {
         click_at(&mut app, &ctx, save.center(), size);
         assert_eq!(
             app.toast.as_ref().map(|(msg, _)| msg.as_str()),
-            Some("Saved ✓"),
+            Some("Saved"),
             "Save raises the confirmation toast"
         );
         assert!(
