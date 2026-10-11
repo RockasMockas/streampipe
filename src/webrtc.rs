@@ -102,6 +102,14 @@ const RECONNECT_DELAY: Duration = Duration::from_secs(2);
 const VIEWER_QUEUE: usize = 8192;
 /// Size of the buffer used to read from the ICE UDP socket.
 const ICE_BUF: usize = 2048;
+/// How far below the level in the GUI ffplay is started, in percentage points.
+///
+/// All three players read the same slider, but they do not land on the same
+/// loudness: ffplay's `-volume` scale falls away much more slowly than mpv's
+/// `--volume` or VLC's `--gain`, so the same number leaves ffplay noticeably
+/// louder. Starting it 20 points lower lines the three up by ear: GUI 100 opens
+/// ffplay at 80, GUI 40 at 20, and GUI 20 and below at silence.
+const FFPLAY_VOLUME_OFFSET: u8 = 20;
 
 /// The players `connect-whip` knows how to launch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
@@ -128,12 +136,13 @@ impl Player {
     ///
     /// `path` overrides the player binary, for a player that is not on `PATH`.
     ///
-    /// `volume` is the startup volume in percent (0-100). Every player can be
-    /// told where to start: mpv with `--volume=<0-100>`, ffplay with
-    /// `-volume <0-100>` ("set startup volume 0=min 100=max"), and VLC with the
-    /// audio-output `--gain` multiplier (VLC 3 dropped its old `--volume`, which
-    /// now only prints "option --volume no longer exists"). 100 is unity in all
-    /// three, so the default changes nothing.
+    /// `volume` is the startup volume in percent (0-100) as the GUI set it. Every
+    /// player can be told where to start: mpv with `--volume=<0-100>`, and VLC with
+    /// the audio-output `--gain` multiplier (VLC 3 dropped its old `--volume`, which
+    /// now only prints "option --volume no longer exists"). ffplay takes
+    /// `-volume <0-100>` ("set startup volume 0=min 100=max") shifted 20 points down
+    /// by `FFPLAY_VOLUME_OFFSET`, because its scale is louder per point than the
+    /// other two. 100 is unity in all three, so the default is as loud as each gets.
     pub fn command(
         &self,
         sdp: &Path,
@@ -198,11 +207,14 @@ impl Player {
                 ]
             }
             Player::Ffplay => {
+                // ffplay's `-volume` is its startup volume, 0=mute 100=max, started
+                // `FFPLAY_VOLUME_OFFSET` points below the GUI level so one slider
+                // setting sounds the same in all three players.
+                let ffplay_volume = volume.saturating_sub(FFPLAY_VOLUME_OFFSET);
                 let mut cmd = vec![
                     bin("ffplay"),
-                    // ffplay's `-volume` is its startup volume, 0=mute 100=max.
                     "-volume".into(),
-                    volume.to_string(),
+                    ffplay_volume.to_string(),
                 ];
                 match buffer {
                     Some(ms) => {
@@ -2538,7 +2550,25 @@ mod tests {
                 .iter()
                 .position(|a| a == "-volume")
                 .unwrap_or_else(|| panic!("no -volume in {ffplay:?}"));
-            assert_eq!(ffplay[i + 1], "40");
+            // ffplay starts 20 points below the GUI level, so 40 in the GUI is 20
+            // in the command.
+            assert_eq!(ffplay[i + 1], "20");
+            // The offset is saturating: nothing goes negative, and full scale in the
+            // GUI is 80 in the command.
+            let ffplay = Player::Ffplay.command(path, buffer, None, 100);
+            let i = ffplay
+                .iter()
+                .position(|a| a == "-volume")
+                .unwrap_or_else(|| panic!("no -volume in {ffplay:?}"));
+            assert_eq!(ffplay[i + 1], "80");
+            for gui in [0, 20] {
+                let ffplay = Player::Ffplay.command(path, buffer, None, gui);
+                let i = ffplay
+                    .iter()
+                    .position(|a| a == "-volume")
+                    .unwrap_or_else(|| panic!("no -volume in {ffplay:?}"));
+                assert_eq!(ffplay[i + 1], "0", "gui {gui}");
+            }
 
             let vlc = Player::Vlc.command(path, buffer, None, 40);
             assert!(vlc.contains(&"--gain=0.40".to_string()), "{vlc:?}");

@@ -205,8 +205,10 @@ impl App {
                 .show_value(false);
             let resp = ui.add_enabled_ui(!busy, |ui| ui.add(slider));
             resp.inner.on_hover_text(
-                "where the player window starts: mpv gets --volume=N, ffplay -volume N, \
-                 VLC --gain=N/100 (VLC 3 has no --volume). 100 is full volume.",
+                "where the player window starts: mpv gets --volume=N, VLC --gain=N/100 \
+                 (VLC 3 has no --volume), ffplay -volume N-20: its scale is louder per \
+                 point than the other two, so it starts 20 points lower and all three \
+                 sound about the same for one setting.",
             );
         });
 
