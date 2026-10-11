@@ -8,7 +8,7 @@ use eframe::egui::{self, Context, Ui};
 use super::{
     config::{player_key, PLAYERS},
     state::{self, Mode, WatchParams},
-    App, ACCENT,
+    App, ACCENT, WATCH_ACCENT, spinner,
 };
 
 /// Parse a buffer field (milliseconds) into an option; blank or invalid is
@@ -145,6 +145,11 @@ impl App {
                     .clicked()
                 {
                     state::stop(&self.state, ui.ctx(), state::Track::Watch);
+                }
+                // While connecting, a small rotating arc beside the hint gives the
+                // wait visible progress; once playing it is dropped.
+                if starting {
+                    spinner(ui, self.pulse.elapsed().as_secs_f32(), WATCH_ACCENT);
                 }
                 ui.label(watch_action_label(snap.watch));
             });

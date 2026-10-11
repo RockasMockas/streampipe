@@ -13,7 +13,7 @@ use super::{
     config::Config,
     flash_alpha,
     state::{self, BindAddrs, BroadcastParams, Mode},
-    App, ACCENT, FLASH,
+    App, ACCENT, FLASH, spinner,
 };
 
 /// Horizontal room kept clear at the right edge of a copy box for the copy glyph,
@@ -207,7 +207,13 @@ impl App {
                 .stats
                 .is_some_and(|s| s.video_kbps > 0.0 || s.audio_kbps > 0.0);
             if starting {
-                ui.label("starting…");
+                // A small rotating arc beside the hint so the wait for OBS to
+                // deliver has visible progress instead of a static label.
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    spinner(ui, self.pulse.elapsed().as_secs_f32(), ACCENT);
+                    ui.label("starting…");
+                });
             } else if viewers > 0 {
                 ui.colored_label(
                     ACCENT,

@@ -35,6 +35,8 @@ const TOAST: Duration = Duration::from_millis(1500);
 const FLASH: Duration = Duration::from_millis(450);
 /// The "live/success" accent: broadcasting status, the copy toast, and viewers.
 const ACCENT: egui::Color32 = egui::Color32::from_rgb(80, 200, 120);
+/// The "watching" accent: the watch status dot and the connecting spinner.
+const WATCH_ACCENT: egui::Color32 = egui::Color32::from_rgb(90, 160, 255);
 
 /// The two main tabs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,7 +143,7 @@ impl App {
                 // Broadcasting leads the colour; watching while live stays green too.
                 ACCENT
             } else if snap.watch == Mode::Watching {
-                egui::Color32::from_rgb(90, 160, 255)
+                WATCH_ACCENT
             } else if snap.any_active() {
                 egui::Color32::YELLOW
             } else {
@@ -209,26 +211,56 @@ impl App {
                 // surface with full-strength text (plus the accent underline below),
                 // while unselected tabs recede to a darker surface and dimmed text,
                 // keeping focus on the primary Start Broadcasting action.
+                //
+                // Each tab is painted by hand (rather than an `egui::Button` with a
+                // fixed fill) so a hover can lift the surface: an explicit `.fill()`
+                // would otherwise suppress egui's hover feedback and the strip would
+                // feel dead under the mouse. Hovering lifts either tab toward the
+                // selected look, so the whole box reads as a live control.
                 let make = |ui: &mut Ui, label: &str, selected: bool| {
+                    // The whole box is the click target; the hover is read from the
+                    // same response before the surface is painted.
+                    let (rect, resp) =
+                        ui.allocate_exact_size(egui::vec2(half, tab_h), egui::Sense::click());
+                    let hovered = resp.hovered();
+                    if hovered {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    let corner = ui.style().visuals.widgets.inactive.corner_radius;
                     let fill = if selected {
-                        egui::Color32::from_white_alpha(26)
+                        egui::Color32::from_white_alpha(if hovered { 40 } else { 26 })
                     } else {
-                        egui::Color32::from_black_alpha(70)
+                        egui::Color32::from_black_alpha(if hovered { 40 } else { 70 })
                     };
                     let stroke = egui::Stroke::new(
                         1.0,
                         if selected {
-                            egui::Color32::from_white_alpha(45)
+                            egui::Color32::from_white_alpha(if hovered { 70 } else { 45 })
                         } else {
-                            egui::Color32::from_white_alpha(10)
+                            egui::Color32::from_white_alpha(if hovered { 30 } else { 10 })
                         },
                     );
-                    let text = egui::RichText::new(label).color(if selected {
+                    let text_color = if selected {
                         egui::Color32::WHITE
+                    } else if hovered {
+                        egui::Color32::from_rgb(200, 200, 205)
                     } else {
                         egui::Color32::GRAY
-                    });
-                    ui.add_sized([half, tab_h], egui::Button::new(text).fill(fill).stroke(stroke))
+                    };
+                    // Paint the surface, the outline, then the centred label.
+                    ui.painter().rect_filled(rect, corner, fill);
+                    ui.painter()
+                        .rect_stroke(rect, corner, stroke, egui::StrokeKind::Middle);
+                    let font_id = ui.style().text_styles[&egui::TextStyle::Button].clone();
+                    let galley = ui
+                        .painter()
+                        .layout_no_wrap(label.to_string(), font_id, text_color);
+                    let text_pos = egui::pos2(
+                        rect.center().x - galley.rect.width() * 0.5,
+                        rect.center().y - galley.rect.height() * 0.5,
+                    );
+                    ui.painter().galley(text_pos, galley, text_color);
+                    resp
                 };
                 let w = make(ui, "Watch Stream", self.tab == Tab::Watch);
                 let b = make(ui, "Broadcast", self.tab == Tab::Broadcast);
@@ -394,6 +426,17 @@ impl App {
         if tab_moving {
             ui.ctx().request_repaint();
         }
+        // The connecting/starting spinner rotates on the wall clock, so while it is
+        // on screen (the active tab's track is `Starting`) it wants frames at the
+        // display rate too. Only the visible tab's spinner matters: the other tab's
+        // `Starting` track is not drawn, so it must not keep the window awake.
+        let spinner_visible = match self.tab {
+            Tab::Broadcast => broadcast == Mode::Starting,
+            Tab::Watch => watch == Mode::Starting,
+        };
+        if spinner_visible {
+            ui.ctx().request_repaint();
+        }
 
         // On close, abort any live session (frees the WHIP port, kills the
         // player) and persist config. The endpoint and runtime are dropped in
@@ -437,10 +480,34 @@ impl App {
         }
 
         // The status/settings bar lives at the very bottom edge. Registered
-        // before the `log` bottom panel, so the log stacks above it.
-        egui::Panel::bottom("menu_bar").show(ui, |ui| {
-            self.menu_bar(ui);
-        });
+        // before the `log` bottom panel, so the log stacks above it. A slightly
+        // darker fill and a faint top hairline make it read as a deliberate status
+        // bar rather than a strip of the same background as the content above.
+        let bar_frame = egui::Frame::side_top_panel(ui.style())
+            .fill(egui::Color32::from_rgb(19, 21, 25));
+        // The frame's top inner margin, so the hairline can sit exactly on the
+        // bar's top edge (the boundary with the content above).
+        let bar_top_margin = bar_frame.inner_margin.topf();
+        egui::Panel::bottom("menu_bar")
+            .frame(bar_frame)
+            .show(ui, |ui| {
+                // A faint hairline across the top of the bar, at the boundary with
+                // the content above. Painted on its own full-width layer so it is
+                // not clipped to the bar's content rect (which is inset by the
+                // frame's inner margin).
+                let boundary = ui.max_rect().min.y - bar_top_margin;
+                let window = ui.ctx().viewport_rect();
+                let painter = ui.ctx().layer_painter(egui::LayerId::new(
+                    egui::Order::Middle,
+                    egui::Id::new("status_bar_hairline"),
+                ));
+                painter.hline(
+                    window.min.x..=window.max.x,
+                    boundary,
+                    egui::Stroke::new(1.0, egui::Color32::from_white_alpha(16)),
+                );
+                self.menu_bar(ui);
+            });
         if self.show_options {
             self.options_window(ui.ctx());
         }
@@ -508,6 +575,42 @@ fn flash_alpha(elapsed: Duration, window: Duration) -> f32 {
         return 0.0;
     }
     (1.0 - elapsed.as_secs_f32() / window.as_secs_f32()).clamp(0.0, 1.0)
+}
+
+/// A small rotating arc spinner, shown beside "connecting…" / "starting…" while a
+/// session is being brought up, so the waiting moment has visible progress instead
+/// of a static label.
+///
+/// The arc is a 270° ring segment drawn as a mesh of small quads (a crisp,
+/// controlled look that does not depend on line-cap styling) and rotated with
+/// `secs` (one revolution every ~1.2 s). Purely decorative: it takes a hover-sense
+/// slot but is never clicked. `color` is the track's accent (green for a broadcast
+/// coming up, blue for a watch connecting).
+fn spinner(ui: &mut Ui, secs: f32, color: egui::Color32) {
+    let size = 14.0;
+    let (rect, _resp) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+    let center = rect.center();
+    // A 1.5 px margin keeps the ring inside its slot; a 2 px-thick ring.
+    let outer = size * 0.5 - 1.5;
+    let inner = outer - 2.0;
+    let span = 0.75 * std::f32::consts::TAU; // a 270° arc
+    let start = (secs / 1.2) * std::f32::consts::TAU; // one revolution every 1.2 s
+    let n = 24;
+    let mut mesh = egui::epaint::Mesh::default();
+    for i in 0..n {
+        let a0 = start + span * i as f32 / n as f32;
+        let a1 = start + span * (i + 1) as f32 / n as f32;
+        // Four corners of the i-th ring quad. `colored_vertex` pushes in order, so
+        // this quad's vertices are at `4*i .. 4*i+4`.
+        mesh.colored_vertex(center + egui::vec2(a0.cos() * outer, a0.sin() * outer), color);
+        mesh.colored_vertex(center + egui::vec2(a1.cos() * outer, a1.sin() * outer), color);
+        mesh.colored_vertex(center + egui::vec2(a1.cos() * inner, a1.sin() * inner), color);
+        mesh.colored_vertex(center + egui::vec2(a0.cos() * inner, a0.sin() * inner), color);
+        let v = 4 * i as u32;
+        mesh.add_triangle(v, v + 1, v + 2);
+        mesh.add_triangle(v, v + 2, v + 3);
+    }
+    ui.painter().add(egui::Shape::mesh(mesh));
 }
 
 /// One step of the tab underline's exponential ease: `current` moves toward
@@ -1131,6 +1234,185 @@ mod tests {
         assert!(
             ctx.memory(|m| m.focused()).is_some(),
             "the idle start button autofocuses so Enter/Space can start it"
+        );
+    }
+
+    /// The connecting/starting spinner paints a single mesh of 24 ring quads
+    /// (96 vertices, 48 triangles) — a 270° arc — so the waiting moment has a
+    /// visible, controlled shape rather than a raw stroked line.
+    #[test]
+    fn spinner_paints_a_270_degree_arc() {
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(100.0, 100.0),
+            )),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(raw, |ui| {
+            spinner(ui, 0.0, ACCENT);
+        });
+        out.textures_delta.clear();
+        let meshes: Vec<&egui::epaint::Mesh> = out
+            .shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::epaint::Shape::Mesh(m) => Some(m.as_ref()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(meshes.len(), 1, "the spinner paints exactly one mesh");
+        let mesh = &meshes[0];
+        assert_eq!(mesh.vertices.len(), 96, "24 quads × 4 vertices");
+        assert_eq!(mesh.indices.len(), 48 * 3, "24 quads × 2 triangles × 3 indices");
+    }
+
+    /// The spinner's arc rotates with `secs`: two different times paint two
+    /// different meshes, so the animation actually moves.
+    #[test]
+    fn spinner_rotates_with_time() {
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(100.0, 100.0),
+            )),
+            ..Default::default()
+        };
+        let mesh_at = |secs: f32| {
+            let ctx = egui::Context::default();
+            let mut out = ctx.run_ui(raw.clone(), |ui| {
+                spinner(ui, secs, ACCENT);
+            });
+            out.textures_delta.clear();
+            out.shapes
+                .iter()
+                .find_map(|s| match &s.shape {
+                    egui::epaint::Shape::Mesh(m) => Some(m.as_ref().clone()),
+                    _ => None,
+                })
+                .expect("the spinner paints a mesh")
+        };
+        let a = mesh_at(0.0);
+        let b = mesh_at(0.3);
+        assert_ne!(a, b, "the arc should rotate between two times");
+    }
+
+    /// Hovering a tab raises the pointing-hand cursor, so the tab strip reads as a
+    /// live control under the mouse (the hover also lifts the tab's surface).
+    #[test]
+    fn hovering_a_tab_raises_the_pointing_hand_cursor() {
+        let (mut app, _rt) = test_app();
+        app.tab = Tab::Watch;
+        let size = egui::vec2(760.0, 560.0);
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), size)),
+            ..Default::default()
+        };
+        // Render once (no pointer) to locate the Broadcast tab's fill rect.
+        let ctx = egui::Context::default();
+        let mut out = ctx.run_ui(raw.clone(), |ui| app.draw(ui));
+        out.textures_delta.clear();
+        let tab_rects: Vec<egui::Rect> = out
+            .shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                // The two tab surfaces are the only ~32-tall filled rects up top.
+                egui::epaint::Shape::Rect(r)
+                    if (30.0..34.0).contains(&r.rect.height()) && r.rect.min.y < 120.0 =>
+                {
+                    Some(r.rect)
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            tab_rects.len() >= 2,
+            "expected the two tab fill rects, got {tab_rects:?}"
+        );
+        // The Broadcast tab is the right-hand one.
+        let bc = tab_rects
+            .iter()
+            .fold(&tab_rects[0], |a, b| if b.min.x > a.min.x { b } else { a });
+        let center = bc.center();
+
+        // Render with the pointer over the Broadcast tab. egui computes a widget's
+        // hover from the *previous* pass's rect, so the first pass establishes the
+        // tab's rect and the second is the one whose hover (and cursor) is live.
+        let ctx2 = egui::Context::default();
+        let raw_hover = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), size)),
+            events: vec![egui::Event::PointerMoved(center)],
+            ..Default::default()
+        };
+        let mut out2 = ctx2.run_ui(raw_hover.clone(), |ui| app.draw(ui));
+        out2.textures_delta.clear();
+        let mut out3 = ctx2.run_ui(raw_hover, |ui| app.draw(ui));
+        out3.textures_delta.clear();
+        assert_eq!(
+            out3.platform_output.cursor_icon,
+            egui::CursorIcon::PointingHand,
+            "hovering a tab should raise the pointing-hand cursor"
+        );
+    }
+
+    /// The bottom status bar paints a distinct, slightly darker fill so it reads as
+    /// a deliberate bar rather than a strip of the content background.
+    #[test]
+    fn the_status_bar_uses_a_distinct_darker_fill() {
+        let (mut app, _rt) = test_app();
+        let size = egui::vec2(760.0, 560.0);
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), size)),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(raw, |ui| app.draw(ui));
+        out.textures_delta.clear();
+        let bar_fill = egui::Color32::from_rgb(19, 21, 25);
+        assert!(
+            out.shapes
+                .iter()
+                .any(|s| matches!(&s.shape,
+                    egui::epaint::Shape::Rect(r) if r.fill == bar_fill
+                )),
+            "the status bar should paint its distinct darker fill"
+        );
+    }
+
+    /// The status bar paints a faint horizontal hairline at its top edge (the
+    /// boundary with the content above), so the bar is crisply separated.
+    #[test]
+    fn the_status_bar_paints_a_top_hairline() {
+        let (mut app, _rt) = test_app();
+        let size = egui::vec2(760.0, 560.0);
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), size)),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(raw, |ui| app.draw(ui));
+        out.textures_delta.clear();
+        // The hairline is a horizontal line segment (two points at the same y) near
+        // the bottom of the window (the top of the status bar). The tab bar's
+        // separator is also horizontal but sits near the top, so a y filter isolates
+        // the hairline.
+        let hairline = out.shapes.iter().find_map(|s| match &s.shape {
+            egui::epaint::Shape::LineSegment { points, .. } => {
+                if (points[0].y - points[1].y).abs() < 0.5
+                    && points[0].y > size.y - 40.0
+                    && points[1].x - points[0].x > 100.0
+                {
+                    Some(())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        });
+        assert!(
+            hairline.is_some(),
+            "the status bar should paint a top hairline"
         );
     }
 }
