@@ -549,13 +549,20 @@ impl App {
                     ui.end_row();
 
                     ui.label("Video");
-                    ui.strong(
-                        egui::RichText::new(format!(
-                            "{:.0} kbit/s · {:.1} fps",
-                            video_kbps, video_fps
-                        ))
-                        .monospace(),
-                    );
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        ui.strong(
+                            egui::RichText::new(format!(
+                                "{:.0} kbit/s · {:.1} fps",
+                                video_kbps, video_fps
+                            ))
+                            .monospace(),
+                        );
+                        // A small trend arrow showing the bitrate's recent drift, so a
+                        // wobbly stream's direction (building, dropping, holding) is
+                        // readable at a glance without reading the number.
+                        trend_arrow(ui, bitrate_trend(&snap.video_kbps_history));
+                    });
                     ui.end_row();
 
                     ui.label("Audio");
@@ -703,6 +710,93 @@ fn sparkline_points(samples: &[f64], rect: egui::Rect) -> Vec<egui::Pos2> {
         .collect()
 }
 
+/// The direction of the video bitrate over the recent samples: a small visual cue
+/// beside the Video stat so a wobbly stream's drift (building up, dropping, or
+/// holding steady) is readable at a glance without reading the number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Trend {
+    /// The bitrate is building up over the recent samples.
+    Rising,
+    /// The bitrate is dropping over the recent samples.
+    Falling,
+    /// The bitrate is holding steady (within the noise band).
+    Flat,
+}
+
+/// Classify the video bitrate's recent direction from its samples (kbit/s, oldest
+/// first). The newest sample is compared against the sample up to three ticks back
+/// (about fifteen seconds at the 5-second stats tick); a change larger than a small
+/// relative band (3% of the older sample, floored at 5 kbit/s) reads as rising or
+/// falling, and anything within the band — or too few samples to judge — reads as
+/// flat. Pure (the samples are injected) so the classification is testable without a
+/// live window.
+pub(crate) fn bitrate_trend(samples: &[f64]) -> Trend {
+    if samples.len() < 2 {
+        return Trend::Flat;
+    }
+    let back = 3usize.min(samples.len() - 1);
+    let prev = samples[samples.len() - 1 - back];
+    let last = *samples.last().unwrap();
+    let delta = last - prev;
+    // A small relative band, so a steady stream does not flicker between arrows on
+    // normal jitter, but a real drift (a viewer joining, a codec switching) shows.
+    let band = prev.abs() * 0.03 + 5.0;
+    if delta > band {
+        Trend::Rising
+    } else if delta < -band {
+        Trend::Falling
+    } else {
+        Trend::Flat
+    }
+}
+
+/// A small hand-painted trend arrow for the Video stat: an up triangle in the live
+/// accent (rising), a down triangle in the error red (falling), or a short dash in a
+/// dim grey (flat). Hand-painted (a mesh / line segment) rather than a text glyph, so
+/// it does not depend on a symbol the bundled faces may not carry — the same reason
+/// the copy glyph and the close button are drawn by hand. Purely decorative: it takes
+/// a hover-sense slot but is never clicked.
+fn trend_arrow(ui: &mut Ui, trend: Trend) {
+    let size = 9.0;
+    let (rect, _resp) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+    let c = rect.center();
+    let color = match trend {
+        Trend::Rising => ACCENT,
+        Trend::Falling => ERROR,
+        Trend::Flat => egui::Color32::from_rgb(130, 133, 140),
+    };
+    let p = ui.painter();
+    match trend {
+        Trend::Rising => {
+            let (h, w) = (size * 0.4, size * 0.45);
+            let mut m = egui::epaint::Mesh::default();
+            m.colored_vertex(egui::pos2(c.x, c.y - h), color);
+            m.colored_vertex(egui::pos2(c.x - w, c.y + h), color);
+            m.colored_vertex(egui::pos2(c.x + w, c.y + h), color);
+            m.add_triangle(0, 1, 2);
+            p.add(egui::Shape::mesh(m));
+        }
+        Trend::Falling => {
+            let (h, w) = (size * 0.4, size * 0.45);
+            let mut m = egui::epaint::Mesh::default();
+            m.colored_vertex(egui::pos2(c.x, c.y + h), color);
+            m.colored_vertex(egui::pos2(c.x - w, c.y - h), color);
+            m.colored_vertex(egui::pos2(c.x + w, c.y - h), color);
+            m.add_triangle(0, 1, 2);
+            p.add(egui::Shape::mesh(m));
+        }
+        Trend::Flat => {
+            p.line_segment(
+                [
+                    egui::pos2(c.x - size * 0.3, c.y),
+                    egui::pos2(c.x + size * 0.3, c.y),
+                ],
+                egui::Stroke::new(1.5, color),
+            );
+        }
+    }
+}
+
 /// A small video-bitrate sparkline for the statistics panel: a vertical
 /// gradient area fill under a 1.5 px line, with a small "now" dot on the newest
 /// sample. Purely decorative of data the panel already shows as a number, so it
@@ -761,6 +855,23 @@ fn bitrate_sparkline(ui: &mut Ui, samples: &[f64], secs: f32) {
         }
     }
     ui.painter().add(egui::Shape::mesh(mesh));
+    // A faint dashed horizontal line at the recent average, so the current value and
+    // the peak can be read against the stream's "normal" level (the peak marker shows
+    // the high, the "now" dot the current, and this the level they drift around).
+    // Dashed (not solid) and a muted green-grey (not the data's accent), so it reads
+    // as a reference, not a fourth data series.
+    let avg = samples.iter().sum::<f64>() / samples.len() as f64;
+    let max = samples.iter().copied().fold(0.0, f64::max).max(60.0);
+    let avg_y = rect.max.y - 2.0 - (avg / max) as f32 * (rect.height() - 6.0);
+    let avg_color = egui::Color32::from_rgb(120, 150, 135);
+    let (dash, gap) = (4.0, 3.0);
+    let mut x = rect.left();
+    while x < rect.right() {
+        let x2 = (x + dash).min(rect.right());
+        ui.painter()
+            .line_segment([egui::pos2(x, avg_y), egui::pos2(x2, avg_y)], egui::Stroke::new(1.0, avg_color));
+        x += dash + gap;
+    }
     // The line itself, one segment at a time.
     for w in points.windows(2) {
         ui.painter().line_segment([w[0], w[1]], egui::Stroke::new(1.5, ACCENT));
@@ -796,10 +907,11 @@ fn bitrate_sparkline(ui: &mut Ui, samples: &[f64], secs: f32) {
     }
     // The tooltip carries the current value, so a hover reads the number without
     // leaving the chart. The recent peak is included too (the peak marker's value),
-    // so a hover reads both where the stream is now and its recent high.
+    // and the recent average (the dashed reference line's value), so a hover reads
+    // where the stream is now, its recent high, and its normal level.
     let peak = samples.iter().copied().fold(0.0, f64::max);
     resp.on_hover_text(format!(
-        "video bitrate, last two minutes — now {now:.0} kbit/s, peak {peak:.0} kbit/s"
+        "video bitrate, last two minutes — now {now:.0} kbit/s, peak {peak:.0} kbit/s, avg {avg:.0} kbit/s"
     ));
 }
 
@@ -1111,6 +1223,97 @@ mod tests {
         assert!(
             ring(1.99).is_none(),
             "a nearly-faded ring paints nothing"
+        );
+    }
+
+    /// `bitrate_trend` classifies the recent direction: a clear rise reads Rising, a
+    /// clear drop reads Falling, a change within the noise band (and too few samples
+    /// to judge) reads Flat, and a two-sample rise still compares against the first.
+    #[test]
+    fn bitrate_trend_classifies_rising_falling_and_flat() {
+        assert_eq!(bitrate_trend(&[100.0, 100.0, 100.0, 200.0]), Trend::Rising);
+        assert_eq!(bitrate_trend(&[200.0, 200.0, 200.0, 100.0]), Trend::Falling);
+        // A 2 kbit/s wobble on a 100 kbit/s stream is within the band: flat.
+        assert_eq!(bitrate_trend(&[100.0, 100.0, 100.0, 102.0]), Trend::Flat);
+        // Too few samples to judge: flat.
+        assert_eq!(bitrate_trend(&[]), Trend::Flat);
+        assert_eq!(bitrate_trend(&[100.0]), Trend::Flat);
+        // A two-sample rise still compares against the first sample.
+        assert_eq!(bitrate_trend(&[100.0, 200.0]), Trend::Rising);
+    }
+
+    /// `trend_arrow` paints a triangle mesh for a rising or falling trend (the up /
+    /// down triangle) and a plain dash (a line segment, no mesh) for a flat trend, so
+    /// the three states read as distinct marks.
+    #[test]
+    fn the_trend_arrow_paints_a_triangle_or_a_dash() {
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(100.0, 100.0),
+            )),
+            ..Default::default()
+        };
+        let has_mesh = |trend: Trend| {
+            let ctx = egui::Context::default();
+            let mut out = ctx.run_ui(raw.clone(), |ui| trend_arrow(ui, trend));
+            out.textures_delta.clear();
+            out.shapes
+                .iter()
+                .any(|s| matches!(&s.shape, egui::epaint::Shape::Mesh(_)))
+        };
+        assert!(has_mesh(Trend::Rising), "a rising trend paints a triangle mesh");
+        assert!(has_mesh(Trend::Falling), "a falling trend paints a triangle mesh");
+        // Flat: a dash (a line segment), and no triangle mesh.
+        let ctx = egui::Context::default();
+        let mut out = ctx.run_ui(raw, |ui| trend_arrow(ui, Trend::Flat));
+        out.textures_delta.clear();
+        assert!(
+            out.shapes
+                .iter()
+                .any(|s| matches!(&s.shape, egui::epaint::Shape::LineSegment { .. })),
+            "a flat trend paints a dash"
+        );
+        assert!(
+            !out
+                .shapes
+                .iter()
+                .any(|s| matches!(&s.shape, egui::epaint::Shape::Mesh(_))),
+            "a flat trend paints no triangle"
+        );
+    }
+
+    /// The sparkline paints a dashed horizontal average reference line (several short
+    /// segments at the same y in the muted green-grey), distinct from the data line
+    /// (the accent) and the baseline / peak (dimmed accent), so the stream's normal
+    /// level is visible against the current value and the peak.
+    #[test]
+    fn the_sparkline_paints_a_dashed_average_reference_line() {
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(300.0, 60.0),
+            )),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(raw, |ui| {
+            bitrate_sparkline(ui, &[60.0, 120.0, 60.0], 0.0);
+        });
+        out.textures_delta.clear();
+        let avg_color = egui::Color32::from_rgb(120, 150, 135);
+        let avg_segs = out
+            .shapes
+            .iter()
+            .filter(|s| matches!(&s.shape,
+                egui::epaint::Shape::LineSegment { points, stroke }
+                    if (points[0].y - points[1].y).abs() < 0.01
+                        && stroke.color == avg_color
+            ))
+            .count();
+        assert!(
+            avg_segs >= 2,
+            "the sparkline should paint a dashed average line (got {avg_segs} segments)"
         );
     }
 }

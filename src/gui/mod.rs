@@ -1371,6 +1371,128 @@ fn apply_theme(ctx: &egui::Context) {
     });
 }
 
+/// The application's window / task-bar icon: a rounded square (the app's dark
+/// ground, lit from above) carrying a green "stream" — a thick diagonal conduit
+/// with a soft glow and a flow arrow at its tip — so the app has a small brand
+/// mark in the title bar and task bar instead of egui's default "e". Generated in
+/// code (no asset file), square, with a transparent margin outside the rounded
+/// square. The stream runs through the icon's centre and reads as "streaming" at
+/// a glance even at task-bar sizes.
+fn app_icon() -> Arc<egui::IconData> {
+    let size = 64usize;
+    let mut rgba = vec![0u8; size * size * 4];
+    for y in 0..size {
+        for x in 0..size {
+            let (r, g, b, a) = icon_pixel(x as f32, y as f32, size as f32);
+            let i = (y * size + x) * 4;
+            rgba[i] = r;
+            rgba[i + 1] = g;
+            rgba[i + 2] = b;
+            rgba[i + 3] = a;
+        }
+    }
+    Arc::new(egui::IconData {
+        rgba,
+        width: size as u32,
+        height: size as u32,
+    })
+}
+
+/// The colour of one icon pixel: the rounded-square ground (a subtle vertical
+/// gradient, lit from above), a soft glow around the stream, and the stream itself
+/// (a thick diagonal capsule plus a flow arrow) in the live accent. Transparent
+/// outside the rounded square.
+fn icon_pixel(x: f32, y: f32, size: f32) -> (u8, u8, u8, u8) {
+    let (px, py) = (x + 0.5, y + 0.5); // centre the sample in the pixel
+    let accent: (f32, f32, f32) = (80.0, 200.0, 120.0); // the live accent (ACCENT)
+    // The rounded-square ground.
+    let radius = size * 0.22;
+    let d_bg = rounded_box_sdf(px, py, size, radius);
+    if d_bg > 0.5 {
+        return (0, 0, 0, 0); // outside the icon
+    }
+    let edge = (0.5 - d_bg).clamp(0.0, 1.0); // 1 px anti-aliasing
+    // A subtle vertical gradient: lighter at the top (lit from above).
+    let t = (py / size).clamp(0.0, 1.0);
+    let (top, bot) = ((31.0, 34.0, 40.0), (19.0, 21.0, 25.0));
+    let mut r = top.0 + (bot.0 - top.0) * t;
+    let mut g = top.1 + (bot.1 - top.1) * t;
+    let mut b = top.2 + (bot.2 - top.2) * t;
+    // The stream: a thick diagonal capsule from lower-left to upper-right.
+    let a = (size * 0.30, size * 0.70);
+    let tip = (size * 0.70, size * 0.30);
+    let half = size * 0.085;
+    let glow = size * 0.10;
+    let d = dist_to_segment(px, py, a, tip);
+    if d < half + glow {
+        // A soft glow: strongest at the capsule's edge, fading outward.
+        let gt = ((half + glow - d) / glow).clamp(0.0, 1.0);
+        let ga = gt * gt * 0.5;
+        r = r * (1.0 - ga) + accent.0 * ga;
+        g = g * (1.0 - ga) + accent.1 * ga;
+        b = b * (1.0 - ga) + accent.2 * ga;
+    }
+    // The stream's core and its flow arrow: full accent.
+    let (dx, dy) = normalize(tip.0 - a.0, tip.1 - a.1);
+    let in_core = d <= half;
+    let in_arrow = point_in_triangle(
+        px,
+        py,
+        (tip.0 + dx * size * 0.15, tip.1 + dy * size * 0.15), // apex, ahead of the tip
+        (tip.0 - dy * size * 0.11, tip.1 + dx * size * 0.11), // base, one side
+        (tip.0 + dy * size * 0.11, tip.1 - dx * size * 0.11), // base, other side
+    );
+    if in_core || in_arrow {
+        (r, g, b) = accent;
+    }
+    (r as u8, g as u8, b as u8, (edge * 255.0) as u8)
+}
+
+/// A rounded box's signed distance field (negative inside): the box fills `[0,
+/// size]²` with corner radius `radius`.
+fn rounded_box_sdf(px: f32, py: f32, size: f32, radius: f32) -> f32 {
+    let (qx, qy) = (
+        (px - size * 0.5).abs() - (size * 0.5 - radius),
+        (py - size * 0.5).abs() - (size * 0.5 - radius),
+    );
+    (qx.max(0.0) * qx.max(0.0) + qy.max(0.0) * qy.max(0.0)).sqrt()
+        + (qx.min(0.0).max(qy.min(0.0)))
+        - radius
+}
+
+/// The distance from `(px, py)` to the segment `a..=b` (a capsule's centre line).
+fn dist_to_segment(px: f32, py: f32, a: (f32, f32), b: (f32, f32)) -> f32 {
+    let (abx, aby) = (b.0 - a.0, b.1 - a.1);
+    let t = (((px - a.0) * abx + (py - a.1) * aby) / (abx * abx + aby * aby)).clamp(0.0, 1.0);
+    let (cx, cy) = (a.0 + abx * t, a.1 + aby * t);
+    ((px - cx) * (px - cx) + (py - cy) * (py - cy)).sqrt()
+}
+
+/// Whether `(px, py)` is inside the triangle `p1 p2 p3`.
+fn point_in_triangle(px: f32, py: f32, p1: (f32, f32), p2: (f32, f32), p3: (f32, f32)) -> bool {
+    let sign = |a: (f32, f32), b: (f32, f32), c: (f32, f32)| {
+        (a.0 - c.0) * (b.1 - c.1) - (b.0 - c.0) * (a.1 - c.1)
+    };
+    let (d1, d2, d3) = (
+        sign((px, py), p1, p2),
+        sign((px, py), p2, p3),
+        sign((px, py), p3, p1),
+    );
+    let has_neg = (d1 < 0.0) || (d2 < 0.0) || (d3 < 0.0);
+    let has_pos = (d1 > 0.0) || (d2 > 0.0) || (d3 > 0.0);
+    !(has_neg && has_pos)
+}
+
+/// A unit vector (or `(0, 0)` for a zero input).
+fn normalize(x: f32, y: f32) -> (f32, f32) {
+    let len = (x * x + y * y).sqrt();
+    if len <= 0.0 {
+        (0.0, 0.0)
+    } else {
+        (x / len, y / len)
+    }
+}
+
 /// Open the GUI.
 ///
 /// Creates the background runtime, loads config, installs the tee logger, wires
@@ -1405,7 +1527,8 @@ pub fn run() {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([760.0, 560.0])
             .with_min_inner_size([560.0, 420.0])
-            .with_title("streampipe"),
+            .with_title("streampipe")
+            .with_icon(app_icon()),
         ..Default::default()
     };
 
@@ -3533,6 +3656,70 @@ mod tests {
                 egui::epaint::Shape::Text(t) if t.galley.text() == hint
             )),
             "a pasted ticket should hide the hint"
+        );
+    }
+
+    /// The window icon is a square, non-empty RGBA image whose centre is the live
+    /// accent (the stream runs through the centre) and whose corners are transparent
+    /// (outside the rounded square). Guards against an empty, mis-sized, or
+    /// all-opaque / all-transparent icon that the task bar would render blank or as a
+    /// solid block.
+    #[test]
+    fn the_app_icon_is_a_square_with_a_centred_stream() {
+        let icon = app_icon();
+        assert_eq!(icon.width, icon.height, "the icon is square");
+        assert!(!icon.is_empty(), "the icon has pixels");
+        assert_eq!(
+            icon.rgba.len(),
+            (icon.width * icon.height * 4) as usize,
+            "the rgba buffer is exactly width*height*4"
+        );
+        let size = icon.width as usize;
+        let px = |x: usize, y: usize| -> (u8, u8, u8, u8) {
+            let i = (y * size + x) * 4;
+            (
+                icon.rgba[i],
+                icon.rgba[i + 1],
+                icon.rgba[i + 2],
+                icon.rgba[i + 3],
+            )
+        };
+        // The centre sits on the stream's centre line: the full accent green.
+        let (r, g, b, a) = px(size / 2, size / 2);
+        assert!(a > 0, "the centre is opaque, got alpha {a}");
+        assert!(
+            g > r && g > b,
+            "the centre is the accent green (green leads), got ({r},{g},{b})"
+        );
+        // A corner is outside the rounded square: fully transparent.
+        assert_eq!(px(0, 0).3, 0, "the top-left corner is transparent");
+        assert_eq!(px(size - 1, size - 1).3, 0, "the bottom-right corner is transparent");
+        // The top edge-centre is inside the rounded square: opaque (not clipped).
+        assert!(
+            px(size / 2, 1).3 > 0,
+            "the top edge-centre is inside the icon and opaque"
+        );
+    }
+
+    /// The icon's ground is a subtle vertical gradient (lit from above): a pixel near
+    /// the top edge-centre is lighter than one near the bottom edge-centre, so the
+    /// icon reads as a surface lit from above (the same cue as the panel ground).
+    #[test]
+    fn the_app_icon_ground_is_lit_from_above() {
+        let icon = app_icon();
+        let size = icon.width as usize;
+        let lum = |y: usize| -> u32 {
+            // Sample a column just off the centre (away from the stream) so the
+            // ground gradient, not the accent, is measured.
+            let x = size / 2 + size / 4;
+            let i = (y * size + x) * 4;
+            (icon.rgba[i] as u32) + (icon.rgba[i + 1] as u32) + (icon.rgba[i + 2] as u32)
+        };
+        let top = lum(size / 8);
+        let bottom = lum(size - size / 8);
+        assert!(
+            top > bottom,
+            "the icon's top ({top}) should be lighter than its bottom ({bottom})"
         );
     }
 }
