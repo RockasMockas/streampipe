@@ -197,9 +197,15 @@ impl App {
         ui.add_space(12.0);
         let bw = ui.available_width();
         if broadcasting || starting {
-            // Once OBS is in, swap the "waiting" hint for a live viewer count in the
-            // accent colour, so a healthy stream reads at a glance.
+            // While OBS is actually delivering media, show nothing here: the
+            // statistics panel already proves the stream is live. The "waiting"
+            // hint only appears until the first media arrives from OBS, and a
+            // live viewer count in the accent colour reads at a glance once
+            // viewers join.
             let viewers = snap.stats.map(|s| s.viewers).unwrap_or(0);
+            let receiving = snap
+                .stats
+                .is_some_and(|s| s.video_kbps > 0.0 || s.audio_kbps > 0.0);
             if starting {
                 ui.label("starting…");
             } else if viewers > 0 {
@@ -210,7 +216,7 @@ impl App {
                         if viewers == 1 { "" } else { "s" }
                     ),
                 );
-            } else {
+            } else if !receiving {
                 ui.label("Waiting for OBS to start streaming to whip address...");
             }
             if ui
