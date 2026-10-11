@@ -94,6 +94,7 @@ impl App {
                 ui.painter(),
                 resp.rect,
                 ui.style().visuals.widgets.inactive.corner_radius,
+                ACCENT,
             );
         }
 
@@ -143,15 +144,31 @@ impl App {
             });
             ui.add_space(12.0);
             ui.label(egui::RichText::new("Buffer (ms)").size(big));
-            ui.add_enabled_ui(!busy, |ui| {
+            // A stable id, so the buffer field's focus can be read (for the focus
+            // glow below) the same way the ticket box's is.
+            let buffer_id = egui::Id::new("watch_buffer_input");
+            let buffer_resp = ui.add_enabled_ui(!busy, |ui| {
                 ui.add_sized(
                     [90.0, box_h],
                     egui::TextEdit::singleline(&mut self.watch_buffer)
+                        .id(buffer_id)
                         .hint_text(egui::RichText::new("auto").size(big))
                         .font(prop.clone())
                         .vertical_align(egui::Align::Center),
                 )
             });
+            // A soft accent glow around the focused buffer field (the same halo
+            // language as the ticket box's focus ring), so the active input reads as
+            // lit by the accent. A disabled (busy) field can never be focused, so the
+            // glow recedes on its own while a session is up.
+            if ui.ctx().memory(|m| m.has_focus(buffer_id)) {
+                soft_glow(
+                    ui.painter(),
+                    buffer_resp.inner.rect,
+                    ui.style().visuals.widgets.inactive.corner_radius,
+                    ACCENT,
+                );
+            }
         });
 
         if let Some(path) = self.config.player_paths.get(self.watch_player) {

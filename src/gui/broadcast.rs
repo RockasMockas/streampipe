@@ -457,7 +457,7 @@ impl App {
         // but dimmer: the box is a secondary surface, not the hero action). Drawn
         // before the glyph so the glyph sits on top of the glow.
         if hovered {
-            soft_glow(ui.painter(), rect, frame.corner_radius);
+            soft_glow(ui.painter(), rect, frame.corner_radius, ACCENT);
         }
         // A small "copy" glyph (two overlapping sheets) at the right edge, painted
         // non-interactively so it never steals the box's click. It brightens on hover
@@ -573,7 +573,7 @@ impl App {
             // exist (the first 5-second tick alone is not enough to form a line).
             if snap.video_kbps_history.len() >= 2 {
                 ui.add_space(6.0);
-                bitrate_sparkline(ui, &snap.video_kbps_history);
+                bitrate_sparkline(ui, &snap.video_kbps_history, self.pulse.elapsed().as_secs_f32());
             }
         });
         // A faint light catch along the panel's top edge, matching the copy boxes,
@@ -706,8 +706,11 @@ fn sparkline_points(samples: &[f64], rect: egui::Rect) -> Vec<egui::Pos2> {
 /// A small video-bitrate sparkline for the statistics panel: a vertical
 /// gradient area fill under a 1.5 px line, with a small "now" dot on the newest
 /// sample. Purely decorative of data the panel already shows as a number, so it
-/// is non-interactive apart from a hover tooltip.
-fn bitrate_sparkline(ui: &mut Ui, samples: &[f64]) {
+/// is non-interactive apart from a hover tooltip. `secs` drives the "now" dot's
+/// sonar pulse and is expected to advance between repaints (repaints already fire
+/// while broadcasting), so the live edge reads as an active signal rather than a
+/// static mark.
+fn bitrate_sparkline(ui: &mut Ui, samples: &[f64], secs: f32) {
     let width = ui.available_width();
     let height = 26.0;
     if samples.len() < 2 || width <= 0.0 {
@@ -763,9 +766,12 @@ fn bitrate_sparkline(ui: &mut Ui, samples: &[f64]) {
         ui.painter().line_segment([w[0], w[1]], egui::Stroke::new(1.5, ACCENT));
     }
     // A small dot on the newest sample, so "where the stream is right now" has a
-    // mark of its own rather than only the line's right edge.
+    // mark of its own rather than only the line's right edge. A soft sonar pulse
+    // around the dot (the same language as the status and viewers dots) makes the
+    // live edge read as an active signal rather than a static mark.
     if let Some(last) = points.last() {
         ui.painter().circle_filled(*last, 2.5, ACCENT);
+        sonar_pulse(ui.painter(), *last, 3.0, secs, 2.0, ACCENT);
     }
     // The tooltip carries the current value, so a hover reads the number without
     // leaving the chart.
@@ -1000,7 +1006,7 @@ mod tests {
             ..Default::default()
         };
         let mut out = ctx.run_ui(raw, |ui| {
-            bitrate_sparkline(ui, &[60.0, 120.0, 60.0]);
+            bitrate_sparkline(ui, &[60.0, 120.0, 60.0], 0.0);
         });
         out.textures_delta.clear();
 
@@ -1036,5 +1042,52 @@ mod tests {
                     if c.stroke.width == 0.0 && (2.0..3.0).contains(&c.radius) && c.fill.a() > 0
             ));
         assert!(dot, "the newest sample should carry a filled 'now' dot");
+    }
+
+    /// The "now" dot carries a soft sonar pulse (a stroked ring in the accent), so
+    /// the live edge of the chart reads as an active signal rather than a static
+    /// mark — the same language as the status and viewers dots. The ring is a
+    /// stroked circle (width > 0), distinct from the filled dot (width == 0), and it
+    /// expands and fades over the pulse.
+    #[test]
+    fn the_sparkline_now_dot_carries_a_sonar_pulse() {
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(300.0, 60.0),
+            )),
+            ..Default::default()
+        };
+        // The sonar ring at a given time: a stroked circle (width > 0).
+        let ring = |secs: f32| -> Option<f32> {
+            let ctx = egui::Context::default();
+            let mut out = ctx.run_ui(raw.clone(), |ui| {
+                bitrate_sparkline(ui, &[60.0, 120.0, 60.0], secs);
+            });
+            out.textures_delta.clear();
+            out.shapes
+                .iter()
+                .filter_map(|s| match &s.shape {
+                    egui::epaint::Shape::Circle(c) if c.stroke.width > 0.0 => {
+                        Some(c.radius)
+                    }
+                    _ => None,
+                })
+                .next()
+        };
+        // Mid-pulse: a ring is painted, and it expands over the pulse.
+        let early = ring(0.2).expect("an early-pulse frame paints a ring");
+        let late = ring(1.0).expect("a late-pulse frame paints a ring");
+        assert!(
+            late > early,
+            "the ring should expand over the pulse ({} -> {})",
+            early,
+            late
+        );
+        // Near the end of the pulse the ring has faded out: nothing is painted.
+        assert!(
+            ring(1.99).is_none(),
+            "a nearly-faded ring paints nothing"
+        );
     }
 }

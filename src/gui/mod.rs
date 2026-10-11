@@ -497,6 +497,22 @@ impl App {
                                 base.b(),
                                 (base.a() as f32 * alpha) as u8,
                             );
+                            // A faint hover highlight, so a line under the cursor is
+                            // easy to track in a dense log. The line's rect is
+                            // estimated from the current cursor and the text's natural
+                            // height; the highlight is painted before the content, so
+                            // the text and chip sit on top of it.
+                            let line_rect = egui::Rect::from_min_size(
+                                ui.cursor().min,
+                                egui::vec2(ui.available_width(), 16.0),
+                            );
+                            if pointer_over(ui, line_rect) {
+                                ui.painter().rect_filled(
+                                    line_rect,
+                                    egui::CornerRadius::same(3),
+                                    egui::Color32::from_white_alpha(12),
+                                );
+                            }
                             // A level chip (ERR/WARN) leads the line when one applies,
                             // so a problem pops out of the wall of grey log text. The
                             // chip fades in with the line (the same `alpha`).
@@ -963,14 +979,21 @@ fn primary_button_glow(
 
 /// A soft accent glow around a secondary interactive surface: two stacked rounded
 /// rects that fall off from the edge (nearest strongest, farthest faintest). The
-/// shared halo language for the copy box's hover and the ticket box's focus, so
-/// both read as lit by the accent under the same cue. Dimmer than the hero
+/// shared halo language for the copy box's hover and the ticket/buffer boxes' focus,
+/// so both read as lit by the accent under the same cue. Dimmer than the hero
 /// buttons' halo: the surfaces it lights are secondary, not the hero action.
 /// Purely decorative: it takes no layout space. `corner` matches the surface's own
-/// corner radius so the glow hugs its rounded outline.
-pub(crate) fn soft_glow(painter: &egui::Painter, rect: egui::Rect, corner: egui::CornerRadius) {
+/// corner radius so the glow hugs its rounded outline, and `color` is the accent the
+/// surface is lit by (the live green for a broadcast surface, the watch blue for a
+/// watch surface), so the glow's hue matches the surface's own accent.
+pub(crate) fn soft_glow(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    corner: egui::CornerRadius,
+    color: egui::Color32,
+) {
     for (expand, alpha) in [(4.0, 0.03), (2.0, 0.06)] {
-        painter.rect_filled(rect.expand(expand), corner, ACCENT.gamma_multiply(alpha));
+        painter.rect_filled(rect.expand(expand), corner, color.gamma_multiply(alpha));
     }
 }
 
@@ -3201,6 +3224,103 @@ mod tests {
             chip_color("INFO"),
             None,
             "an info line should carry no chip"
+        );
+    }
+
+    /// Hovering a log line paints a faint background highlight, so a line under the
+    /// cursor is easy to track in a dense log. The highlight is a faint white rect
+    /// (alpha 12), painted before the line's content so the text sits on top. A line
+    /// that is not hovered paints no such highlight.
+    #[test]
+    fn hovering_a_log_line_paints_a_faint_highlight() {
+        let (mut app, _rt) = test_app();
+        app.log_open = true;
+        app.log_anim = 1.0;
+        log::push(&app.log, "a log line to hover");
+        let size = egui::vec2(760.0, 560.0);
+        // The faint highlight: a filled rect in a faint white (alpha 12).
+        let has_highlight = |shapes: &[egui::epaint::ClippedShape]| -> bool {
+            shapes.iter().any(|s| matches!(&s.shape,
+                egui::epaint::Shape::Rect(r) if r.fill == egui::Color32::from_white_alpha(12)
+            ))
+        };
+        // Not hovered: no highlight.
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), size)),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(raw.clone(), |ui| app.draw(ui));
+        out.textures_delta.clear();
+        assert!(
+            !has_highlight(&out.shapes),
+            "an un-hovered log line paints no highlight"
+        );
+        // Locate the log line's text so the pointer can be moved over it.
+        let line_rect = out
+            .shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                egui::epaint::Shape::Text(t) if t.galley.text() == "a log line to hover" => {
+                    Some(egui::Rect::from_min_size(t.pos, t.galley.size()))
+                }
+                _ => None,
+            })
+            .expect("the log line is painted");
+        let center = line_rect.center();
+        // Hover the log line: two passes make the hover live (egui reads the pointer
+        // from the previous pass).
+        let ctx2 = egui::Context::default();
+        let raw_hover = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), size)),
+            events: vec![egui::Event::PointerMoved(center)],
+            ..Default::default()
+        };
+        let mut out2 = ctx2.run_ui(raw_hover.clone(), |ui| app.draw(ui));
+        out2.textures_delta.clear();
+        let mut out3 = ctx2.run_ui(raw_hover, |ui| app.draw(ui));
+        out3.textures_delta.clear();
+        assert!(
+            has_highlight(&out3.shapes),
+            "hovering a log line should paint a faint highlight"
+        );
+    }
+
+    /// `soft_glow` paints a two-layer halo in the colour it is given (not a
+    /// hard-coded accent), so the shared halo language can light a surface in its
+    /// own accent (the live green for a broadcast surface, the watch blue for a
+    /// watch surface). The two layers are 0.03 and 0.06 alpha in that colour.
+    #[test]
+    fn soft_glow_paints_a_halo_in_the_given_color() {
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(100.0, 100.0),
+            )),
+            ..Default::default()
+        };
+        // The watch blue, not the default accent green, so the test proves the
+        // colour is honoured rather than hard-coded.
+        let color = WATCH_ACCENT;
+        let mut out = ctx.run_ui(raw, |ui| {
+            let rect = egui::Rect::from_min_size(egui::pos2(10.0, 10.0), egui::vec2(80.0, 30.0));
+            soft_glow(ui.painter(), rect, egui::CornerRadius::same(4), color);
+        });
+        out.textures_delta.clear();
+        let count = out
+            .shapes
+            .iter()
+            .filter(|s| match &s.shape {
+                egui::epaint::Shape::Rect(r) => [0.03, 0.06]
+                    .iter()
+                    .any(|&a| r.fill == color.gamma_multiply(a)),
+                _ => false,
+            })
+            .count();
+        assert_eq!(
+            count, 2,
+            "soft_glow should paint a 2-layer halo in the given colour"
         );
     }
 }
