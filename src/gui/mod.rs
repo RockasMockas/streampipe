@@ -102,6 +102,12 @@ pub struct App {
     tab_fade_active: bool,
     /// The instant of the last tab switch, the fade-in's clock origin.
     tab_switched_at: Instant,
+    /// The log panel's open fraction: 0.0 = fully closed, 1.0 = fully open. Tweened
+    /// in [`App::log_panel`] so toggling the panel slides its height instead of
+    /// hard-cutting between 0 and half the window.
+    log_anim: f32,
+    /// The previous frame's wall clock, for the log panel tween's frame delta.
+    log_last_frame: Instant,
 }
 
 impl App {
@@ -139,6 +145,8 @@ impl App {
             tab_fade: 1.0,
             tab_fade_active: false,
             tab_switched_at: Instant::now(),
+            log_anim: 0.0,
+            log_last_frame: Instant::now(),
         }
     }
 
@@ -188,31 +196,44 @@ impl App {
         });
     }
 
-    /// The app wordmark: a large, crisp, near-white title with a soft drop
-    /// shadow. The foreground is a single anti-aliased glyph (no faux-bold
-    /// offset copies, which render jaggy); weight comes from size and the
-    /// shadow gives it depth.
+    /// The app wordmark: a large, crisp, two-tone title with a soft drop shadow.
+    /// "Stream" is near-white and "pipe" a soft accent green, so the wordmark
+    /// carries a small brand mark and echoes the live accent used across the app.
+    /// Each word is a single anti-aliased glyph (no faux-bold offset copies, which
+    /// render jaggy); weight comes from size and the shadow gives it depth.
     fn brand_title(&mut self, ui: &mut Ui) {
-        let text = "Streampipe";
         let font_id = egui::FontId::proportional(30.0);
         let fg = egui::Color32::from_rgb(242, 242, 246);
-
-        let fg_galley = ui.painter().layout_no_wrap(text.into(), font_id.clone(), fg);
-        // A soft shadow: the same glyph in dark, low-alpha layers at a few
+        // A soft, slightly lightened accent green for "pipe": clearly green, but
+        // muted enough to read as a brand tint rather than a status colour.
+        let pipe = egui::Color32::from_rgb(110, 205, 150);
+        // A soft shadow: the same glyphs in dark, low-alpha layers at a few
         // offsets, faking a blurred drop shadow behind the crisp text.
         let shadow = egui::Color32::from_black_alpha(70);
-        let shadow_galley = ui.painter().layout_no_wrap(text.into(), font_id, shadow);
 
-        // Room for the glyph plus the shadow's furthest offset so it isn't clipped.
-        let size = fg_galley.size() + egui::vec2(3.0, 3.0);
+        let stream = ui.painter().layout_no_wrap("Stream".into(), font_id.clone(), fg);
+        let pipe_galley = ui.painter().layout_no_wrap("pipe".into(), font_id.clone(), pipe);
+        let stream_shadow = ui.painter().layout_no_wrap("Stream".into(), font_id.clone(), shadow);
+        let pipe_shadow = ui.painter().layout_no_wrap("pipe".into(), font_id, shadow);
+
+        // The two words sit side by side; the total width is the sum of the two
+        // galleys. Room for the glyph plus the shadow's furthest offset so it is
+        // not clipped.
+        let size = egui::vec2(
+            stream.size().x + pipe_galley.size().x,
+            stream.size().y.max(pipe_galley.size().y),
+        ) + egui::vec2(3.0, 3.0);
         let (rect, _resp) = ui.allocate_exact_size(size, egui::Sense::hover());
         let pos = rect.min;
+        let pipe_x = egui::vec2(stream.size().x, 0.0);
 
         let painter = ui.painter();
         for off in [egui::vec2(1.0, 1.0), egui::vec2(2.0, 2.0), egui::vec2(3.0, 3.0)] {
-            painter.galley(pos + off, shadow_galley.clone(), egui::Color32::PLACEHOLDER);
+            painter.galley(pos + off, stream_shadow.clone(), egui::Color32::PLACEHOLDER);
+            painter.galley(pos + pipe_x + off, pipe_shadow.clone(), egui::Color32::PLACEHOLDER);
         }
-        painter.galley(pos, fg_galley, egui::Color32::PLACEHOLDER);
+        painter.galley(pos, stream, egui::Color32::PLACEHOLDER);
+        painter.galley(pos + pipe_x, pipe_galley, egui::Color32::PLACEHOLDER);
     }
 
     /// Switch to `tab`, re-arming the content fade-in and the primary-control
@@ -235,6 +256,15 @@ impl App {
     fn tab_bar(&mut self, ui: &mut Ui) {
         self.brand_title(ui);
         ui.add_space(6.0);
+        // Which tracks are live, so the active tab can carry a small breathing dot
+        // (green for a broadcast, blue for a watch) — a live session is then visible
+        // at a glance right on the strip, not only in the status bar below.
+        let snap = state::snapshot(&self.state);
+        let watch_live = snap.watch == Mode::Watching;
+        let bc_live = snap.broadcast == Mode::Broadcasting;
+        // The dot's breath clock; it only advances while a repaint is running, which
+        // is exactly while a session is live, so the dot breathes only when it should.
+        let secs = self.pulse.elapsed().as_secs_f32();
         // Two equal-width tabs that fill the whole strip; the selectable label is
         // sized to its half so the entire tab box (not just the text) is the click
         // target.
@@ -254,7 +284,11 @@ impl App {
                 // would otherwise suppress egui's hover feedback and the strip would
                 // feel dead under the mouse. Hovering lifts either tab toward the
                 // selected look, so the whole box reads as a live control.
-                let make = |ui: &mut Ui, label: &str, selected: bool| {
+                let make = |ui: &mut Ui,
+                            label: &str,
+                            selected: bool,
+                            live: bool,
+                            dot_color: egui::Color32| {
                     // The whole box is the click target; the hover is read from the
                     // same response before the surface is painted.
                     let (rect, resp) =
@@ -292,15 +326,46 @@ impl App {
                     let galley = ui
                         .painter()
                         .layout_no_wrap(label.to_string(), font_id, text_color);
+                    // The live dot (if any) sits just right of the label; the label
+                    // and dot are centred together as one group, so adding the dot
+                    // does not lurch the label off-centre. Read the label's width
+                    // before painting it (the paint consumes the galley).
+                    let label_w = galley.rect.width();
+                    let dot_d = 5.0;
+                    let gap = 6.0;
+                    let total_w = label_w + if live { gap + dot_d } else { 0.0 };
+                    let start_x = rect.center().x - total_w * 0.5;
                     let text_pos = egui::pos2(
-                        rect.center().x - galley.rect.width() * 0.5,
+                        start_x,
                         rect.center().y - galley.rect.height() * 0.5,
                     );
                     ui.painter().galley(text_pos, galley, text_color);
+                    if live {
+                        // A shallow breath (the same curve as the status dot) so the
+                        // dot reads as a live signal rather than a static mark.
+                        let dot = dot_color.gamma_multiply(pulse_factor(secs));
+                        let dot_c = egui::pos2(
+                            start_x + label_w + gap + dot_d * 0.5,
+                            rect.center().y,
+                        );
+                        ui.painter().circle_filled(dot_c, dot_d * 0.5, dot);
+                    }
                     resp
                 };
-                let w = make(ui, "Watch Stream", self.tab == Tab::Watch);
-                let b = make(ui, "Broadcast", self.tab == Tab::Broadcast);
+                let w = make(
+                    ui,
+                    "Watch Stream",
+                    self.tab == Tab::Watch,
+                    watch_live,
+                    WATCH_ACCENT,
+                );
+                let b = make(
+                    ui,
+                    "Broadcast",
+                    self.tab == Tab::Broadcast,
+                    bc_live,
+                    ACCENT,
+                );
                 if w.clicked() {
                     self.switch_tab(Tab::Watch);
                 }
@@ -331,14 +396,30 @@ impl App {
     /// The log panel along the bottom.
     ///
     /// Fully collapsed (height 0) by default. Toggled by Ctrl/Cmd+L to occupy
-    /// half the window height.
+    /// half the window height. The height is tweened (see [`log_anim_step`]) so
+    /// the panel slides open and closed instead of hard-cutting between the two
+    /// extremes; the tween runs on the wall clock and stops requesting frames the
+    /// moment it settles, so an idle (closed) window still falls asleep.
     fn log_panel(&mut self, ui: &mut Ui) {
-        if !self.log_open {
+        // Tween the open fraction toward 1.0 (open) or 0.0 (closed). Only a toggle
+        // (which repaints) ever changes the target, so the tween only moves right
+        // after one and then settles.
+        let target = if self.log_open { 1.0 } else { 0.0 };
+        let now = Instant::now();
+        let dt = (now - self.log_last_frame).as_secs_f32().clamp(0.0, 0.1);
+        self.log_last_frame = now;
+        let log_moving = (self.log_anim - target).abs() > 0.002;
+        if log_moving {
+            self.log_anim = log_anim_step(self.log_anim, target, dt);
+        }
+        // Fully closed: no panel, no repaint, so an idle window sleeps.
+        if self.log_anim <= 0.001 {
             return;
         }
         let half = ui.ctx().content_rect().height() * 0.5;
+        let h = (half * self.log_anim).max(1.0);
         egui::Panel::bottom("log")
-            .exact_size(half)
+            .exact_size(h)
             .show(ui, |ui| {
                 let lines = log::snapshot(&self.log);
                 egui::ScrollArea::vertical()
@@ -355,6 +436,11 @@ impl App {
             });
         // Repaint while expanded so streaming logs appear without a storm.
         ui.ctx().request_repaint_after(REPAINT);
+        // The height slide wants display-rate frames, not the 250 ms session
+        // cadence, so it gets its own as-soon-as-possible repaint while in flight.
+        if log_moving {
+            ui.ctx().request_repaint();
+        }
     }
 
     /// The floating status pill ("Copied ✓", "Relay refreshed ✓", …), anchored
@@ -802,6 +888,23 @@ fn sonar_pulse(
 /// repaints and an idle window falls asleep again.
 fn tab_slide_step(current: f32, target: f32, dt: f32) -> f32 {
     let next = current + (target - current) * (1.0 - (-dt * 30.0).exp());
+    if (next - target).abs() <= 0.002 {
+        target
+    } else {
+        next
+    }
+}
+
+/// One step of the log panel's height tween: `current` moves toward `target` (the
+/// open fraction, 0.0 closed / 1.0 open) by a fraction of the remaining distance
+/// that grows with `dt` (wall-clock seconds), so the slide's speed is independent
+/// of frame rate. A step never overshoots, and once within `0.002` of the target it
+/// snaps on, so the caller can stop requesting repaints and an idle window falls
+/// asleep again. A touch slower than the tab underline (`30.0` vs `18.0`), so the
+/// larger travel (up to half the window) reads as a deliberate slide rather than a
+/// snap.
+fn log_anim_step(current: f32, target: f32, dt: f32) -> f32 {
+    let next = current + (target - current) * (1.0 - (-dt * 18.0).exp());
     if (next - target).abs() <= 0.002 {
         target
     } else {
@@ -1819,6 +1922,141 @@ mod tests {
                 .iter()
                 .any(|s| matches!(&s.shape, egui::epaint::Shape::Rect(r) if r.fill == hover_fill)),
             "hovering the start button should lift its fill to the hover shade"
+        );
+    }
+
+    /// The log panel's height tween approaches its target monotonically, settles
+    /// exactly on it after a realistic number of 60 fps frames (so the repaint
+    /// guard can disarm and an idle window falls asleep), and stays settled. The
+    /// reverse direction (open -> closed) settles the same way.
+    #[test]
+    fn log_anim_settles_on_the_target_without_overshooting() {
+        // A single 60 fps step moves partway but never past the target.
+        let step = log_anim_step(0.0, 1.0, 1.0 / 60.0);
+        assert!(step > 0.0 && step < 1.0, "one frame is partway, got {step}");
+
+        // Stepping at 60 fps settles exactly on the target; the slide should take
+        // well under a second of frames, never overshoot, and never stall.
+        let mut pos = 0.0;
+        let mut frames = 0;
+        while pos != 1.0 {
+            pos = log_anim_step(pos, 1.0, 1.0 / 60.0);
+            frames += 1;
+            assert!(pos <= 1.0, "no overshoot at frame {frames}, got {pos}");
+            assert!(frames < 60, "the slide must settle within 1 s, took {frames} frames");
+        }
+        assert!(
+            frames < 45,
+            "settling took {frames} frames (~{} ms at 60 fps)",
+            frames * 1000 / 60
+        );
+
+        // Settled stays settled: the repaint guard can disarm.
+        assert_eq!(log_anim_step(1.0, 1.0, 1.0 / 60.0), 1.0);
+        // The reverse direction (open -> closed) settles the same way.
+        let mut pos = 1.0;
+        while pos != 0.0 {
+            pos = log_anim_step(pos, 0.0, 1.0 / 60.0);
+        }
+        assert_eq!(pos, 0.0);
+    }
+
+    /// A filled small circle in the tab strip (y < 120): the live dot is the only
+    /// one. The status dot is a text glyph (not a `Shape::Circle`), and the sonar
+    /// pulses are *stroked* rings (`stroke.width > 0`), so a filled-circle check
+    /// isolates the live dot.
+    fn live_dot_present(shapes: &[egui::epaint::ClippedShape]) -> bool {
+        shapes.iter().any(|s| match &s.shape {
+            egui::epaint::Shape::Circle(c) => {
+                c.stroke.width == 0.0
+                    && (2.0..=3.0).contains(&c.radius)
+                    && c.center.y < 120.0
+                    && c.fill.a() > 0
+            }
+            _ => false,
+        })
+    }
+
+    /// While a track is live, its tab carries a small filled "live" dot in the tab
+    /// strip (green for a broadcast, blue for a watch), so a live session is visible
+    /// at a glance right on the strip. While idle, no such dot is painted.
+    #[test]
+    fn the_active_tab_carries_a_live_dot_when_live() {
+        // A live broadcast paints a dot on the Broadcast tab.
+        let (mut app, _rt) = test_app();
+        app.tab = Tab::Broadcast;
+        app.state.lock().unwrap().broadcast = Mode::Broadcasting;
+        let size = egui::vec2(760.0, 560.0);
+        assert!(
+            live_dot_present(&render_shapes(&mut app, size)),
+            "a live broadcast should paint a live dot on its tab"
+        );
+
+        // A live watch paints a dot on the Watch tab (the broadcast is idle, so the
+        // only live dot is the watch's).
+        let (mut app, _rt) = test_app();
+        app.tab = Tab::Watch;
+        app.state.lock().unwrap().watch = Mode::Watching;
+        assert!(
+            live_dot_present(&render_shapes(&mut app, size)),
+            "a live watch should paint a live dot on its tab"
+        );
+
+        // Idle: no live dot anywhere on the strip.
+        let (mut app, _rt) = test_app();
+        app.tab = Tab::Broadcast;
+        assert!(
+            !live_dot_present(&render_shapes(&mut app, size)),
+            "an idle tab should not paint a live dot"
+        );
+    }
+
+    /// The brand title is two-tone: "Stream" in near-white and "pipe" in a soft
+    /// accent green, so the wordmark carries a small brand mark. The title is
+    /// painted as two separate galleys (not one "Streampipe"), and each word's
+    /// foreground colour is the one it was laid out with.
+    #[test]
+    fn the_brand_title_is_two_tone() {
+        let (mut app, _rt) = test_app();
+        let size = egui::vec2(760.0, 560.0);
+        let shapes = render_shapes(&mut app, size);
+        let pipe_green = egui::Color32::from_rgb(110, 205, 150);
+        let stream_white = egui::Color32::from_rgb(242, 242, 246);
+        // Whether a shape is a text galley holding `text`.
+        let is_text = |s: &egui::epaint::ClippedShape, text: &str| -> bool {
+            matches!(&s.shape, egui::epaint::Shape::Text(t) if t.galley.text() == text)
+        };
+        // A galley's laid-out colour is its first section's format colour.
+        let color_of = |s: &egui::epaint::ClippedShape| -> Option<egui::Color32> {
+            match &s.shape {
+                egui::epaint::Shape::Text(t) => {
+                    t.galley.job.sections.first().map(|sec| sec.format.color)
+                }
+                _ => None,
+            }
+        };
+        // The title is split into two words, each painted (plus its shadow).
+        assert!(
+            shapes.iter().any(|s| is_text(s, "Stream")),
+            "the title should paint a 'Stream' galley"
+        );
+        assert!(
+            shapes.iter().any(|s| is_text(s, "pipe")),
+            "the title should paint a 'pipe' galley"
+        );
+        // The "pipe" word is the accent green and the "Stream" word near-white
+        // (the foreground galleys; the shadows are a dark low-alpha tint).
+        assert!(
+            shapes
+                .iter()
+                .any(|s| is_text(s, "pipe") && color_of(s) == Some(pipe_green)),
+            "the 'pipe' word should be the accent green"
+        );
+        assert!(
+            shapes
+                .iter()
+                .any(|s| is_text(s, "Stream") && color_of(s) == Some(stream_white)),
+            "the 'Stream' word should be near-white"
         );
     }
 }
