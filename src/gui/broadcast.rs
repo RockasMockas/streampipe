@@ -840,25 +840,26 @@ fn bitrate_sparkline(ui: &mut Ui, samples: &[f64], secs: f32) {
         rect.bottom(),
         egui::Stroke::new(1.0, ACCENT.gamma_multiply(0.25)),
     );
-    // Area fill under the line: a triangle fan from the bottom edge whose alpha
-    // is a function of height — strongest just below the line, fading to nothing
-    // at the bottom edge. A colour that is linear in y interpolates exactly across
-    // each triangle, so the gradient is smooth. The same "lit from above" cue as
-    // the panel ground and the top bevels.
+    // Area fill under the line: a triangle fan from the bottom-left corner whose
+    // alpha is a function of height — strongest just below the line, fading to
+    // nothing at the bottom edge. A colour that is linear in y interpolates exactly
+    // across each triangle, so the gradient is smooth. The same "lit from above" cue
+    // as the panel ground and the top bevels. The fan is closed with a bottom-right
+    // vertex so the fill reaches the line across the full width (a fan to the line
+    // points alone leaves the region under the right end of the line unfilled).
     let fill = |y: f32| {
         let t = ((rect.max.y - y) / rect.height()).clamp(0.0, 1.0);
         ACCENT.gamma_multiply(0.22 * t)
     };
     let mut mesh = egui::epaint::Mesh::default();
     mesh.colored_vertex(egui::pos2(rect.left(), rect.bottom()), fill(rect.bottom()));
-    mesh.colored_vertex(egui::pos2(rect.right(), rect.bottom()), fill(rect.bottom()));
     for (i, &p) in points.iter().enumerate() {
-        let v = 2 + i as u32;
+        let v = 1 + i as u32;
         mesh.colored_vertex(p, fill(p.y));
-        if i + 1 < points.len() {
-            mesh.add_triangle(0, v, v + 1);
-        }
+        mesh.add_triangle(0, v, v + 1);
     }
+    // Close the fan along the bottom edge: bottom-left → last point → bottom-right.
+    mesh.colored_vertex(egui::pos2(rect.right(), rect.bottom()), fill(rect.bottom()));
     ui.painter().add(egui::Shape::mesh(mesh));
     // A faint dashed horizontal line at the recent average, so the current value and
     // the peak can be read against the stream's "normal" level (the peak marker shows
