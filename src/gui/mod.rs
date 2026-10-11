@@ -1666,6 +1666,7 @@ mod tests {
 
     use super::*;
     use super::config::DEFAULT_VOLUME;
+    use super::options::CLOSE_GREY;
 
     /// An `App` wired to throwaway state, plus the runtime it borrows a handle
     /// from (kept alive by the caller).
@@ -2980,6 +2981,107 @@ mod tests {
             count, 3,
             "the Save button should paint a 3-layer accent halo"
         );
+    }
+
+    /// The Settings footer is a matched pair of actions: "Save" in the accent green
+    /// and "Close" in a neutral grey, both the same 90x30 box with the same halo
+    /// language, so they read as one set with the green one leading. Clicking Save
+    /// writes the config and raises the floating "Saved ✓" pill; clicking Close
+    /// dismisses the panel.
+    #[test]
+    fn the_settings_footer_is_a_matched_pair_and_save_raises_a_toast() {
+        // The click below writes the config, so redirect the config dir into a temp
+        // folder (serialized with the other config-dir test by the same mutex).
+        let _guard = config::CONFIG_ENV.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", dir.path());
+
+        let (mut app, _rt) = test_app();
+        app.show_options = true;
+        let ctx = egui::Context::default();
+        let size = egui::vec2(760.0, 560.0);
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), size)),
+            ..Default::default()
+        };
+        // Two settling passes so the window and its footer reach their final size.
+        let mut out = ctx.run_ui(raw.clone(), |ui| app.draw(ui));
+        out.textures_delta.clear();
+        let mut out = ctx.run_ui(raw.clone(), |ui| app.draw(ui));
+        out.textures_delta.clear();
+
+        let rect_of = |fill: egui::Color32| {
+            out.shapes.iter().find_map(|s| match &s.shape {
+                egui::epaint::Shape::Rect(r) if r.fill == fill && r.rect.height() == 30.0 => {
+                    Some(r.rect)
+                }
+                _ => None,
+            })
+        };
+        let save = rect_of(ACCENT.gamma_multiply(0.18)).expect("Save paints its resting fill");
+        let close = rect_of(CLOSE_GREY.gamma_multiply(0.12))
+            .expect("Close paints its resting grey fill");
+        // Same box, side by side: the pair matches, the grey one is the secondary.
+        assert_eq!(save.size(), close.size(), "Save and Close are the same box");
+        assert_eq!((save.width(), save.height()), (90.0, 30.0));
+        assert!(close.min.x > save.max.x, "Close sits to the right of Save");
+
+        // A click is a press frame then a release frame on the same point. Driven by
+        // a nested `fn` (not a closure) so it only borrows the app while it runs,
+        // leaving the flags below readable between the two clicks.
+        fn click_at(app: &mut App, ctx: &egui::Context, at: egui::Pos2, size: egui::Vec2) {
+            let press = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), size)),
+                events: vec![
+                    egui::Event::PointerMoved(at),
+                    egui::Event::PointerButton {
+                        button: egui::PointerButton::Primary,
+                        pos: at,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                ..Default::default()
+            };
+            let release = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), size)),
+                events: vec![egui::Event::PointerButton {
+                    button: egui::PointerButton::Primary,
+                    pos: at,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(press, |ui| app.draw(ui));
+            out.textures_delta.clear();
+            let mut out = ctx.run_ui(release, |ui| app.draw(ui));
+            out.textures_delta.clear();
+        }
+
+        // Save: the config goes to disk and the confirmation pill is raised.
+        click_at(&mut app, &ctx, save.center(), size);
+        assert_eq!(
+            app.toast.as_ref().map(|(msg, _)| msg.as_str()),
+            Some("Saved ✓"),
+            "Save raises the confirmation toast"
+        );
+        assert!(
+            dir.path()
+                .join("streampipe")
+                .join("config.json")
+                .exists(),
+            "Save wrote the redirected config"
+        );
+        assert!(app.show_options, "Save leaves the panel open");
+
+        // Close: the panel goes away, and the toast has expired by then (the click
+        // above was two frames ago, the pill lasts 1500 ms of wall clock, and the
+        // draw loop expires it).
+        click_at(&mut app, &ctx, close.center(), size);
+        assert!(!app.show_options, "Close dismisses the panel");
+
+        std::env::remove_var("XDG_CONFIG_HOME");
     }
 
     /// Log lines are coloured by their level prefix (tracing's `LEVEL target:

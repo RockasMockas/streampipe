@@ -290,6 +290,14 @@ pub fn config_path() -> PathBuf {
     config_dir().join(CONFIG_FILE)
 }
 
+/// Serializes the tests that redirect `$XDG_CONFIG_HOME`: it is a process-wide
+/// variable, so two of them setting it at once would read each other's config dir
+/// and make the assertions flicker. Lives at module scope (not inside the test
+/// module) so the panel tests in `super::mod`, which also write the config, can
+/// take the same lock.
+#[cfg(test)]
+pub(crate) static CONFIG_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// A sibling temp path used for atomic writes.
 fn tmp_path(path: &Path) -> PathBuf {
     let name = format!(
@@ -304,11 +312,6 @@ fn tmp_path(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Serializes the tests that redirect `$XDG_CONFIG_HOME`: it is a process-wide
-    /// variable, so two of them setting it at once would read each other's config
-    /// dir and make the assertions flicker.
-    static CONFIG_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn defaults_match_acceptance() {

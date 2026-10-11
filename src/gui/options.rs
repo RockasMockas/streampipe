@@ -6,12 +6,22 @@
 //! Save (and on quit). The default player set here is auto-selected on the
 //! Watch tab at open.
 
+use std::time::Instant;
+
 use eframe::egui::{self, Context, Ui};
 
 use super::{
     config::{player_key, PLAYERS},
     App, ACCENT, pointer_over, pointer_pressed_over, primary_button_glow,
 };
+
+/// The neutral grey the Close button is painted in: the same halo/fill/stroke
+/// language as the accent-green primary "Save", just desaturated, so the two read
+/// as one set of matching actions with Save leading.
+pub(crate) const CLOSE_GREY: egui::Color32 = egui::Color32::from_rgb(150, 155, 165);
+/// The size of both action buttons in the panel's footer, so Save and Close are
+/// the same box.
+const BUTTON: egui::Vec2 = egui::vec2(90.0, 30.0);
 
 impl App {
     /// Show the Options window, closing it when its close button is pressed or
@@ -162,10 +172,10 @@ impl App {
         ui.horizontal(|ui| {
             // The accent primary "Save" button, matching the hero buttons on the tabs:
             // an accent fill + stroke + a soft glow, so the one action that commits the
-            // edits reads as the primary commitment (Close stays a plain secondary).
+            // edits reads as the primary commitment.
             // The fixed `.fill()` suppresses egui's own hover feedback, so the hover is
             // read from the pointer and lifts both the glow and the fill.
-            let save_rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(90.0, 30.0));
+            let save_rect = egui::Rect::from_min_size(ui.cursor().min, BUTTON);
             let hovered = pointer_over(ui, save_rect);
             let pressed = pointer_pressed_over(ui, save_rect);
             primary_button_glow(ui.painter(), save_rect, ACCENT, hovered, pressed);
@@ -187,12 +197,50 @@ impl App {
                         0.55
                     }),
                 ));
-            if ui.add_sized([90.0, 30.0], save).clicked() {
+            if ui.add_sized(BUTTON, save).clicked() {
                 self.sync_watch_from_config();
                 self.config.save();
+                // Confirm the commit with the floating pill, bottom-centre, fading out
+                // over the toast window (1.5 s). It is drawn last and on its own
+                // foreground layer, so it floats above this window instead of nudging
+                // its rows.
+                self.toast = Some(("Saved ✓".to_string(), Instant::now()));
                 ui.ctx().request_repaint();
             }
-            if ui.button("Close").clicked() {
+            // "Close" is the same box and the same painted language as "Save" — fill,
+            // stroke, halo, hover lift and press-in — in a neutral grey, so the footer
+            // reads as two matching actions with the green one leading. Grey is dimmer
+            // than the accent at rest and its halo is a shade lower, so "Close" stays
+            // visibly the secondary action even at the same size.
+            let close_rect = egui::Rect::from_min_size(ui.cursor().min, BUTTON);
+            let close_hovered = pointer_over(ui, close_rect);
+            let close_pressed = pointer_pressed_over(ui, close_rect);
+            primary_button_glow(
+                ui.painter(),
+                close_rect,
+                CLOSE_GREY,
+                close_hovered,
+                close_pressed,
+            );
+            let close = egui::Button::new("Close")
+                .fill(CLOSE_GREY.gamma_multiply(if close_pressed {
+                    0.14
+                } else if close_hovered {
+                    0.20
+                } else {
+                    0.12
+                }))
+                .stroke(egui::Stroke::new(
+                    1.0,
+                    CLOSE_GREY.gamma_multiply(if close_pressed {
+                        0.35
+                    } else if close_hovered {
+                        0.55
+                    } else {
+                        0.40
+                    }),
+                ));
+            if ui.add_sized(BUTTON, close).clicked() {
                 self.show_options = false;
             }
         });
