@@ -8,7 +8,8 @@ use eframe::egui::{self, Context, Ui};
 use super::{
     config::{player_key, PLAYERS},
     state::{self, Mode, WatchParams},
-    App, ACCENT, ERROR, WATCH_ACCENT, error_callout, pointer_over, primary_button_glow,
+    App, ACCENT, ERROR, WATCH_ACCENT, error_callout, pointer_over, pointer_pressed_over,
+    primary_button_glow,
     section_tick, spinner,
 };
 
@@ -143,10 +144,12 @@ impl App {
             ui.horizontal(|ui| {
                 // A subtle red halo behind the Stop button, matching the Broadcast
                 // tab, so the one control that stops a watch reads as a "stop" action.
+                // The halo also contracts on press, so the stop reads as pressed in.
                 let stop_rect =
                     egui::Rect::from_min_size(ui.cursor().min, egui::vec2(140.0, 30.0));
                 let hovered = pointer_over(ui, stop_rect);
-                primary_button_glow(ui.painter(), stop_rect, ERROR, hovered);
+                let pressed = pointer_pressed_over(ui, stop_rect);
+                primary_button_glow(ui.painter(), stop_rect, ERROR, hovered, pressed);
                 if ui
                     .add(egui::Button::new("■  Stop").min_size(egui::vec2(140.0, 30.0)))
                     .clicked()
@@ -174,14 +177,27 @@ impl App {
                         egui::vec2(ui.available_width(), 36.0),
                     );
                     let hovered = can_start && pointer_over(ui, start_rect);
+                    let pressed = can_start && pointer_pressed_over(ui, start_rect);
                     if can_start {
-                        primary_button_glow(ui.painter(), start_rect, ACCENT, hovered);
+                        primary_button_glow(ui.painter(), start_rect, ACCENT, hovered, pressed);
                     }
                     let button = egui::Button::new("▶  Watch Stream")
-                        .fill(ACCENT.gamma_multiply(if hovered { 0.26 } else { 0.18 }))
+                        .fill(ACCENT.gamma_multiply(if pressed {
+                            0.20
+                        } else if hovered {
+                            0.26
+                        } else {
+                            0.18
+                        }))
                         .stroke(egui::Stroke::new(
                             1.0,
-                            ACCENT.gamma_multiply(if hovered { 0.75 } else { 0.55 }),
+                            ACCENT.gamma_multiply(if pressed {
+                                0.50
+                            } else if hovered {
+                                0.75
+                            } else {
+                                0.55
+                            }),
                         ));
                     ui.add_sized([ui.available_width(), 36.0], button)
                 })

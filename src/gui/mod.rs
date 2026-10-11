@@ -42,6 +42,9 @@ const ERROR: egui::Color32 = egui::Color32::from_rgb(220, 90, 90);
 /// How long the tab content's fade-in takes, so a tab switch fades the new content
 /// in rather than hard-cutting. Short enough to feel instant, long enough to read.
 const TAB_FADE_SECS: f32 = 0.16;
+/// How long a new log line fades in (seconds), so a line eases in rather than
+/// popping in. Short enough to feel instant, long enough to read as a gentle reveal.
+const LOG_FADE_SECS: f32 = 0.2;
 
 /// The two main tabs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -434,6 +437,16 @@ impl App {
         }
         let half = ui.ctx().content_rect().height() * 0.5;
         let h = (half * self.log_anim).max(1.0);
+        // Snapshot the lines (with their arrival instants) before the panel, so the
+        // fade-in repaint guard below can be armed from the same data the panel draws.
+        let lines = log::snapshot(&self.log);
+        // Whether any line is still fading in (younger than the fade window). While
+        // true, the panel wants display-rate frames so the fade is smooth; the moment
+        // every line is fully opaque the guard disarms and the panel falls back to the
+        // 250 ms session cadence (so an idle, settled log still lets the window sleep).
+        let any_fading = lines
+            .iter()
+            .any(|(_, at)| at.elapsed().as_secs_f32() < LOG_FADE_SECS);
         egui::Panel::bottom("log")
             .exact_size(h)
             .show(ui, |ui| {
@@ -451,7 +464,6 @@ impl App {
                     });
                 });
                 ui.separator();
-                let lines = log::snapshot(&self.log);
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .stick_to_bottom(true)
@@ -460,8 +472,22 @@ impl App {
                         if lines.is_empty() {
                             ui.weak("no log output yet");
                         }
-                        for line in lines {
-                            let color = log_line_color(&line, default);
+                        for (line, added_at) in &lines {
+                            // A new line eases in over the fade window: an ease-out
+                            // cubic from its arrival instant, so the line appears
+                            // quickly then settles gently rather than popping in.
+                            // Older lines (and everything present when the panel
+                            // opened) are already fully opaque.
+                            let t = (added_at.elapsed().as_secs_f32() / LOG_FADE_SECS)
+                                .clamp(0.0, 1.0);
+                            let alpha = 1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t);
+                            let base = log_line_color(line, default);
+                            let color = egui::Color32::from_rgba_unmultiplied(
+                                base.r(),
+                                base.g(),
+                                base.b(),
+                                (base.a() as f32 * alpha) as u8,
+                            );
                             ui.label(
                                 egui::RichText::new(line)
                                     .monospace()
@@ -473,9 +499,10 @@ impl App {
             });
         // Repaint while expanded so streaming logs appear without a storm.
         ui.ctx().request_repaint_after(REPAINT);
-        // The height slide wants display-rate frames, not the 250 ms session
-        // cadence, so it gets its own as-soon-as-possible repaint while in flight.
-        if log_moving {
+        // The height slide and the line fade-in both want display-rate frames, not
+        // the 250 ms session cadence, so either in flight gets its own
+        // as-soon-as-possible repaint.
+        if log_moving || any_fading {
             ui.ctx().request_repaint();
         }
     }
@@ -878,16 +905,28 @@ fn central_gradient(painter: &egui::Painter, rect: egui::Rect, alpha: f32) {
 /// muted red for a Stop, so the halo's hue matches the button's intent.
 ///
 /// `hover` lifts the halo: the alphas roughly double, so the hero action reads as
-/// lit brighter under the mouse. The hero buttons use a fixed `.fill()`, which
-/// suppresses egui's own hover feedback, so the glow carries the hover response.
+/// lit brighter under the mouse. `pressed` contracts it: the alphas drop below the
+/// resting level and the halo tightens, so the hero action reads as physically
+/// pressed in rather than flat. The hero buttons use a fixed `.fill()`, which
+/// suppresses egui's own hover feedback, so the glow carries the hover and press
+/// response.
 fn primary_button_glow(
     painter: &egui::Painter,
     rect: egui::Rect,
     color: egui::Color32,
     hover: bool,
+    pressed: bool,
 ) {
     let corner = egui::CornerRadius::same(10);
-    let (a1, a2, a3) = if hover { (0.04, 0.09, 0.16) } else { (0.02, 0.05, 0.09) };
+    // A pressed halo is dimmer than even the resting halo, so the button reads as
+    // pushed in. A hover is the brightest. The resting state is the baseline.
+    let (a1, a2, a3) = if pressed {
+        (0.01, 0.03, 0.06)
+    } else if hover {
+        (0.04, 0.09, 0.16)
+    } else {
+        (0.02, 0.05, 0.09)
+    };
     for (expand, alpha) in [(6.0, a1), (4.0, a2), (2.0, a3)] {
         painter.rect_filled(rect.expand(expand), corner, color.gamma_multiply(alpha));
     }
@@ -900,6 +939,22 @@ fn pointer_over(ui: &Ui, rect: egui::Rect) -> bool {
     ui.ctx()
         .input(|i| i.pointer.latest_pos())
         .is_some_and(|p| rect.contains(p))
+}
+
+/// Whether the primary pointer button is pressed over `rect` this frame, for a
+/// hand-painted widget's press response. The hero buttons use a fixed `.fill()`,
+/// which suppresses egui's own hover *and* active feedback, so the press is read
+/// from the pointer position and button state instead. A press always implies a
+/// hover (the pointer is over the rect), so callers can treat `pressed` as a
+/// refinement of `hovered`.
+fn pointer_pressed_over(ui: &Ui, rect: egui::Rect) -> bool {
+    ui.ctx().input(|i| {
+        i.pointer.button_pressed(egui::PointerButton::Primary)
+            && i
+                .pointer
+                .latest_pos()
+                .is_some_and(|p| rect.contains(p))
+    })
 }
 
 /// A sonar pulse: a soft ring that expands from a live indicator's dot and fades
@@ -2582,6 +2637,190 @@ mod tests {
         assert!(
             !app.log_open,
             "clicking the close button must close the log panel"
+        );
+    }
+
+    /// A freshly-arrived log line is faded in (its text alpha is reduced), while a
+    /// line that arrived long ago is fully opaque. This is the log fade-in: new lines
+    /// ease in over the fade window rather than popping in.
+    #[test]
+    fn a_new_log_line_fades_in_and_an_old_one_is_opaque() {
+        let (mut app, _rt) = test_app();
+        app.log_open = true;
+        app.log_anim = 1.0;
+        // Two lines: the first (front) is backdated so it is fully opaque, the second
+        // (back) is fresh so it is still fading in.
+        log::push(&app.log, "old line");
+        log::push(&app.log, "fresh line");
+        {
+            let mut ring = app.log.lock().unwrap();
+            if let Some(entry) = ring.front_mut() {
+                entry.1 = Instant::now() - Duration::from_secs(5);
+            }
+        }
+        let size = egui::vec2(760.0, 560.0);
+        let shapes = render_shapes(&mut app, size);
+        // Read the laid-out colour's alpha of the text galley holding `text`.
+        let alpha_of = |text: &str| -> Option<u8> {
+            shapes.iter().find_map(|s| match &s.shape {
+                egui::epaint::Shape::Text(t) if t.galley.text() == text => t
+                    .galley
+                    .job
+                    .sections
+                    .first()
+                    .map(|sec| sec.format.color.a()),
+                _ => None,
+            })
+        };
+        let old_alpha = alpha_of("old line").expect("the old line is painted");
+        let fresh_alpha = alpha_of("fresh line").expect("the fresh line is painted");
+        assert_eq!(old_alpha, 255, "a backdated line is fully opaque");
+        assert!(
+            fresh_alpha < 255,
+            "a fresh line is faded in, got alpha {fresh_alpha}"
+        );
+    }
+
+    /// Pressing the idle Start button pushes its fill in to the press shade (a touch
+    /// darker than the hover lift), so the hero action reads as physically pressed in
+    /// rather than flat. The pointer is over the button and the primary button is held.
+    #[test]
+    fn pressing_the_start_button_pushes_its_fill_in() {
+        let (mut app, _rt) = test_app();
+        app.tab = Tab::Broadcast;
+        let size = egui::vec2(760.0, 560.0);
+        let resting_fill = ACCENT.gamma_multiply(0.18);
+        let press_fill = ACCENT.gamma_multiply(0.20);
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                size,
+            )),
+            ..Default::default()
+        };
+        // Idle: locate the button by its resting fill.
+        let ctx = egui::Context::default();
+        let mut out = ctx.run_ui(raw, |ui| app.draw(ui));
+        out.textures_delta.clear();
+        let btn_rect = out
+            .shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                egui::epaint::Shape::Rect(r) if r.fill == resting_fill => Some(r.rect),
+                _ => None,
+            })
+            .expect("the idle start button paints its resting fill");
+        let center = btn_rect.center();
+
+        // Press: the pointer moves over the button and the primary button is held.
+        // Two passes make the pressed fill live (egui reads the pointer from the
+        // previous pass).
+        let ctx2 = egui::Context::default();
+        let raw_press = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                size,
+            )),
+            events: vec![
+                egui::Event::PointerMoved(center),
+                egui::Event::PointerButton {
+                    button: egui::PointerButton::Primary,
+                    pos: center,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            ..Default::default()
+        };
+        let mut out2 = ctx2.run_ui(raw_press.clone(), |ui| app.draw(ui));
+        out2.textures_delta.clear();
+        let mut out3 = ctx2.run_ui(raw_press, |ui| app.draw(ui));
+        out3.textures_delta.clear();
+        assert!(
+            out3
+                .shapes
+                .iter()
+                .any(|s| matches!(&s.shape, egui::epaint::Shape::Rect(r) if r.fill == press_fill)),
+            "pressing the start button should push its fill in to the press shade"
+        );
+    }
+
+    /// Hovering a copy box paints a soft 2-layer accent glow around it and brightens
+    /// its copy glyph (0.5 -> 0.8), so the "click to copy" affordance reads as lit and
+    /// alive under the mouse. A live broadcast shows the copy boxes.
+    #[test]
+    fn hovering_a_copy_box_paints_a_soft_glow_and_brightens_the_glyph() {
+        let (mut app, _rt) = test_app();
+        app.tab = Tab::Broadcast;
+        app.state.lock().unwrap().broadcast = Mode::Broadcasting;
+        let size = egui::vec2(760.0, 560.0);
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                size,
+            )),
+            ..Default::default()
+        };
+        // Locate the WHIP copy box by its accent-tinted fill (alpha 14 at rest).
+        let ctx = egui::Context::default();
+        let mut out = ctx.run_ui(raw, |ui| app.draw(ui));
+        out.textures_delta.clear();
+        let box_fill = egui::Color32::from_rgba_unmultiplied(80, 200, 120, 14);
+        let box_rect = out
+            .shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                egui::epaint::Shape::Rect(r) if r.fill == box_fill => Some(r.rect),
+                _ => None,
+            })
+            .expect("the copy box paints its accent-tinted fill");
+        let center = box_rect.center();
+
+        // Hover the copy box: two passes make the hover live.
+        let ctx2 = egui::Context::default();
+        let raw_hover = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                size,
+            )),
+            events: vec![egui::Event::PointerMoved(center)],
+            ..Default::default()
+        };
+        let mut out2 = ctx2.run_ui(raw_hover.clone(), |ui| app.draw(ui));
+        out2.textures_delta.clear();
+        let mut out3 = ctx2.run_ui(raw_hover, |ui| app.draw(ui));
+        out3.textures_delta.clear();
+        // The glow: two accent rects at 0.03 and 0.06 alpha (the farthest and nearest
+        // layers of the halo). The start button is idle (not pressed), so its halo
+        // uses the resting alphas (0.02/0.05/0.09) and cannot match.
+        let glow_count = out3
+            .shapes
+            .iter()
+            .filter(|s| match &s.shape {
+                egui::epaint::Shape::Rect(r) => [0.03, 0.06]
+                    .iter()
+                    .any(|&a| r.fill == ACCENT.gamma_multiply(a)),
+                _ => false,
+            })
+            .count();
+        assert_eq!(
+            glow_count, 2,
+            "hovering the copy box should paint a 2-layer soft glow"
+        );
+        // The copy glyph brightens on hover (0.5 -> 0.8): its two sheets are stroked
+        // in the brighter accent.
+        let glyph_bright = ACCENT.gamma_multiply(0.8);
+        let glyph_count = out3
+            .shapes
+            .iter()
+            .filter(|s| match &s.shape {
+                egui::epaint::Shape::Rect(r) => r.stroke.color == glyph_bright,
+                _ => false,
+            })
+            .count();
+        assert!(
+            glyph_count >= 2,
+            "hovering the copy box should brighten its copy glyph"
         );
     }
 }

@@ -10,7 +10,7 @@ use eframe::egui::{self, Context, Ui};
 
 use super::{
     config::{player_key, PLAYERS},
-    App, ACCENT, pointer_over, primary_button_glow,
+    App, ACCENT, pointer_over, pointer_pressed_over, primary_button_glow,
 };
 
 impl App {
@@ -167,12 +167,25 @@ impl App {
             // read from the pointer and lifts both the glow and the fill.
             let save_rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(90.0, 30.0));
             let hovered = pointer_over(ui, save_rect);
-            primary_button_glow(ui.painter(), save_rect, ACCENT, hovered);
+            let pressed = pointer_pressed_over(ui, save_rect);
+            primary_button_glow(ui.painter(), save_rect, ACCENT, hovered, pressed);
             let save = egui::Button::new("Save")
-                .fill(ACCENT.gamma_multiply(if hovered { 0.26 } else { 0.18 }))
+                .fill(ACCENT.gamma_multiply(if pressed {
+                    0.20
+                } else if hovered {
+                    0.26
+                } else {
+                    0.18
+                }))
                 .stroke(egui::Stroke::new(
                     1.0,
-                    ACCENT.gamma_multiply(if hovered { 0.75 } else { 0.55 }),
+                    ACCENT.gamma_multiply(if pressed {
+                        0.50
+                    } else if hovered {
+                        0.75
+                    } else {
+                        0.55
+                    }),
                 ));
             if ui.add_sized([90.0, 30.0], save).clicked() {
                 self.sync_watch_from_config();

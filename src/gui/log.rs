@@ -10,6 +10,7 @@ use std::{
     collections::VecDeque,
     io::{self, Write},
     sync::{Arc, Mutex},
+    time::Instant,
 };
 
 use tracing_subscriber::{fmt::MakeWriter, EnvFilter};
@@ -17,8 +18,10 @@ use tracing_subscriber::{fmt::MakeWriter, EnvFilter};
 /// The most log lines kept in the ring for the GUI log panel.
 const MAX_LINES: usize = 2000;
 
-/// A bounded, thread-safe ring of log lines.
-pub type LogRing = Arc<Mutex<VecDeque<String>>>;
+/// A bounded, thread-safe ring of log lines, each tagged with the instant it was
+/// added so the log panel can fade a new line in over the first ~200 ms instead of
+/// popping it in.
+pub type LogRing = Arc<Mutex<VecDeque<(String, Instant)>>>;
 
 /// Create an empty ring.
 pub fn new_ring() -> LogRing {
@@ -26,18 +29,18 @@ pub fn new_ring() -> LogRing {
 }
 
 /// A snapshot of the ring for rendering (cloned so the lock is never held by
-/// the UI).
-pub fn snapshot(ring: &LogRing) -> Vec<String> {
+/// the UI), with each line's arrival instant so the panel can fade new lines in.
+pub fn snapshot(ring: &LogRing) -> Vec<(String, Instant)> {
     ring.lock()
         .map(|ring| ring.iter().cloned().collect())
         .unwrap_or_default()
 }
 
 /// Push a manual line into the ring (used for GUI-originated messages that are
-/// not produced by `tracing`).
+/// not produced by `tracing`), tagged with the current instant for the fade-in.
 pub fn push(ring: &LogRing, line: impl Into<String>) {
     if let Ok(mut ring) = ring.lock() {
-        ring.push_back(line.into());
+        ring.push_back((line.into(), Instant::now()));
         while ring.len() > MAX_LINES {
             ring.pop_front();
         }
@@ -131,7 +134,9 @@ mod tests {
         w.write_all(b"first\nsecond").unwrap();
         w.flush().unwrap();
         let snap = snapshot(&ring);
-        assert_eq!(snap, vec!["first", "second"]);
+        // Each line is tagged with an arrival instant; check the text in order.
+        let texts: Vec<&str> = snap.iter().map(|(s, _)| s.as_str()).collect();
+        assert_eq!(texts, vec!["first", "second"]);
     }
 
     #[test]
@@ -142,6 +147,9 @@ mod tests {
         }
         let snap = snapshot(&ring);
         assert_eq!(snap.len(), MAX_LINES);
-        assert_eq!(snap.last().unwrap(), &format!("line {}", MAX_LINES + 49));
+        assert_eq!(
+            snap.last().unwrap().0,
+            format!("line {}", MAX_LINES + 49)
+        );
     }
 }

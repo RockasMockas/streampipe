@@ -13,7 +13,8 @@ use super::{
     config::Config,
     flash_alpha,
     state::{self, BindAddrs, BroadcastParams, Mode},
-    App, ACCENT, ERROR, FLASH, error_callout, pointer_over, primary_button_glow, section_tick,
+    App, ACCENT, ERROR, FLASH, error_callout, pointer_over, pointer_pressed_over,
+    primary_button_glow, section_tick,
     sonar_pulse, spinner, stat_ease, top_bevel,
 };
 
@@ -228,10 +229,12 @@ impl App {
             }
             // A subtle red halo behind the Stop button, so the one control that tears
             // down a live stream reads as a "stop" action at a glance (the same muted
-            // red the tab uses for errors).
+            // red the tab uses for errors). The halo also contracts on press, so the
+            // teardown reads as physically pressed in.
             let stop_rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(bw, 36.0));
             let hovered = pointer_over(ui, stop_rect);
-            primary_button_glow(ui.painter(), stop_rect, ERROR, hovered);
+            let pressed = pointer_pressed_over(ui, stop_rect);
+            primary_button_glow(ui.painter(), stop_rect, ERROR, hovered, pressed);
             if ui
                 .add_sized([bw, 36.0], egui::Button::new("■  Stop Broadcasting"))
                 .clicked()
@@ -244,15 +247,30 @@ impl App {
             // reads as lit by the live green rather than a flat button. Painted
             // before the button so the button covers the halo's centre. The fixed
             // `.fill()` below suppresses egui's own hover feedback, so the hover is
-            // read from the pointer and lifts both the halo and the fill.
+            // read from the pointer and lifts both the halo and the fill. The press
+            // is read the same way and pushes the button in (fill darkens, halo
+            // contracts), so the hero action feels tactile rather than flat.
             let start_rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(bw, 36.0));
             let hovered = pointer_over(ui, start_rect);
-            primary_button_glow(ui.painter(), start_rect, ACCENT, hovered);
+            let pressed = pointer_pressed_over(ui, start_rect);
+            primary_button_glow(ui.painter(), start_rect, ACCENT, hovered, pressed);
             let button = egui::Button::new("●  Start Broadcasting")
-                .fill(ACCENT.gamma_multiply(if hovered { 0.26 } else { 0.18 }))
+                .fill(ACCENT.gamma_multiply(if pressed {
+                    0.20
+                } else if hovered {
+                    0.26
+                } else {
+                    0.18
+                }))
                 .stroke(egui::Stroke::new(
                     1.0,
-                    ACCENT.gamma_multiply(if hovered { 0.75 } else { 0.55 }),
+                    ACCENT.gamma_multiply(if pressed {
+                        0.50
+                    } else if hovered {
+                        0.75
+                    } else {
+                        0.55
+                    }),
                 ));
             // Autofocus the start control on the first window-focused idle frame so
             // Enter/Space starts it; the Stop button (shown while active) is never
@@ -425,13 +443,27 @@ impl App {
         // `on_hover_text` consumes the response, so interactions are read off it
         // before it is handed to the tooltip.
         let rect = inner.response.rect;
+        // Whether the pointer is over the box this frame, for the hover affordance.
+        // Read from the pointer (rather than the response, which is computed below)
+        // so the copy glyph and the soft glow can be lit before the interaction is
+        // sensed. For a stable rect this agrees with `resp.hovered()` below.
+        let hovered = pointer_over(ui, rect);
         // A faint light catch along the top edge, so the box reads as a surface lit
         // from above rather than a flat tint. Painted first, so the copy glyph and
         // the hover stroke (drawn next) sit on top of it.
         top_bevel(ui.painter(), rect, frame.corner_radius.nw);
+        // A soft accent glow around the box on hover, so the copy affordance reads as
+        // lit and alive under the mouse (the same halo language as the hero buttons,
+        // but dimmer: the box is a secondary surface, not the hero action). Drawn
+        // before the glyph so the glyph sits on top of the glow.
+        if hovered {
+            copy_box_glow(ui.painter(), rect, frame.corner_radius);
+        }
         // A small "copy" glyph (two overlapping sheets) at the right edge, painted
-        // non-interactively so it never steals the box's click.
-        let glyph = ACCENT.gamma_multiply(0.5 + 0.5 * flash);
+        // non-interactively so it never steals the box's click. It brightens on hover
+        // (0.5 -> 0.8) so the "click to copy" affordance reads at a glance, and the
+        // copy flash (0..1) lifts it to full strength the moment the text is copied.
+        let glyph = ACCENT.gamma_multiply((if hovered { 0.8f32 } else { 0.5f32 }).max(flash));
         for sheet in copy_glyph_rects(rect) {
             ui.painter().rect_stroke(
                 sheet,
@@ -741,6 +773,22 @@ fn fit_monospace(ui: &Ui, text: &str, max_width: f32) -> String {
     let head_s: String = text.chars().take(head).collect();
     let tail_s: String = text.chars().skip(count - tail).collect();
     format!("{head_s}…{tail_s}")
+}
+
+/// A soft accent glow around a copy box on hover, so the "click to copy" affordance
+/// reads as lit and alive under the mouse. Two stacked rounded rects fall off from
+/// the box's edge (nearest strongest, farthest faintest), the same halo language as
+/// the hero buttons but dimmer: the copy box is a secondary surface, not the hero
+/// action, so the glow recedes. `corner` matches the box's own corner radius so the
+/// glow hugs the box's rounded outline. Purely decorative: it takes no layout space.
+fn copy_box_glow(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    corner: egui::CornerRadius,
+) {
+    for (expand, alpha) in [(4.0, 0.03), (2.0, 0.06)] {
+        painter.rect_filled(rect.expand(expand), corner, ACCENT.gamma_multiply(alpha));
+    }
 }
 
 /// The two sheets of the copy glyph, anchored at the right edge of a copy box.
