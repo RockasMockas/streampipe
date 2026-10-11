@@ -10,9 +10,11 @@
 //! A single [`Endpoint`] is created once (from the persisted secret) and reused
 //! across start/stop cycles, so the endpoint identity is stable. Stopping a
 //! session is a synchronous [`tokio::task::JoinHandle::abort`], which drops the
-//! WHIP `serve` future (freeing the HTTP port), stops accepting, and drops the
-//! viewer's player handle (killing the player). The endpoint itself is kept for
-//! reuse and only dropped when the app quits.
+//! WHIP `serve` future: the HTTP listener is freed, the accept loops stop, and
+//! — because the engine keeps every connection and viewer task in an
+//! `AbortOnDrop` join set — all of them are aborted too, so no socket,
+//! connection, or forwarding task outlives the stop. The endpoint itself is
+//! kept for reuse and only dropped when the app quits.
 
 use std::{
     collections::VecDeque,
@@ -665,11 +667,14 @@ pub fn spawn_watch(
 
 /// Abort one track's session, if any, returning that track to idle.
 ///
-/// Synchronous by design: `abort` drops the engine future, which frees the WHIP
-/// port, stops accepting, and kills the player. The shared endpoint is kept for
-/// reuse. Stopping one track never disturbs the other — a live broadcast keeps
-/// serving while you stop a watch and vice versa — because the watch owns its own
-/// throwaway endpoint and the broadcast owns the shared one.
+/// Synchronous by design: `abort` drops the engine future, which frees the
+/// WHIP port, stops accepting, kills the player, and — since the engine keeps
+/// its connection and viewer tasks in `AbortOnDrop` join sets — aborts every
+/// spawned connection handler too, so a stopped session leaves nothing bound,
+/// connected, or processing. The shared endpoint is kept for reuse. Stopping
+/// one track never disturbs the other — a live broadcast keeps serving while
+/// you stop a watch and vice versa — because the watch owns its own throwaway
+/// endpoint and the broadcast owns the shared one.
 pub fn stop(state: &Arc<Mutex<SharedState>>, ctx: &egui::Context, track: Track) {
     let session = {
         let mut g = state.lock().unwrap();

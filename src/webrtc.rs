@@ -53,6 +53,7 @@ use tokio::{
     net::UdpSocket,
     process::Command,
     sync::mpsc,
+    task::JoinSet,
     time::{interval, sleep, sleep_until, MissedTickBehavior},
 };
 
@@ -62,7 +63,7 @@ use crate::{
         TAG_FRAGMENT, TAG_KEYFRAME_REQ, TAG_SESSION, TAG_VIDEO,
     },
     sdp::{self, MediaHeader, MediaKind, OfferMedia, SessionHeader},
-    whip::{self, Answer, WhipRequest},
+    whip::{self, AbortOnDrop, Answer, WhipRequest},
 };
 
 /// The local address media is played out on when the user does not pick one.
@@ -742,20 +743,39 @@ fn primary_ipv4() -> Option<Ipv4Addr> {
 }
 
 /// Accept viewers on the endpoint until the endpoint is closed.
+///
+/// Viewer tasks live in an [`AbortOnDrop`] set, mirroring [`whip::serve`]:
+/// dropping this future (the GUI aborts the session on "Stop Broadcasting")
+/// stops accepting *and* aborts every running viewer handler, so no viewer
+/// connection, media forwarder, or liveness stream outlives the session.
 async fn accept_viewers(endpoint: Endpoint, tx: mpsc::Sender<ViewerEvent>) -> Result<()> {
+    let mut viewers = AbortOnDrop::<()>(JoinSet::new());
     loop {
-        let Some(incoming) = endpoint.accept().await else {
-            break;
-        };
-        let accepting = match incoming.accept() {
-            Ok(accepting) => accepting,
-            Err(e) => {
-                tracing::warn!("error accepting connection: {e}");
+        let accepting = tokio::select! {
+            incoming = endpoint.accept() => {
+                let Some(incoming) = incoming else {
+                    break;
+                };
+                match incoming.accept() {
+                    Ok(accepting) => accepting,
+                    Err(e) => {
+                        tracing::warn!("error accepting connection: {e}");
+                        continue;
+                    }
+                }
+            }
+            // Reap finished viewers so the set does not grow without bound;
+            // the guard keeps the branch from completing instantly (and
+            // spinning the loop) while the set is empty.
+            Some(joined) = viewers.join_next(), if !viewers.is_empty() => {
+                if let Err(cause) = joined {
+                    tracing::debug!("viewer task cancelled: {cause}");
+                }
                 continue;
             }
         };
         let tx = tx.clone();
-        tokio::spawn(async move {
+        viewers.spawn(async move {
             if let Err(cause) = handle_viewer(accepting, tx).await {
                 tracing::warn!("error handling viewer: {cause}");
             }

@@ -32,6 +32,7 @@ use hyper_util::rt::TokioIo;
 use n0_error::{Result, StdResultExt};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinSet;
 
 /// The content type of an SDP offer or answer.
 const SDP: &str = "application/sdp";
@@ -115,10 +116,52 @@ impl State {
     }
 }
 
+/// A [`JoinSet`] whose tasks die with the set: dropping it aborts every task
+/// that has not finished.
+///
+/// `tokio::spawn` *detaches*: aborting the session task that drives
+/// [`serve`] would drop the accept loop and its listener, but plainly spawned
+/// connection tasks would keep running, holding the accepted sockets open and
+/// answering requests forever. Keeping the tasks in this guarded set makes the
+/// teardown complete — when the [`serve`] future is dropped (the GUI's "Stop
+/// Broadcasting" aborts the session task), the listener is closed *and* every
+/// connection task is aborted, so no socket, connection, or request handling
+/// outlives the session.
+pub struct AbortOnDrop<T: 'static>(pub JoinSet<T>);
+
+impl<T: 'static> std::ops::Deref for AbortOnDrop<T> {
+    type Target = JoinSet<T>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T: 'static> std::ops::DerefMut for AbortOnDrop<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl<T: 'static> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        // Abort every task that has not finished. `abort_all` is the
+        // synchronous counterpart of the async `shutdown`: no `.await`
+        // needed — the tasks are cancelled at their next suspension point
+        // and their sockets are dropped with them.
+        self.0.abort_all();
+    }
+}
+
 /// Serve WHIP requests on `addr` until the returned future is dropped.
 ///
 /// Offers, trickle fragments and deletes are forwarded to the sender, which is
 /// expected to be owned by the media session loop.
+///
+/// Teardown is complete: dropping the future closes the listening socket *and*
+/// aborts every connection task (they live in an [`AbortOnDrop`] set), so
+/// nothing keeps the port's connections open or keeps processing requests
+/// after the session is stopped.
 pub async fn serve(
     addr: SocketAddr,
     token: Option<String>,
@@ -138,15 +181,29 @@ pub async fn serve(
         tx,
     });
 
+    // Connection tasks live in a guarded set so they die with the server:
+    // plainly spawned tasks are detached and would outlive `serve`, keeping
+    // the accepted sockets open and answering requests forever.
+    let mut conns = AbortOnDrop::<()>(JoinSet::new());
     loop {
-        let (stream, peer) = listener
-            .accept()
-            .await
-            .std_context("error accepting tcp connection")?;
+        let (stream, peer) = tokio::select! {
+            accepted = listener.accept() => {
+                accepted.std_context("error accepting tcp connection")?
+            }
+            // Reap finished connections so the set does not grow without
+            // bound. The guard keeps the branch from completing instantly
+            // while the set is empty, which would spin the loop.
+            Some(joined) = conns.join_next(), if !conns.is_empty() => {
+                if let Err(cause) = joined {
+                    tracing::debug!("a whip http connection task was cancelled: {cause}");
+                }
+                continue;
+            }
+        };
         let io = TokioIo::new(stream);
         let state = state.clone();
         tracing::debug!("got whip http connection from {peer}");
-        tokio::spawn(async move {
+        conns.spawn(async move {
             let service = service_fn(move |req| {
                 let state = state.clone();
                 async move { handle(req, state).await }
@@ -362,4 +419,69 @@ fn text(status: StatusCode, body: &str) -> Response<Full<Bytes>> {
         .header(CONTENT_TYPE, "text/plain; charset=utf-8")
         .body(Full::new(Bytes::from(body.to_string())))
         .unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncReadExt;
+    use tokio::net::TcpStream;
+    use tokio::time::{timeout, Duration};
+
+    /// Stopping the WHIP server must tear down *everything*: the listening
+    /// socket is freed and every accepted connection is closed. Regression
+    /// test for the "Stop Broadcasting" bug: connection tasks were spawned
+    /// with plain `tokio::spawn`, so they were detached, survived the
+    /// session abort, and kept the port's established connection open and
+    /// answering requests forever.
+    #[tokio::test]
+    async fn dropping_serve_frees_the_port_and_closes_connections() {
+        // A free port: bind a probe, take its port, drop the probe.
+        let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+
+        let (tx, _rx) = mpsc::channel::<WhipRequest>(16);
+        let handle = tokio::spawn(serve(addr, None, tx));
+
+        // Open a connection; the server accepts it and keeps it alive.
+        let mut client = loop {
+            match TcpStream::connect(addr).await {
+                Ok(stream) => break stream,
+                Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+            }
+        };
+
+        // Stop: abort the task running `serve`.
+        handle.abort();
+        let _ = handle.await;
+
+        // The accepted connection must close — as a clean EOF or a reset
+        // (dropping hyper's `serve_connection` closes the socket), not be
+        // kept alive by a detached task.
+        let mut buf = [0u8; 1];
+        let read = timeout(Duration::from_secs(2), client.read(&mut buf))
+            .await
+            .expect("the connection must close");
+        let closed = match read {
+            Ok(0) => true, // clean EOF
+            Err(ref e) => matches!(
+                e.kind(),
+                std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::UnexpectedEof
+            ),
+            Ok(_) => false, // a byte read: the connection is still alive
+        };
+        assert!(closed, "expected the connection to close, got {read:?}");
+
+        // The listening socket must be gone: connecting is refused.
+        let refused = timeout(Duration::from_secs(2), async {
+            while TcpStream::connect(addr).await.is_ok() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_ok();
+        assert!(refused, "the listening socket must be freed");
+    }
 }
