@@ -142,8 +142,7 @@ impl App {
         // Once live, reveal the two click-to-copy boxes and the statistics. While
         // idle, still surface the saved ticket so it can be copied and refreshed for
         // the next broadcast — but never offer a refresh live, since rebinding the
-        // endpoint mid-stream would tear down the running session. These sit above
-        // the primary action, which is pinned to the bottom of the tab.
+        // endpoint mid-stream would tear down the running session.
         if broadcasting {
             ui.add_space(12.0);
             section_tick(ui, "Give OBS this WHIP server URL:", ACCENT);
@@ -193,17 +192,12 @@ impl App {
             error_callout(ui, err);
         }
 
-        // The primary action is pinned to the bottom of the tab, full width, so it
-        // reads as the one big commitment after the (optional) settings and the
-        // shareable ticket/stats above it.
-        ui.add_space(12.0);
-        let bw = ui.available_width();
+        // The hint sits under the content, just above the primary action. While OBS
+        // is actually delivering media, show nothing here: the statistics panel
+        // already proves the stream is live. The "waiting" hint only appears until
+        // the first media arrives from OBS, and a live viewer count in the accent
+        // colour reads at a glance once viewers join.
         if broadcasting || starting {
-            // While OBS is actually delivering media, show nothing here: the
-            // statistics panel already proves the stream is live. The "waiting"
-            // hint only appears until the first media arrives from OBS, and a
-            // live viewer count in the accent colour reads at a glance once
-            // viewers join.
             let viewers = snap.stats.map(|s| s.viewers).unwrap_or(0);
             let receiving = snap
                 .stats
@@ -226,9 +220,9 @@ impl App {
                 );
             } else if !receiving {
                 // A small breathing dot (the same "live reads as an active signal"
-                // language as the status and viewers dots) so the wait for OBS to
-                // deliver reads as an active wait rather than a static label. The dot
-                // breathes on the shared pulse clock and carries a soft sonar ring.
+                // language as the status dot) so the wait for OBS to deliver reads
+                // as an active wait rather than a static label. The dot breathes on
+                // the shared pulse clock and carries a soft sonar ring.
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     let secs = self.pulse.elapsed().as_secs_f32();
@@ -241,16 +235,27 @@ impl App {
                     ui.label("Waiting for OBS to start streaming to whip address...");
                 });
             }
+        }
+
+        // The primary action sits under the content, full width, so it reads as the
+        // one big commitment after the (optional) settings and the shareable
+        // ticket/stats above it, moving down the panel as the content grows.
+        const BUTTON_H: f32 = 36.0;
+        const BUTTON_GAP: f32 = 12.0;
+        ui.add_space(BUTTON_GAP);
+        let bw = ui.available_width();
+        if broadcasting || starting {
             // A subtle red halo behind the Stop button, so the one control that tears
             // down a live stream reads as a "stop" action at a glance (the same muted
             // red the tab uses for errors). The halo also contracts on press, so the
             // teardown reads as physically pressed in.
-            let stop_rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(bw, 36.0));
+            let stop_rect =
+                egui::Rect::from_min_size(ui.cursor().min, egui::vec2(bw, BUTTON_H));
             let hovered = pointer_over(ui, stop_rect);
             let pressed = pointer_pressed_over(ui, stop_rect);
             primary_button_glow(ui.painter(), stop_rect, ERROR, hovered, pressed);
             if ui
-                .add_sized([bw, 36.0], egui::Button::new("■  Stop Broadcasting"))
+                .add_sized([bw, BUTTON_H], egui::Button::new("■  Stop Broadcasting"))
                 .clicked()
             {
                 state::stop(&self.state, ui.ctx(), state::Track::Broadcast);
@@ -264,7 +269,8 @@ impl App {
             // read from the pointer and lifts both the halo and the fill. The press
             // is read the same way and pushes the button in (fill darkens, halo
             // contracts), so the hero action feels tactile rather than flat.
-            let start_rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(bw, 36.0));
+            let start_rect =
+                egui::Rect::from_min_size(ui.cursor().min, egui::vec2(bw, BUTTON_H));
             let hovered = pointer_over(ui, start_rect);
             let pressed = pointer_pressed_over(ui, start_rect);
             primary_button_glow(ui.painter(), start_rect, ACCENT, hovered, pressed);
@@ -291,7 +297,7 @@ impl App {
             // autofocused, so a stray Enter can never tear down a live stream. The
             // button's auto id is stable across frames, so focus requested off
             // `resp` sticks to it without needing an explicit id.
-            let resp = ui.add_sized([bw, 36.0], button);
+            let resp = ui.add_sized([bw, BUTTON_H], button);
             if self.focus_primary && window_focused {
                 if !active {
                     resp.request_focus();
@@ -554,12 +560,7 @@ impl App {
                 .spacing([18.0, 6.0])
                 .show(ui, |ui| {
                     ui.label("Viewers");
-                    viewers_cell(
-                        ui,
-                        stats.viewers,
-                        viewers,
-                        self.pulse.elapsed().as_secs_f32(),
-                    );
+                    viewers_cell(ui, stats.viewers, viewers);
                     ui.end_row();
 
                     ui.label("Video");
@@ -670,41 +671,24 @@ fn parse_bind(config: &Config) -> Result<BindAddrs, String> {
     Ok(BindAddrs { ipv4, ipv6 })
 }
 
-/// The Viewers cell: a large count with a status dot.
+/// The Viewers cell: a large count.
 ///
-/// With viewers it reads bright green and the dot breathes slowly so "live" is
-/// obvious at a glance; at zero both sit dim, so an idle broadcast does not shout.
-/// `viewers` (the true count) drives the dot and sonar; `display` is the eased count
-/// shown as the number, so the value counts up smoothly as viewers join. `secs`
-/// drives the breath and is expected to advance between repaints (repaints already
-/// fire while broadcasting).
-fn viewers_cell(ui: &mut Ui, viewers: usize, display: f32, secs: f32) {
-    let green = ACCENT;
-    let (dot, count) = if viewers > 0 {
-        // A shallow 2-second breath: 1.0 down to 0.6, never invisible.
-        let breath = 0.6 + 0.4 * (0.5 + 0.5 * (secs * std::f32::consts::TAU * 0.5).cos());
-        (green.gamma_multiply(breath), green)
+/// With viewers it reads bright green so "live" is obvious at a glance; at zero it
+/// sits dim, so an idle broadcast does not shout. `viewers` (the true count) picks
+/// the colour; `display` is the eased count shown as the number, so the value
+/// counts up smoothly as viewers join.
+fn viewers_cell(ui: &mut Ui, viewers: usize, display: f32) {
+    let count = if viewers > 0 {
+        ACCENT
     } else {
-        (
-            egui::Color32::from_rgb(110, 110, 110),
-            egui::Color32::from_rgb(150, 150, 150),
-        )
+        egui::Color32::from_rgb(150, 150, 150)
     };
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 6.0;
-        let dot_resp = ui.label(egui::RichText::new("●").size(11.0).color(dot));
-        // A soft sonar pulse around the dot while viewers are live, so "live" reads
-        // as an active signal rather than a static glyph.
-        if viewers > 0 {
-            sonar_pulse(ui.painter(), dot_resp.rect.center(), 5.0, secs, 2.0, green);
-        }
-        ui.label(
-            egui::RichText::new(format!("{:.0}", display))
-                .strong()
-                .size(20.0)
-                .color(count),
-        );
-    });
+    ui.label(
+        egui::RichText::new(format!("{:.0}", display))
+            .strong()
+            .size(20.0)
+            .color(count),
+    );
 }
 
 /// Map bitrate samples (kbit/s, oldest first) to pixel points spanning `rect`:
@@ -828,14 +812,21 @@ fn bitrate_sparkline(ui: &mut Ui, samples: &[f64], secs: f32) {
     // A small "now" value, right-aligned above the chart, so the current bitrate is
     // readable at a glance without hovering (the tooltip keeps the fuller two-minute
     // context). Weak and monospaced so it reads as a caption, not a competing number.
-    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        ui.label(
-            egui::RichText::new(format!("now {now:.0} kbit/s"))
-                .monospace()
-                .size(10.0)
-                .weak(),
-        );
-    });
+    // Allocated at a fixed height: `with_layout` would grow the child UI to fill all
+    // remaining space, inflating the stats group and forcing the scroll area to
+    // overflow (and show its bar) on every frame.
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, 14.0),
+        egui::Layout::right_to_left(egui::Align::Center),
+        |ui| {
+            ui.label(
+                egui::RichText::new(format!("now {now:.0} kbit/s"))
+                    .monospace()
+                    .size(10.0)
+                    .weak(),
+            );
+        },
+    );
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
     if rect.width() <= 0.0 {
         return;

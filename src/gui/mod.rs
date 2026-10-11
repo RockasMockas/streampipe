@@ -1587,8 +1587,8 @@ pub fn run() {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([760.0, 560.0])
-            .with_min_inner_size([560.0, 420.0])
+            .with_inner_size([760.0, 844.0])
+            .with_min_inner_size([560.0, 630.0])
             .with_title("streampipe")
             .with_icon(app_icon()),
         ..Default::default()
