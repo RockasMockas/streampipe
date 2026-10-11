@@ -92,6 +92,27 @@ const KF_REQUEST_INTERVAL: Duration = Duration::from_secs(2);
 /// A path with at least this round-trip time counts as long-distance and gets
 /// an automatic jitter buffer for the player.
 const WAN_RTT: Duration = Duration::from_millis(50);
+/// The smallest RTP reorder window a player is ever launched with.
+///
+/// QUIC datagrams are unordered, so an RTP frame split across several
+/// datagrams regularly reaches the local player with its packets scrambled,
+/// even on loopback with sub-millisecond RTT. `max_delay=0` (plus
+/// `reorder_queue_size=0`) hands ffmpeg's RTP demuxer nothing to sort with:
+/// it passes the fragments to the decoder in arrival order, which reads as a
+/// corrupt NALU (`P sub_mb_type out of range`, `corrupted macroblock`,
+/// `Invalid level prefix`) and starves the audio device (`Audio device
+/// underrun detected`). A 50 ms window is the cheapest fix and is
+/// imperceptible next to the codec latency.
+const RTP_MIN_MAX_DELAY: Duration = Duration::from_millis(50);
+/// The smallest RTP reorder queue (in packets) a player is launched with.
+///
+/// This is ffmpeg's own default; a queue of 0 disables reordering entirely, so
+/// it is the floor, never the value we pass. With a real `--buffer` the queue
+/// is raised to [`RTP_MAX_REORDER_QUEUE`] so a high-bitrate burst does not
+/// overflow it before `max_delay` elapses.
+const RTP_MIN_REORDER_QUEUE: u64 = 500;
+/// The RTP reorder queue used when the player was given a `--buffer`.
+const RTP_MAX_REORDER_QUEUE: u64 = 32768;
 /// How often a viewer reports that it is waiting for media.
 const WAIT_INTERVAL: Duration = Duration::from_secs(5);
 /// How often periodic counters are logged while a tunnel runs.
@@ -128,6 +149,11 @@ impl Player {
     /// and a receiver with no buffer drops them, corrupts pictures and loses A/V
     /// sync; `buffer` then gives the player time to absorb that.
     ///
+    /// The RTP reorder window is never zero: media arrives over QUIC datagrams,
+    /// which are unordered, so even a sub-millisecond loopback delivers scrambled
+    /// packets and the player needs [`RTP_MIN_MAX_DELAY`] plus
+    /// [`RTP_MIN_REORDER_QUEUE`] to put them back in order before decoding.
+    ///
     /// `path` overrides the player binary, for a player that is not on `PATH`.
     pub fn command(
         &self,
@@ -141,6 +167,22 @@ impl Player {
             path.map(|p| p.display().to_string())
                 .unwrap_or_else(|| default.to_string())
         };
+        // The RTP reorder window for the ffmpeg-based players and the number of
+        // packets they may hold in it. Never zero, not even on a <1 ms loopback:
+        // media arrives over unordered QUIC datagrams, so streampipe's own
+        // upstream reorder stage still lets scrambled pairs through, and ffmpeg
+        // needs a non-empty window *and* queue to sort them before it reassembles
+        // the NAL units. With a `--buffer` the queue is raised above ffmpeg's
+        // 500-packet default, which overflows ("jitter buffer full") before
+        // max_delay elapses at high bitrate.
+        let max_delay = buffer
+            .unwrap_or(RTP_MIN_MAX_DELAY)
+            .max(RTP_MIN_MAX_DELAY);
+        let reorder_queue = if buffer.is_some() {
+            RTP_MAX_REORDER_QUEUE
+        } else {
+            RTP_MIN_REORDER_QUEUE
+        };
         match self {
             Player::Mpv => {
                 let mut cmd = vec![
@@ -152,27 +194,20 @@ impl Player {
                 ];
                 // Merge lavf options into one argument so buffer_size,
                 // max_delay and reorder_queue_size are not overridden by a
-                // second --demuxer-lavf-o. ffmpeg's default reorder_queue_size
-                // is 500 packets, which overflows ("jitter buffer full") before
-                // max_delay is reached at high bitrate; raise the ceiling so the
-                // author's two-stage reorder (streampipe + ffmpeg) works as intended.
-                let mut lavf_o = "buffer_size=4194304".to_string();
+                // second --demuxer-lavf-o.
+                let mut lavf_o = format!(
+                    "buffer_size=4194304,max_delay={},reorder_queue_size={}",
+                    max_delay.as_micros(),
+                    reorder_queue
+                );
                 match buffer {
                     Some(ms) => {
                         cmd.push("--cache=yes".into());
                         cmd.push(format!("--demuxer-readahead-secs={}", ms.as_secs_f64()));
-                        // `max_delay` is the RTP demuxer's reorder window in us.
-                        lavf_o.push_str(&format!(
-                            ",max_delay={},reorder_queue_size=32768",
-                            ms.as_micros()
-                        ));
                     }
                     None => {
                         cmd.push("--no-cache".into());
                         cmd.push("--profile=low-latency".into());
-                        // streampipe already strictly reorders RTP, so neuter
-                        // ffmpeg's redundant queue to avoid its 100 ms default wait.
-                        lavf_o.push_str(",max_delay=0,reorder_queue_size=0");
                     }
                 }
                 cmd.push(format!("--demuxer-lavf-o={}", lavf_o));
@@ -191,33 +226,23 @@ impl Player {
             Player::Ffplay => {
                 let mut cmd = vec![bin("ffplay")];
                 match buffer {
-                    Some(ms) => {
+                    Some(_) => {
                         // Drop corrupt packets instead of feeding them to the
                         // decoder, and let the RTP receiver wait for reordering.
-                        // Raise reorder_queue_size above ffmpeg's 500-packet default
-                        // so max_delay is honoured without a premature "jitter
-                        // buffer full" flush at high bitrate.
                         cmd.extend(["-fflags".into(), "+discardcorrupt".into()]);
-                        cmd.extend([
-                            "-max_delay".into(),
-                            ms.as_micros().to_string(),
-                            "-reorder_queue_size".into(),
-                            "32768".into(),
-                        ]);
                     }
                     None => {
-                        // streampipe already strictly reorders RTP, so disable
-                        // ffmpeg's queue to avoid its 100 ms default wait.
+                        // Streampipe reorders most packets upstream, so keep the
+                        // window as small as ffmpeg tolerates - zero is not an
+                        // option, it leaves the player nothing to reorder with.
                         cmd.extend(["-fflags".into(), "nobuffer".into()]);
-                        cmd.extend([
-                            "-max_delay".into(),
-                            "0".into(),
-                            "-reorder_queue_size".into(),
-                            "0".into(),
-                        ]);
                     }
                 }
                 cmd.extend([
+                    "-max_delay".into(),
+                    max_delay.as_micros().to_string(),
+                    "-reorder_queue_size".into(),
+                    reorder_queue.to_string(),
                     // Enlarge the UDP/RTP receive socket buffer so a brief decode
                     // hiccup at high bitrate does not overflow the kernel default
                     // (~200 KB) and silently drop inbound RTP.
@@ -2519,17 +2544,43 @@ mod tests {
         assert_eq!(mpv[0], "mpv");
         assert!(mpv.contains(&"--profile=low-latency".to_string()));
         assert!(mpv.contains(&"--no-resume-playback".to_string()));
-        assert!(mpv.iter().any(|a| a.contains("max_delay=0")));
-        assert!(mpv.iter().any(|a| a.contains("reorder_queue_size=0")));
+        // Lowest latency, never zero: the media rides unordered QUIC
+        // datagrams, so a player with no reorder window feeds the decoder
+        // scrambled RTP and the picture corrupts.
+        assert!(
+            mpv.iter()
+                .any(|a| a.contains("max_delay=50000,reorder_queue_size=500")),
+            "{mpv:?}"
+        );
         assert_eq!(mpv.last().unwrap(), "/tmp/x.sdp");
         assert!(Player::Vlc
             .command(path, None, None)
             .contains(&"--network-caching=100".to_string()));
         let ffplay = Player::Ffplay.command(path, None, None);
         assert!(ffplay.contains(&"nobuffer".to_string()));
-        assert!(ffplay.iter().any(|a| a == "0"));
+        assert!(ffplay.iter().any(|a| a == "50000"));
+        assert!(ffplay.iter().any(|a| a == "500"));
         assert!(!Player::None.launches());
         assert!(Player::Mpv.launches());
+    }
+
+    #[test]
+    fn a_tiny_buffer_is_raised_to_the_reorder_floor() {
+        let path = Path::new("/tmp/x.sdp");
+        // Even a stub of a buffer leaves the player a usable window; 0 is the
+        // operator's deliberate foot-gun, not something we invent for them.
+        let mpv = Player::Mpv.command(path, Some(Duration::from_millis(10)), None);
+        assert!(
+            mpv.iter()
+                .any(|a| a.contains("max_delay=50000,reorder_queue_size=32768")),
+            "{mpv:?}"
+        );
+        let ffplay = Player::Ffplay.command(path, Some(Duration::from_millis(0)), None);
+        let i = ffplay
+            .iter()
+            .position(|a| a == "-max_delay")
+            .expect("-max_delay");
+        assert_eq!(ffplay[i + 1], "50000");
     }
 
     #[test]
