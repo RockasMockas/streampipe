@@ -13,7 +13,7 @@ use super::{
     config::Config,
     flash_alpha,
     state::{self, BindAddrs, BroadcastParams, Mode},
-    App, ACCENT, FLASH, spinner,
+    App, ACCENT, FLASH, primary_button_glow, spinner, top_bevel,
 };
 
 /// Horizontal room kept clear at the right edge of a copy box for the copy glyph,
@@ -225,6 +225,11 @@ impl App {
             } else if !receiving {
                 ui.label("Waiting for OBS to start streaming to whip address...");
             }
+            // A subtle red halo behind the Stop button, so the one control that tears
+            // down a live stream reads as a "stop" action at a glance (the same muted
+            // red the tab uses for errors).
+            let stop_rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(bw, 36.0));
+            primary_button_glow(ui.painter(), stop_rect, egui::Color32::from_rgb(220, 90, 90));
             if ui
                 .add_sized([bw, 36.0], egui::Button::new("■  Stop Broadcasting"))
                 .clicked()
@@ -236,6 +241,11 @@ impl App {
             let button = egui::Button::new("●  Start Broadcasting")
                 .fill(ACCENT.gamma_multiply(0.18))
                 .stroke(egui::Stroke::new(1.0, ACCENT.gamma_multiply(0.55)));
+            // A soft accent halo behind the hero action, so the one big commitment
+            // reads as lit by the live green rather than a flat button. Painted
+            // before the button so the button covers the halo's centre.
+            let start_rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(bw, 36.0));
+            primary_button_glow(ui.painter(), start_rect, ACCENT);
             // Autofocus the start control on the first window-focused idle frame so
             // Enter/Space starts it; the Stop button (shown while active) is never
             // autofocused, so a stray Enter can never tear down a live stream. The
@@ -407,6 +417,10 @@ impl App {
         // `on_hover_text` consumes the response, so interactions are read off it
         // before it is handed to the tooltip.
         let rect = inner.response.rect;
+        // A faint light catch along the top edge, so the box reads as a surface lit
+        // from above rather than a flat tint. Painted first, so the copy glyph and
+        // the hover stroke (drawn next) sit on top of it.
+        top_bevel(ui.painter(), rect, frame.corner_radius.nw);
         // A small "copy" glyph (two overlapping sheets) at the right edge, painted
         // non-interactively so it never steals the box's click.
         let glyph = ACCENT.gamma_multiply(0.5 + 0.5 * flash);
@@ -438,7 +452,7 @@ impl App {
 
     /// The live statistics panel: viewers, bitrate, fps, elapsed.
     fn stats_panel(&mut self, ui: &mut Ui, snap: &state::UiSnapshot) {
-        ui.group(|ui| {
+        let inner = ui.group(|ui| {
             ui.strong("Statistics");
             let stats = snap.stats.unwrap_or_default();
             egui::Grid::new("stats_grid")
@@ -477,6 +491,13 @@ impl App {
                 bitrate_sparkline(ui, &snap.video_kbps_history);
             }
         });
+        // A faint light catch along the panel's top edge, matching the copy boxes,
+        // so the panel reads as a surface lit from above.
+        top_bevel(
+            ui.painter(),
+            inner.response.rect,
+            ui.style().visuals.widgets.inactive.corner_radius.nw,
+        );
     }
 
     /// Resolve the configured host/port and start a broadcast session.

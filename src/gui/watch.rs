@@ -8,7 +8,7 @@ use eframe::egui::{self, Context, Ui};
 use super::{
     config::{player_key, PLAYERS},
     state::{self, Mode, WatchParams},
-    App, ACCENT, WATCH_ACCENT, spinner,
+    App, ACCENT, WATCH_ACCENT, primary_button_glow, spinner,
 };
 
 /// Parse a buffer field (milliseconds) into an option; blank or invalid is
@@ -140,6 +140,11 @@ impl App {
         ui.add_space(12.0);
         if watching || starting {
             ui.horizontal(|ui| {
+                // A subtle red halo behind the Stop button, matching the Broadcast
+                // tab, so the one control that stops a watch reads as a "stop" action.
+                let stop_rect =
+                    egui::Rect::from_min_size(ui.cursor().min, egui::vec2(140.0, 30.0));
+                primary_button_glow(ui.painter(), stop_rect, egui::Color32::from_rgb(220, 90, 90));
                 if ui
                     .add(egui::Button::new("■  Stop").min_size(egui::vec2(140.0, 30.0)))
                     .clicked()
@@ -161,6 +166,15 @@ impl App {
             let can_start = watch_can_start(busy, &self.watch_ticket);
             let resp = ui
                 .add_enabled_ui(can_start, |ui| {
+                    // A soft accent halo behind the hero action, lit by the live green.
+                    // Only when the button is live: a disabled button should not glow.
+                    if can_start {
+                        let start_rect = egui::Rect::from_min_size(
+                            ui.cursor().min,
+                            egui::vec2(ui.available_width(), 36.0),
+                        );
+                        primary_button_glow(ui.painter(), start_rect, ACCENT);
+                    }
                     ui.add_sized([ui.available_width(), 36.0], button)
                 })
                 .inner;

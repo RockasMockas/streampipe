@@ -512,9 +512,15 @@ impl App {
             self.options_window(ui.ctx());
         }
         self.log_panel(ui);
-        egui::CentralPanel::default()
+        // A subtle vertical gradient is the central panel's ground: the panel's own
+        // fill is cleared, and the gradient (painted on the background order, behind
+        // the content) is what the eye reads as the window. Slightly lighter at the
+        // top, slightly darker at the bottom, so the surface reads as lit from above
+        // rather than a flat fill.
+        let central = egui::CentralPanel::default()
             .frame(
                 egui::Frame::central_panel(ui.style())
+                    .fill(egui::Color32::TRANSPARENT)
                     .inner_margin(egui::Margin::symmetric(16, 12)),
             )
             .show(ui, |ui| {
@@ -525,6 +531,13 @@ impl App {
                     Tab::Broadcast => self.broadcast_tab(ui),
                 }
             });
+        {
+            let painter = ui.ctx().layer_painter(egui::LayerId::new(
+                egui::Order::Background,
+                egui::Id::new("central_panel_gradient"),
+            ));
+            central_gradient(&painter, central.response.rect);
+        }
         // Drawn last, on its own foreground layer, so it floats over the panels
         // without taking part in their layout.
         self.toast_overlay(ui);
@@ -611,6 +624,62 @@ fn spinner(ui: &mut Ui, secs: f32, color: egui::Color32) {
         mesh.add_triangle(v, v + 2, v + 3);
     }
     ui.painter().add(egui::Shape::mesh(mesh));
+}
+
+/// A faint 1 px "light catch" along the top edge of a card surface: a bright
+/// line just inside the top, so the surface reads as catching light from above
+/// rather than a flat tint. Inset by `corner_radius` at each end so it never
+/// clips the rounded corners. Purely decorative: it takes no layout space and is
+/// painted behind whatever the caller draws next (the copy glyph, a hover stroke).
+fn top_bevel(painter: &egui::Painter, rect: egui::Rect, corner_radius: u8) {
+    let inset = f32::from(corner_radius);
+    let left = rect.min.x + inset;
+    let right = rect.max.x - inset;
+    if right <= left {
+        return;
+    }
+    painter.hline(
+        left..=right,
+        rect.min.y + 0.5,
+        egui::Stroke::new(1.0, egui::Color32::from_white_alpha(24)),
+    );
+}
+
+/// A very subtle vertical gradient for the central panel's background: slightly
+/// lighter at the top, slightly darker at the bottom, so the window reads as a
+/// surface lit from above rather than a flat fill. The two endpoints average to
+/// the panel fill, so it is a depth cue, not a recolor.
+///
+/// Drawn on the background order (behind the panel content) over a *transparent*
+/// panel fill: an opaque fill would sit on the middle order and hide the gradient,
+/// so the panel fill is cleared and the gradient becomes the ground the content
+/// sits on.
+fn central_gradient(painter: &egui::Painter, rect: egui::Rect) {
+    let top = egui::Color32::from_rgb(27, 29, 34);
+    let bottom = egui::Color32::from_rgb(21, 23, 27);
+    let mut mesh = egui::epaint::Mesh::default();
+    mesh.colored_vertex(rect.left_top(), top);
+    mesh.colored_vertex(rect.right_top(), top);
+    mesh.colored_vertex(rect.right_bottom(), bottom);
+    mesh.colored_vertex(rect.left_bottom(), bottom);
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    painter.add(egui::Shape::mesh(mesh));
+}
+
+/// A soft halo behind the primary action button: three stacked rounded rects that
+/// fall off from the button's edge (nearest strongest, farthest faintest), so the
+/// hero action reads as lit by `color` rather than a flat button.
+///
+/// The caller paints this *before* adding the button, so the button (added next,
+/// on top) covers the halo's centre and only the rim around the button's edge
+/// shows. `color` is the action's accent: the live green for a Start/Watch, a
+/// muted red for a Stop, so the halo's hue matches the button's intent.
+fn primary_button_glow(painter: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
+    let corner = egui::CornerRadius::same(10);
+    for (expand, alpha) in [(6.0, 0.02), (4.0, 0.05), (2.0, 0.09)] {
+        painter.rect_filled(rect.expand(expand), corner, color.gamma_multiply(alpha));
+    }
 }
 
 /// One step of the tab underline's exponential ease: `current` moves toward
@@ -1413,6 +1482,101 @@ mod tests {
         assert!(
             hairline.is_some(),
             "the status bar should paint a top hairline"
+        );
+    }
+
+    /// The central panel paints a subtle vertical gradient (a two-triangle quad:
+    /// 4 vertices, 6 indices) as its ground, so the window reads as a surface lit
+    /// from above rather than a flat fill. The sparkline and spinner are meshes too,
+    /// but with more vertices / a different index count, so a 4-vertex, 6-index mesh
+    /// is unique to the gradient.
+    #[test]
+    fn the_central_panel_paints_a_subtle_vertical_gradient() {
+        let (mut app, _rt) = test_app();
+        let size = egui::vec2(760.0, 560.0);
+        let shapes = render_shapes(&mut app, size);
+        let gradient = shapes.iter().any(|s| match &s.shape {
+            egui::epaint::Shape::Mesh(m) => m.vertices.len() == 4 && m.indices.len() == 6,
+            _ => false,
+        });
+        assert!(
+            gradient,
+            "the central panel should paint its subtle vertical gradient"
+        );
+    }
+
+    /// A copy box paints a faint light-catch bevel along its top edge: a horizontal
+    /// line in a faint white (alpha 24), distinct from the status bar hairline
+    /// (alpha 16) and the tab separator.
+    #[test]
+    fn the_copy_box_paints_a_top_light_catch_bevel() {
+        let (mut app, _rt) = test_app();
+        app.tab = Tab::Broadcast;
+        let size = egui::vec2(760.0, 560.0);
+        let shapes = render_shapes(&mut app, size);
+        let bevel = shapes.iter().any(|s| match &s.shape {
+            egui::epaint::Shape::LineSegment { points, stroke } => {
+                (points[0].y - points[1].y).abs() < 0.5
+                    && stroke.color == egui::Color32::from_white_alpha(24)
+            }
+            _ => false,
+        });
+        assert!(
+            bevel,
+            "the copy box should paint its top light-catch bevel"
+        );
+    }
+
+    /// The idle Start button paints a soft 3-layer accent halo (the live green at
+    /// low alpha), so the hero action reads as lit by the accent rather than a flat
+    /// button. The three halo fills (0.02 / 0.05 / 0.09) are distinct from the
+    /// button's own fill (0.18).
+    #[test]
+    fn the_idle_start_button_paints_a_soft_accent_halo() {
+        let (mut app, _rt) = test_app();
+        app.tab = Tab::Broadcast;
+        let size = egui::vec2(760.0, 560.0);
+        let shapes = render_shapes(&mut app, size);
+        let halo_alphas = [0.02, 0.05, 0.09];
+        let count = shapes
+            .iter()
+            .filter(|s| match &s.shape {
+                egui::epaint::Shape::Rect(r) => halo_alphas
+                    .iter()
+                    .any(|&a| r.fill == ACCENT.gamma_multiply(a)),
+                _ => false,
+            })
+            .count();
+        assert_eq!(
+            count, 3,
+            "the idle start button should paint a 3-layer accent halo"
+        );
+    }
+
+    /// While broadcasting, the Stop button paints a subtle 3-layer red halo (the same
+    /// muted red the tab uses for errors), so the one control that tears down a live
+    /// stream reads as a "stop" action at a glance.
+    #[test]
+    fn the_stop_button_paints_a_subtle_red_halo() {
+        let (mut app, _rt) = test_app();
+        app.tab = Tab::Broadcast;
+        app.state.lock().unwrap().broadcast = Mode::Broadcasting;
+        let size = egui::vec2(760.0, 560.0);
+        let shapes = render_shapes(&mut app, size);
+        let red = egui::Color32::from_rgb(220, 90, 90);
+        let halo_alphas = [0.02, 0.05, 0.09];
+        let count = shapes
+            .iter()
+            .filter(|s| match &s.shape {
+                egui::epaint::Shape::Rect(r) => halo_alphas
+                    .iter()
+                    .any(|&a| r.fill == red.gamma_multiply(a)),
+                _ => false,
+            })
+            .count();
+        assert_eq!(
+            count, 3,
+            "the stop button should paint a 3-layer red halo"
         );
     }
 }
