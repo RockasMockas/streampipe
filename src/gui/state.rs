@@ -521,6 +521,35 @@ fn is_self_watch(addr: &EndpointAddr, secret: &SecretKey) -> bool {
     addr.id == secret.public()
 }
 
+/// The plain sentence the Watch tab shows when a stream ends.
+const STREAM_STOPPED: &str = "Broadcaster has stopped streaming.";
+
+/// The engine's wording for "the viewer's datagram read failed", as built by
+/// `webrtc::connect_whip` when `Connection::read_datagram` returns an error.
+const DATAGRAM_READ_FAILED: &str = "error reading datagrams from the host:";
+
+/// Map a raw watch-session failure to the text the Watch tab shows.
+///
+/// When the broadcaster stops, the viewer's datagram read is the first thing to
+/// fail, and the engine reports it as
+/// `error reading datagrams from the host: timed out` — the QUIC connection idles
+/// out with nothing left to read. That is transport noise to a viewer, who only
+/// wants to know the stream is over, so that one case is rewritten to
+/// [`STREAM_STOPPED`]. Every other failure is shown verbatim: there the transport
+/// detail is the part that actually explains what went wrong.
+fn friendly_watch_error(raw: &str) -> &str {
+    let Some(detail) = raw.strip_prefix(DATAGRAM_READ_FAILED) else {
+        return raw;
+    };
+    // Only the timeout, exactly: a reset or an application close means the
+    // broadcaster is already gone, and the wording says so.
+    if detail.trim() == "timed out" {
+        STREAM_STOPPED
+    } else {
+        raw
+    }
+}
+
 /// Start a watch session, returning its task handle to store in the state.
 ///
 /// Mirrors [`spawn_broadcast`] on its own track: sets `watch` to `Starting`
@@ -628,7 +657,7 @@ pub fn spawn_watch(
         let mut g = state.lock().unwrap();
         g.watch = Mode::Idle;
         if let Err(e) = result {
-            g.watch_error = Some(format!("{e:#}"));
+            g.watch_error = Some(friendly_watch_error(&format!("{e:#}")).to_string());
         }
         ctx.request_repaint();
     })
@@ -949,5 +978,28 @@ mod tests {
         assert_eq!(state.lock().unwrap().bind, fixed);
         let reused_fixed = ensure_endpoint(&state, fixed).await.expect("reuse fixed");
         assert_eq!(reused_fixed.id(), rebound.id());
+    }
+
+    /// The stream-ended case — the viewer's datagram read timing out — reads as a
+    /// plain sentence on the Watch tab, while every other failure keeps the
+    /// transport detail that makes it diagnosable.
+    #[test]
+    fn a_timed_out_datagram_read_reads_as_a_stopped_stream() {
+        assert_eq!(
+            friendly_watch_error("error reading datagrams from the host: timed out"),
+            STREAM_STOPPED
+        );
+        // Unrelated failures are shown verbatim, including a timeout on some other
+        // operation and a read that failed for a different reason.
+        for raw in [
+            "error connecting to the host: timed out",
+            "error reading datagrams from the host: connection closed",
+            "could not bind endpoint: address in use",
+            // Not the exact detail: do not rewrite a message that merely carries
+            // the words.
+            "error reading datagrams from the host: timed out after 30s",
+        ] {
+            assert_eq!(friendly_watch_error(raw), raw, "{raw} must pass through");
+        }
     }
 }
