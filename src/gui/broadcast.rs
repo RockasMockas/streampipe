@@ -13,7 +13,8 @@ use super::{
     config::Config,
     flash_alpha,
     state::{self, BindAddrs, BroadcastParams, Mode},
-    App, ACCENT, FLASH, pointer_over, primary_button_glow, sonar_pulse, spinner, top_bevel,
+    App, ACCENT, FLASH, pointer_over, primary_button_glow, section_tick, sonar_pulse, spinner,
+    stat_ease, top_bevel,
 };
 
 /// Horizontal room kept clear at the right edge of a copy box for the copy glyph,
@@ -144,11 +145,11 @@ impl App {
         // the primary action, which is pinned to the bottom of the tab.
         if broadcasting {
             ui.add_space(12.0);
-            ui.strong("Give OBS this WHIP server URL:");
+            section_tick(ui, "Give OBS this WHIP server URL:", ACCENT);
             let w = (ui.available_width() - COPY_H_MARGIN * 2.0).max(0.0);
             self.copy_box(ui, "whip", &snap.whip_url, w);
             ui.add_space(6.0);
-            ui.strong("Send friends this stream ticket:");
+            section_tick(ui, "Send friends this stream ticket:", ACCENT);
             let ticket = snap.ticket.clone().unwrap_or_else(|| "…".into());
             let w = (ui.available_width() - COPY_H_MARGIN * 2.0).max(0.0);
             self.copy_box(ui, "ticket", &ticket, w);
@@ -173,7 +174,7 @@ impl App {
             self.stats_panel(ui, &snap);
         } else {
             ui.add_space(12.0);
-            ui.strong("Send friends this stream ticket:");
+            section_tick(ui, "Send friends this stream ticket:", ACCENT);
             let ticket = snap
                 .ticket
                 .clone()
@@ -465,21 +466,53 @@ impl App {
     /// The live statistics panel: viewers, bitrate, fps, elapsed.
     fn stats_panel(&mut self, ui: &mut Ui, snap: &state::UiSnapshot) {
         let inner = ui.group(|ui| {
-            ui.strong("Statistics");
+            section_tick(ui, "Statistics", ACCENT);
             let stats = snap.stats.unwrap_or_default();
+            // Ease the displayed measurements toward the latest sample, so the numbers
+            // settle smoothly instead of jumping on each 5-second tick. The elapsed
+            // counter is shown exactly (it is a clock, not a measurement), so only the
+            // measured stats are eased. `self.last_frame` was set at the top of the
+            // frame in `draw`, so this is the current frame's wall-clock delta.
+            let dt = (Instant::now() - self.last_frame).as_secs_f32().clamp(0.0, 0.1);
+            let (viewers, video_kbps, video_fps, audio_kbps) = (
+                stat_ease(self.disp_viewers, stats.viewers as f32, dt),
+                stat_ease(self.disp_video_kbps, stats.video_kbps as f32, dt),
+                stat_ease(self.disp_video_fps, stats.video_fps as f32, dt),
+                stat_ease(self.disp_audio_kbps, stats.audio_kbps as f32, dt),
+            );
+            self.disp_viewers = viewers;
+            self.disp_video_kbps = video_kbps;
+            self.disp_video_fps = video_fps;
+            self.disp_audio_kbps = audio_kbps;
+            // While the numbers are still settling, ask for display-rate frames so the
+            // ease is smooth; the moment they all settle the guard disarms and the panel
+            // falls back to the 250 ms session cadence (the window is already awake while
+            // broadcasting, so this only tightens the cadence briefly after each tick).
+            let settled = (viewers - stats.viewers as f32).abs() <= 0.05
+                && (video_kbps - stats.video_kbps as f32).abs() <= 0.05
+                && (video_fps - stats.video_fps as f32).abs() <= 0.05
+                && (audio_kbps - stats.audio_kbps as f32).abs() <= 0.05;
+            if !settled {
+                ui.ctx().request_repaint();
+            }
             egui::Grid::new("stats_grid")
                 .num_columns(2)
                 .spacing([18.0, 6.0])
                 .show(ui, |ui| {
                     ui.label("Viewers");
-                    viewers_cell(ui, stats.viewers, self.pulse.elapsed().as_secs_f32());
+                    viewers_cell(
+                        ui,
+                        stats.viewers,
+                        viewers,
+                        self.pulse.elapsed().as_secs_f32(),
+                    );
                     ui.end_row();
 
                     ui.label("Video");
                     ui.strong(
                         egui::RichText::new(format!(
                             "{:.0} kbit/s · {:.1} fps",
-                            stats.video_kbps, stats.video_fps
+                            video_kbps, video_fps
                         ))
                         .monospace(),
                     );
@@ -487,7 +520,7 @@ impl App {
 
                     ui.label("Audio");
                     ui.strong(
-                        egui::RichText::new(format!("{:.0} kbit/s", stats.audio_kbps)).monospace(),
+                        egui::RichText::new(format!("{:.0} kbit/s", audio_kbps)).monospace(),
                     );
                     ui.end_row();
 
@@ -580,9 +613,11 @@ fn parse_bind(config: &Config) -> Result<BindAddrs, String> {
 ///
 /// With viewers it reads bright green and the dot breathes slowly so "live" is
 /// obvious at a glance; at zero both sit dim, so an idle broadcast does not shout.
-/// `secs` drives the breath and is expected to advance between repaints (repaints
-/// already fire while broadcasting).
-fn viewers_cell(ui: &mut Ui, viewers: usize, secs: f32) {
+/// `viewers` (the true count) drives the dot and sonar; `display` is the eased count
+/// shown as the number, so the value counts up smoothly as viewers join. `secs`
+/// drives the breath and is expected to advance between repaints (repaints already
+/// fire while broadcasting).
+fn viewers_cell(ui: &mut Ui, viewers: usize, display: f32, secs: f32) {
     let green = ACCENT;
     let (dot, count) = if viewers > 0 {
         // A shallow 2-second breath: 1.0 down to 0.6, never invisible.
@@ -603,7 +638,7 @@ fn viewers_cell(ui: &mut Ui, viewers: usize, secs: f32) {
             sonar_pulse(ui.painter(), dot_resp.rect.center(), 5.0, secs, 2.0, green);
         }
         ui.label(
-            egui::RichText::new(viewers.to_string())
+            egui::RichText::new(format!("{:.0}", display))
                 .strong()
                 .size(20.0)
                 .color(count),

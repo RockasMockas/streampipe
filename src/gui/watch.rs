@@ -8,7 +8,7 @@ use eframe::egui::{self, Context, Ui};
 use super::{
     config::{player_key, PLAYERS},
     state::{self, Mode, WatchParams},
-    App, ACCENT, WATCH_ACCENT, pointer_over, primary_button_glow, spinner,
+    App, ACCENT, WATCH_ACCENT, pointer_over, primary_button_glow, section_tick, spinner,
 };
 
 /// Parse a buffer field (milliseconds) into an option; blank or invalid is
@@ -49,7 +49,7 @@ impl App {
         let watching = snap.watch == Mode::Watching;
         let starting = snap.watch == Mode::Starting;
 
-        ui.strong("Stream ticket");
+        section_tick(ui, "Stream ticket", WATCH_ACCENT);
 
         // Read input BEFORE rendering the ticket box, so a key consumed by the
         // widget later in this frame cannot defeat Enter-to-start.

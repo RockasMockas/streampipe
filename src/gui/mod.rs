@@ -108,6 +108,16 @@ pub struct App {
     log_anim: f32,
     /// The previous frame's wall clock, for the log panel tween's frame delta.
     log_last_frame: Instant,
+    /// The eased *display* of the live broadcast stats, tweened toward the latest
+    /// [`StreamStats`] each frame in the stats panel so the numbers settle smoothly
+    /// instead of jumping on each 5-second tick. Only the broadcast track drives the
+    /// stats panel, so these are reset to zero in [`App::draw`] the moment a broadcast
+    /// goes idle: a new broadcast then starts from a clean zero rather than counting
+    /// down from the previous session's values.
+    disp_viewers: f32,
+    disp_video_kbps: f32,
+    disp_video_fps: f32,
+    disp_audio_kbps: f32,
 }
 
 impl App {
@@ -147,6 +157,10 @@ impl App {
             tab_switched_at: Instant::now(),
             log_anim: 0.0,
             log_last_frame: Instant::now(),
+            disp_viewers: 0.0,
+            disp_video_kbps: 0.0,
+            disp_video_fps: 0.0,
+            disp_audio_kbps: 0.0,
         }
     }
 
@@ -504,6 +518,15 @@ impl App {
             (g.broadcast, g.watch, g.refreshing)
         };
         let any_active = broadcast.active() || watch.active();
+        // Reset the eased stats display the moment a broadcast goes idle, so the next
+        // broadcast starts from a clean zero instead of counting down from the
+        // previous session's values. Only the broadcast track feeds the stats panel.
+        if !broadcast.active() {
+            self.disp_viewers = 0.0;
+            self.disp_video_kbps = 0.0;
+            self.disp_video_fps = 0.0;
+            self.disp_audio_kbps = 0.0;
+        }
         // Pick up any completion notice a background task left (relay refresh or
         // ticket reset) and raise it as a toast. Taken under the same brief lock that
         // reads the modes/refreshing.
@@ -879,6 +902,25 @@ fn sonar_pulse(
     painter.circle_stroke(center, radius, egui::Stroke::new(1.0, color.gamma_multiply(alpha)));
 }
 
+/// A section heading: a small accent-coloured rounded bar to the left of a bold
+/// label, so the label reads as a deliberate section marker rather than a plain
+/// strong label. The bar and label sit in a horizontal row, so the bar sits neatly
+/// beside the text. `color` is the section's accent (the live green for a broadcast
+/// section, the watch blue for a watch section), echoing the two-accent design
+/// language used across the app.
+fn section_tick(ui: &mut Ui, text: &str, color: egui::Color32) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        let (bar, _) = ui.allocate_exact_size(egui::vec2(3.0, 12.0), egui::Sense::hover());
+        // Nudge the bar down a couple of pixels so it centres on the label's text: the
+        // row is top-aligned, so an un-nudged bar would sit a touch high relative to the
+        // label. The nudge stays within the row's height, so it never overflows.
+        ui.painter()
+            .rect_filled(bar.translate(egui::vec2(0.0, 2.0)), egui::CornerRadius::same(1), color);
+        ui.label(egui::RichText::new(text).strong());
+    });
+}
+
 /// One step of the tab underline's exponential ease: `current` moves toward
 /// `target` by a fraction of the remaining distance that grows with `dt`
 /// (wall-clock seconds), so the slide's speed is independent of frame rate.
@@ -906,6 +948,23 @@ fn tab_slide_step(current: f32, target: f32, dt: f32) -> f32 {
 fn log_anim_step(current: f32, target: f32, dt: f32) -> f32 {
     let next = current + (target - current) * (1.0 - (-dt * 18.0).exp());
     if (next - target).abs() <= 0.002 {
+        target
+    } else {
+        next
+    }
+}
+
+/// One step of the live stats' eased display: `current` moves toward `target` by a
+/// fraction of the remaining distance that grows with `dt` (wall-clock seconds), so
+/// the settle's speed is independent of frame rate. A step never overshoots, and once
+/// within a small epsilon of the target it snaps on, so the caller can stop requesting
+/// repaints the moment the numbers settle. A touch slower than the tab underline, so a
+/// bitrate change reads as a gentle settle rather than a snap. The epsilon (0.05) is
+/// well below one unit of every displayed stat (kbit/s, fps, viewers), so the snap is
+/// never visible.
+fn stat_ease(current: f32, target: f32, dt: f32) -> f32 {
+    let next = current + (target - current) * (1.0 - (-dt * 8.0).exp());
+    if (next - target).abs() <= 0.05 {
         target
     } else {
         next
@@ -1961,6 +2020,39 @@ mod tests {
         assert_eq!(pos, 0.0);
     }
 
+    /// The stats' eased display approaches its target monotonically, settles exactly
+    /// on it after a realistic number of 60 fps frames (so the repaint guard can
+    /// disarm and the panel fall back to the session cadence), never overshoots, and
+    /// stays settled. A single frame moves partway. The reverse direction (a bitrate
+    /// drop) settles the same way, never undershooting.
+    #[test]
+    fn stat_ease_settles_on_the_target_without_overshooting() {
+        // A single 60 fps step moves partway but never past the target.
+        let step = stat_ease(0.0, 5000.0, 1.0 / 60.0);
+        assert!(step > 0.0 && step < 5000.0, "one frame is partway, got {step}");
+
+        // Stepping at 60 fps settles exactly on the target; the settle should take
+        // well under two seconds of frames, never overshoot, and never stall.
+        let mut pos = 0.0;
+        let mut frames = 0;
+        while pos != 5000.0 {
+            pos = stat_ease(pos, 5000.0, 1.0 / 60.0);
+            frames += 1;
+            assert!(pos <= 5000.0, "no overshoot at frame {frames}, got {pos}");
+            assert!(frames < 120, "the settle must finish within 2 s, took {frames}");
+        }
+
+        // Settled stays settled: the repaint guard can disarm.
+        assert_eq!(stat_ease(5000.0, 5000.0, 1.0 / 60.0), 5000.0);
+        // The reverse direction (a bitrate drop) settles the same way, never undershooting.
+        let mut pos = 5000.0;
+        while pos != 0.0 {
+            pos = stat_ease(pos, 0.0, 1.0 / 60.0);
+            assert!(pos >= 0.0, "no undershoot, got {pos}");
+        }
+        assert_eq!(pos, 0.0);
+    }
+
     /// A filled small circle in the tab strip (y < 120): the live dot is the only
     /// one. The status dot is a text glyph (not a `Shape::Circle`), and the sonar
     /// pulses are *stroked* rings (`stroke.width > 0`), so a filled-circle check
@@ -2057,6 +2149,152 @@ mod tests {
                 .iter()
                 .any(|s| is_text(s, "Stream") && color_of(s) == Some(stream_white)),
             "the 'Stream' word should be near-white"
+        );
+    }
+
+    /// `section_tick` paints a small accent bar (a filled rect in the accent colour,
+    /// a few pixels wide) beside a bold label (a text galley holding the section
+    /// text), so a section heading reads as a deliberate marker rather than a plain
+    /// strong label.
+    #[test]
+    fn section_tick_paints_a_bar_and_a_label() {
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(300.0, 60.0),
+            )),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(raw, |ui| {
+            section_tick(ui, "Statistics", ACCENT);
+        });
+        out.textures_delta.clear();
+        // The accent bar: a small filled rect in the full accent colour.
+        let bar = out.shapes.iter().any(|s| matches!(&s.shape,
+            egui::epaint::Shape::Rect(r)
+                if r.fill == ACCENT && r.rect.width() < 6.0 && r.rect.height() < 16.0
+        ));
+        assert!(bar, "section_tick should paint its accent bar");
+        // The label: a text galley holding the section text.
+        let label = out
+            .shapes
+            .iter()
+            .any(|s| matches!(&s.shape, egui::epaint::Shape::Text(t) if t.galley.text() == "Statistics"));
+        assert!(label, "section_tick should paint its label");
+    }
+
+    /// The stats panel eases its displayed measurements toward the latest sample:
+    /// starting from zero, a non-zero target moves the display partway (never past the
+    /// target) over the first frames, so the numbers settle smoothly instead of
+    /// jumping on each 5-second tick.
+    #[test]
+    fn the_stats_panel_eases_its_display_toward_the_target() {
+        let (mut app, _rt) = test_app();
+        app.tab = Tab::Broadcast;
+        {
+            let mut g = app.state.lock().unwrap();
+            g.broadcast = Mode::Broadcasting;
+            g.stats = Some(StreamStats {
+                viewers: 3,
+                video_kbps: 5000.0,
+                video_fps: 30.0,
+                audio_kbps: 128.0,
+                ..Default::default()
+            });
+        }
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(760.0, 560.0),
+            )),
+            ..Default::default()
+        };
+        // A few frames: the display eases from zero toward the target.
+        for _ in 0..5 {
+            let mut out = ctx.run_ui(raw.clone(), |ui| app.draw(ui));
+            out.textures_delta.clear();
+        }
+        assert!(
+            app.disp_video_kbps > 0.0,
+            "the display should have started easing from zero, got {}",
+            app.disp_video_kbps
+        );
+        assert!(
+            app.disp_video_kbps < 5000.0,
+            "the display must not overshoot the target, got {}",
+            app.disp_video_kbps
+        );
+        assert!(
+            app.disp_viewers > 0.0 && app.disp_viewers < 3.0,
+            "the viewer count eases toward its target, got {}",
+            app.disp_viewers
+        );
+    }
+
+    /// When no broadcast is live, the eased stats display is reset to zero (in
+    /// [`App::draw`]), so a new broadcast starts from a clean zero rather than counting
+    /// down from the previous session's values.
+    #[test]
+    fn the_stats_display_resets_to_zero_when_idle() {
+        let (mut app, _rt) = test_app();
+        // Seed the display as if a broadcast had just ended mid-settle.
+        app.disp_video_kbps = 4000.0;
+        app.disp_viewers = 2.0;
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(760.0, 560.0),
+            )),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(raw, |ui| app.draw(ui));
+        out.textures_delta.clear();
+        assert_eq!(app.disp_video_kbps, 0.0, "idle resets the video display");
+        assert_eq!(app.disp_viewers, 0.0, "idle resets the viewer display");
+    }
+
+    /// The Settings window's "Save" button is the accent primary action: it paints a
+    /// soft 3-layer accent halo (the live green at low alpha), matching the hero
+    /// buttons on the tabs, so committing the edits reads as the primary commitment.
+    #[test]
+    fn the_settings_save_button_paints_a_soft_accent_halo() {
+        let (mut app, _rt) = test_app();
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(760.0, 560.0),
+            )),
+            ..Default::default()
+        };
+        // A few passes so the window and its content settle at their final size.
+        for _ in 0..3 {
+            let mut out = ctx.run_ui(raw.clone(), |ui| {
+                app.options_window(ui.ctx());
+            });
+            out.textures_delta.clear();
+        }
+        let mut out = ctx.run_ui(raw, |ui| {
+            app.options_window(ui.ctx());
+        });
+        out.textures_delta.clear();
+        let halo_alphas = [0.02, 0.05, 0.09];
+        let count = out
+            .shapes
+            .iter()
+            .filter(|s| match &s.shape {
+                egui::epaint::Shape::Rect(r) => halo_alphas
+                    .iter()
+                    .any(|&a| r.fill == ACCENT.gamma_multiply(a)),
+                _ => false,
+            })
+            .count();
+        assert_eq!(
+            count, 3,
+            "the Save button should paint a 3-layer accent halo"
         );
     }
 }

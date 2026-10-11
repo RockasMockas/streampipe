@@ -8,7 +8,10 @@
 
 use eframe::egui::{self, Context, Ui};
 
-use super::{config::{player_key, PLAYERS}, App};
+use super::{
+    config::{player_key, PLAYERS},
+    App, ACCENT, pointer_over, primary_button_glow,
+};
 
 impl App {
     /// Show the Options window, closing it when its close button is pressed or
@@ -157,7 +160,21 @@ impl App {
 
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            if ui.button("Save").clicked() {
+            // The accent primary "Save" button, matching the hero buttons on the tabs:
+            // an accent fill + stroke + a soft glow, so the one action that commits the
+            // edits reads as the primary commitment (Close stays a plain secondary).
+            // The fixed `.fill()` suppresses egui's own hover feedback, so the hover is
+            // read from the pointer and lifts both the glow and the fill.
+            let save_rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(90.0, 30.0));
+            let hovered = pointer_over(ui, save_rect);
+            primary_button_glow(ui.painter(), save_rect, ACCENT, hovered);
+            let save = egui::Button::new("Save")
+                .fill(ACCENT.gamma_multiply(if hovered { 0.26 } else { 0.18 }))
+                .stroke(egui::Stroke::new(
+                    1.0,
+                    ACCENT.gamma_multiply(if hovered { 0.75 } else { 0.55 }),
+                ));
+            if ui.add_sized([90.0, 30.0], save).clicked() {
                 self.sync_watch_from_config();
                 self.config.save();
                 ui.ctx().request_repaint();
