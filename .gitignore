@@ -1,3 +1,5 @@
 /target
 .crates-docs
 .pid*
+no-gui-test/
+
