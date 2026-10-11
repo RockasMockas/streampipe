@@ -503,6 +503,14 @@ pub struct ConnectWhipArgs {
     #[clap(long)]
     pub buffer: Option<u64>,
 
+    /// The player's initial volume, in percent (0=mute, 100=full).
+    ///
+    /// Every player can be told where to start, so the launched window opens at
+    /// this level: mpv gets `--volume=N`, ffplay `-volume N`, VLC `--gain=N/100`
+    /// (VLC 3 dropped its old `--volume`). The default, 100, changes nothing.
+    #[clap(long, default_value_t = 100u8, value_parser = clap::value_parser!(u8).range(0..=100))]
+    pub volume: u8,
+
     #[clap(flatten)]
     pub common: CommonArgs,
 }
@@ -1307,6 +1315,7 @@ async fn connect_whip(args: ConnectWhipArgs) -> Result<()> {
         player_path: args.player_path.clone(),
         no_launch: args.no_launch,
         buffer: args.buffer.map(Duration::from_millis),
+        volume: args.volume,
         stats: stats_enabled(args.common.verbosity()),
     };
 

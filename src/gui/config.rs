@@ -23,6 +23,10 @@ const APP_DIR: &str = "streampipe";
 /// The config file name inside [`APP_DIR`].
 const CONFIG_FILE: &str = "config.json";
 
+/// The initial player volume the app starts with: full volume, which is also
+/// "change nothing" for every player (all of them default to 100 %).
+pub const DEFAULT_VOLUME: u8 = 100;
+
 /// The players the GUI offers, in dropdown order.
 pub const PLAYERS: [Player; 4] = [Player::Mpv, Player::Vlc, Player::Ffplay, Player::None];
 
@@ -64,6 +68,11 @@ pub struct Config {
     pub player_paths: PlayerPaths,
     /// The jitter buffer in milliseconds, `None` for lowest latency.
     pub buffer_ms: Option<u64>,
+    /// The player's initial volume in percent (0-100), used on every launch.
+    ///
+    /// 100 means "leave the player at its own default", which is what each
+    /// player's flag means at that value (see [`Player::command`]).
+    pub volume: u8,
     /// The local address the viewer plays out on.
     pub play_addr: String,
     /// The WHIP host to bind, prefilled with loopback.
@@ -136,6 +145,7 @@ impl Default for Config {
             default_player: player_key(Player::Mpv).to_string(),
             player_paths: PlayerPaths::default(),
             buffer_ms: None,
+            volume: DEFAULT_VOLUME,
             play_addr: streampipe::webrtc::DEFAULT_PLAY_ADDR.to_string(),
             broadcast_host: "127.0.0.1".to_string(),
             broadcast_port: 8080,

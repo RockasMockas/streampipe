@@ -127,11 +127,19 @@ impl Player {
     /// sync; `buffer` then gives the player time to absorb that.
     ///
     /// `path` overrides the player binary, for a player that is not on `PATH`.
+    ///
+    /// `volume` is the startup volume in percent (0-100). Every player can be
+    /// told where to start: mpv with `--volume=<0-100>`, ffplay with
+    /// `-volume <0-100>` ("set startup volume 0=min 100=max"), and VLC with the
+    /// audio-output `--gain` multiplier (VLC 3 dropped its old `--volume`, which
+    /// now only prints "option --volume no longer exists"). 100 is unity in all
+    /// three, so the default changes nothing.
     pub fn command(
         &self,
         sdp: &Path,
         buffer: Option<Duration>,
         path: Option<&std::path::Path>,
+        volume: u8,
     ) -> Vec<String> {
         let file = sdp.display().to_string();
         // The custom path replaces the binary name, the flags stay the player's.
@@ -147,6 +155,9 @@ impl Player {
                     // story: no config-file options can quietly re-add buffering.
                     "--no-config".to_string(),
                     "--force-window=immediate".to_string(),
+                    // Start at the chosen level: mpv's `--volume` is a percentage
+                    // of full scale (its own default is 100).
+                    format!("--volume={volume}"),
                     // A live stream must start at the live edge, never resume a
                     // watched position from a previous run.
                     "--no-resume-playback".to_string(),
@@ -177,12 +188,22 @@ impl Player {
                 vec![
                     bin("vlc"),
                     format!("--network-caching={caching}"),
+                    // VLC 3 has no `--volume` any more (it is accepted as a legacy
+                    // name and only warns "option --volume no longer exists"), so
+                    // the startup level goes through the audio-output `--gain`, a
+                    // linear multiplier where 1.0 is full scale.
+                    format!("--gain={:.2}", f64::from(volume) / 100.0),
                     "--no-loop".into(),
                     file,
                 ]
             }
             Player::Ffplay => {
-                let mut cmd = vec![bin("ffplay")];
+                let mut cmd = vec![
+                    bin("ffplay"),
+                    // ffplay's `-volume` is its startup volume, 0=mute 100=max.
+                    "-volume".into(),
+                    volume.to_string(),
+                ];
                 match buffer {
                     Some(ms) => {
                         // Drop corrupt packets instead of feeding them to the
@@ -1618,6 +1639,8 @@ pub struct ViewerConfig {
     pub no_launch: bool,
     /// How much jitter buffer to give the player, `None` for lowest latency.
     pub buffer: Option<Duration>,
+    /// The player's startup volume in percent (0-100), 100 for its own default.
+    pub volume: u8,
     /// Whether to log periodic counters.
     pub stats: bool,
 }
@@ -2080,14 +2103,14 @@ async fn launch(
         tracing::info!(
             "not launching a player, play with: {}",
             cfg.player
-                .command(sdp_path, buffer, cfg.player_path.as_deref())
+                .command(sdp_path, buffer, cfg.player_path.as_deref(), cfg.volume)
                 .join(" ")
         );
         return Ok(None);
     }
     let command = cfg
         .player
-        .command(sdp_path, buffer, cfg.player_path.as_deref());
+        .command(sdp_path, buffer, cfg.player_path.as_deref(), cfg.volume);
     let mut child = Command::new(&command[0])
         .args(&command[1..])
         .spawn()
@@ -2481,33 +2504,63 @@ mod tests {
     #[test]
     fn player_commands_are_low_latency() {
         let path = Path::new("/tmp/x.sdp");
-        let mpv = Player::Mpv.command(path, None, None);
+        let mpv = Player::Mpv.command(path, None, None, 100);
         assert_eq!(mpv[0], "mpv");
         assert!(mpv.contains(&"--no-config".to_string()));
+        assert!(mpv.contains(&"--force-window=immediate".to_string()));
         assert!(mpv.contains(&"--untimed".to_string()));
         assert!(mpv.contains(&"--profile=low-latency".to_string()));
         assert!(mpv.contains(&"--no-resume-playback".to_string()));
         assert_eq!(mpv.last().unwrap(), "/tmp/x.sdp");
         assert!(Player::Vlc
-            .command(path, None, None)
+            .command(path, None, None, 100)
             .contains(&"--network-caching=100".to_string()));
         assert!(Player::Ffplay
-            .command(path, None, None)
+            .command(path, None, None, 100)
             .contains(&"nobuffer".to_string()));
         assert!(!Player::None.launches());
         assert!(Player::Mpv.launches());
+    }
+
+    /// Every player can be told where to start: mpv `--volume=N`, ffplay
+    /// `-volume N`, VLC `--gain=N/100` (VLC 3 has no `--volume`). The flag must
+    /// be present whatever the buffering, and the file must stay last.
+    #[test]
+    fn player_commands_carry_the_startup_volume() {
+        let path = Path::new("/tmp/x.sdp");
+        for buffer in [None, Some(Duration::from_millis(250))] {
+            let mpv = Player::Mpv.command(path, buffer, None, 40);
+            assert!(mpv.contains(&"--volume=40".to_string()), "{mpv:?}");
+            assert_eq!(mpv.last().unwrap(), "/tmp/x.sdp");
+
+            let ffplay = Player::Ffplay.command(path, buffer, None, 40);
+            let i = ffplay
+                .iter()
+                .position(|a| a == "-volume")
+                .unwrap_or_else(|| panic!("no -volume in {ffplay:?}"));
+            assert_eq!(ffplay[i + 1], "40");
+
+            let vlc = Player::Vlc.command(path, buffer, None, 40);
+            assert!(vlc.contains(&"--gain=0.40".to_string()), "{vlc:?}");
+            // The legacy name is a warning, not a volume: never pass it.
+            assert!(!vlc.iter().any(|a| a == "--volume=40"));
+
+            // A custom binary keeps its player's volume flag.
+            let mpv = Player::Mpv.command(path, buffer, Some(Path::new("/opt/mpv")), 40);
+            assert!(mpv.contains(&"--volume=40".to_string()));
+        }
     }
 
     #[test]
     fn a_player_path_replaces_the_binary_but_keeps_the_flags() {
         let path = Path::new("/tmp/x.sdp");
         let bin = Path::new("/opt/mpv");
-        let mpv = Player::Mpv.command(path, None, Some(bin));
+        let mpv = Player::Mpv.command(path, None, Some(bin), 100);
         assert_eq!(mpv[0], "/opt/mpv");
         assert!(mpv.contains(&"--profile=low-latency".to_string()));
         assert_eq!(mpv.last().unwrap(), "/tmp/x.sdp");
         // The path is used whatever the player, with that player's flags.
-        let ffplay = Player::Ffplay.command(path, Some(Duration::from_millis(300)), Some(bin));
+        let ffplay = Player::Ffplay.command(path, Some(Duration::from_millis(300)), Some(bin), 100);
         assert_eq!(ffplay[0], "/opt/mpv");
         assert!(ffplay.contains(&"+discardcorrupt".to_string()));
     }
@@ -2516,19 +2569,19 @@ mod tests {
     fn a_buffer_switches_the_player_out_of_zero_buffering() {
         let path = Path::new("/tmp/x.sdp");
         let ms = Duration::from_millis(300);
-        let mpv = Player::Mpv.command(path, Some(ms), None);
+        let mpv = Player::Mpv.command(path, Some(ms), None, 100);
         assert!(!mpv.contains(&"--profile=low-latency".to_string()));
         assert!(!mpv.contains(&"--no-cache".to_string()));
         assert!(mpv.contains(&"--cache=yes".to_string()));
         assert!(mpv.contains(&"--no-resume-playback".to_string()));
         assert!(mpv.iter().any(|a| a.contains("max_delay=300000")));
 
-        let ffplay = Player::Ffplay.command(path, Some(ms), None);
+        let ffplay = Player::Ffplay.command(path, Some(ms), None, 100);
         assert!(!ffplay.iter().any(|a| a == "nobuffer"));
         assert!(ffplay.contains(&"+discardcorrupt".to_string()));
         assert!(ffplay.iter().any(|a| a == "300000"));
 
-        let vlc = Player::Vlc.command(path, Some(ms), None);
+        let vlc = Player::Vlc.command(path, Some(ms), None, 100);
         assert!(vlc.contains(&"--network-caching=300".to_string()));
     }
 

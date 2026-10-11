@@ -502,6 +502,8 @@ pub struct WatchParams {
     pub play_addr: String,
     /// The jitter buffer in milliseconds, `None` for lowest latency.
     pub buffer_ms: Option<u64>,
+    /// The player's startup volume in percent (0-100), 100 for its own default.
+    pub volume: u8,
 }
 
 /// Whether a watch ticket points at our own endpoint identity.
@@ -618,6 +620,7 @@ pub fn spawn_watch(
             player_path: params.player_path,
             no_launch: false,
             buffer: params.buffer_ms.map(Duration::from_millis),
+            volume: params.volume,
             stats: true,
         };
         let result = webrtc::connect_whip(endpoint, cfg).await;
@@ -706,6 +709,9 @@ pub async fn consume_stats(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // This module is `gui::state::tests`, so the sibling `config` module is two
+    // levels up.
+    use crate::gui::config::DEFAULT_VOLUME;
 
     /// Regression (AC1): `spawn_watch` used to set `Watching` synchronously, so
     /// the Watch tab claimed "playing in a player window" the instant the button
@@ -737,6 +743,7 @@ mod tests {
                 player_path: None,
                 play_addr: "127.0.0.1:0".into(),
                 buffer_ms: None,
+                volume: DEFAULT_VOLUME,
             },
         );
 

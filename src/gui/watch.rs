@@ -182,6 +182,34 @@ impl App {
             }
         });
 
+        // The initial player volume, on its own full-width row under the
+        // Player/Buffer line: the label leads on the left and carries the number,
+        // the slider track fills the rest of the panel so the drag target is as
+        // wide as the tab. The label is formatted from the same `watch_volume` the
+        // slider writes, so the two can never disagree.
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            // Format first: the label must not borrow what the slider takes mutably.
+            let label = format!("Player Initial Volume: {}%", self.watch_volume);
+            ui.label(egui::RichText::new(label).size(big));
+            // `slider_width` is the track width, and a child `Ui`'s spacing is scoped
+            // to that child, so widening it here stretches this slider (and only this
+            // one) out to the panel edge. The 24 points left over are the widget's
+            // own margins, so the track ends flush with the content area.
+            let track = (ui.available_width() - 24.0).max(120.0);
+            ui.spacing_mut().slider_width = track;
+            // `show_value(false)` drops the slider's own readout: the leading label
+            // already shows the same number, so the row reads as label, then bar.
+            let slider = egui::Slider::new(&mut self.watch_volume, 0..=100)
+                .step_by(1.0)
+                .show_value(false);
+            let resp = ui.add_enabled_ui(!busy, |ui| ui.add(slider));
+            resp.inner.on_hover_text(
+                "where the player window starts: mpv gets --volume=N, ffplay -volume N, \
+                 VLC --gain=N/100 (VLC 3 has no --volume). 100 is full volume.",
+            );
+        });
+
         if let Some(path) = self.config.player_paths.get(self.watch_player) {
             ui.weak(format!("player path: {path}"));
         }
@@ -280,11 +308,16 @@ impl App {
             .map(PathBuf::from);
         let play_addr = self.config.play_addr.clone();
         let buffer_ms = parse_buffer_ms(&self.watch_buffer);
+        // The slider's range is 0..=100, so no clamping is needed here; the
+        // `min` only guards a value restored from a hand-edited config.
+        let volume = self.watch_volume.min(100);
 
-        // Persist the last-used buffer and ticket. The default player is owned by
-        // Options (it is the value auto-selected on the Watch tab at open), so a
-        // quick-switch here only affects this session and must not overwrite it.
+        // Persist the last-used buffer, volume and ticket. The default player is
+        // owned by Options (it is the value auto-selected on the Watch tab at
+        // open), so a quick-switch here only affects this session and must not
+        // overwrite it.
         self.config.buffer_ms = buffer_ms;
+        self.config.volume = volume;
         self.config.note_ticket(&ticket_text);
         self.config.save();
 
@@ -298,6 +331,7 @@ impl App {
                 player_path,
                 play_addr,
                 buffer_ms,
+                volume,
             },
         );
         self.state.lock().unwrap().watch_session = Some(handle);
@@ -312,6 +346,7 @@ impl App {
             .buffer_ms
             .map(|ms| ms.to_string())
             .unwrap_or_default();
+        self.watch_volume = self.config.volume.min(100);
     }
 }
 

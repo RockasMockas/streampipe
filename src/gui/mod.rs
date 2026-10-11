@@ -82,6 +82,8 @@ pub struct App {
     watch_player: Player,
     /// The buffer field on the Watch tab, in milliseconds (empty = auto).
     watch_buffer: String,
+    /// The initial player volume on the Watch tab, in percent (0-100).
+    watch_volume: u8,
     /// The last copied box and when, for the transient toast.
     copied: Option<(&'static str, Instant)>,
     /// A transient action-complete toast (e.g. "Relay refreshed ✓") and when it was
@@ -146,6 +148,9 @@ impl App {
             .buffer_ms
             .map(|ms| ms.to_string())
             .unwrap_or_default();
+        // The slider's range is 0..=100; the `min` only guards a value restored
+        // from a hand-edited config that names a louder setting than we can show.
+        let watch_volume = config.volume.min(100);
         App {
             handle,
             state,
@@ -158,6 +163,7 @@ impl App {
             log_open: false,
             watch_player,
             watch_buffer,
+            watch_volume,
             copied: None,
             toast: None,
             pulse: Instant::now(),
@@ -1764,6 +1770,68 @@ mod tests {
         let mut out = ctx.run_ui(raw, |ui| app.draw(ui));
         out.textures_delta.clear();
         out.shapes
+    }
+
+    /// The Watch tab carries a full-width initial-volume slider on its own row
+    /// under the Player/Buffer line, with a `Player Initial Volume: N%` label on
+    /// its left whose number matches the slider.
+    ///
+    /// Checked from the painted shapes: the label text, the slider track (a wide
+    /// rounded rect), and that the track spans nearly the whole panel.
+    #[test]
+    fn the_watch_tab_has_a_full_width_volume_slider() {
+        let (mut app, _rt) = test_app();
+        app.tab = Tab::Watch;
+        app.watch_volume = 40;
+        let size = egui::vec2(760.0, 560.0);
+        let shapes = render_shapes(&mut app, size);
+
+        // The label names the control and carries the number. `TextShape::pos` is
+        // the top-left of the text, `galley.rect` the box it lays out in.
+        let label_rect = shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                egui::epaint::Shape::Text(t)
+                    if t.galley.text() == "Player Initial Volume: 40%" =>
+                {
+                    // `pos` is where the text box is placed; the galley's size is
+                    // local, so lift it to the placement.
+                    Some(egui::Rect::from_min_size(t.pos, t.galley.rect.size()))
+                }
+                _ => None,
+            })
+            .expect("the volume label should be painted");
+
+        // The slider track: the widest thin rounded rect on the label's row, to
+        // the right of it (the handle is the same language, just narrower).
+        let track = shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::epaint::Shape::Rect(r)
+
+                    if r.rect.left() >= label_rect.right()
+                        && r.rect.max.y > label_rect.min.y
+                        && r.rect.min.y < label_rect.max.y =>
+                {
+                    Some(r.rect)
+                }
+                _ => None,
+            })
+            .max_by(|a, b| a.width().total_cmp(&b.width()))
+            .expect("the slider track should be painted");
+
+        assert!(
+            track.width() > 400.0,
+            "the slider should span most of the panel, got {track:?} vs label \
+             {label_rect:?}"
+        );
+        // It reaches the right edge of the panel (the panel is inset by its frame
+        // margins plus the item spacing, so "full width" lands ~40 points short of
+        // the window edge).
+        assert!(
+            track.right() >= size.x - 44.0,
+            "the slider should reach the right edge, got {track:?}"
+        );
     }
 
     /// Render the live broadcast tab with viewers at the minimum window size, to
