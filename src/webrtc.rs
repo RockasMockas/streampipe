@@ -743,11 +743,18 @@ async fn handle_viewer(accepting: Accepting, tx: mpsc::Sender<ViewerEvent>) -> R
             // Pace QUIC datagrams onto the wire: a 300+ KB keyframe would
             // otherwise burst as a wall of datagrams that overruns the viewer's
             // OS UDP receive buffer (Linux ~212 KB), dropping QUIC packets before
-            // they ever reach the viewer logic. A token bucket caps a burst to 42 KB
-            // and refills at 8 KB/ms (64 Mbps), spreading a large keyframe over a few
-            // tens of ms while staying well below OS socket ceilings.
-            const BURST_CAP: usize = 42 * 1024;
-            const TOKEN_RATE: usize = 8 * 1024; // bytes per ms (64 Mbps)
+            // they ever reach the viewer logic. A token bucket caps a burst to 128 KB
+            // and refills at 32 KB/ms (256 Mbps), spreading a large keyframe over a
+            // few tens of ms while staying below the OS socket ceilings it has to
+            // protect (Linux ~212 KB, macOS ~763 KB default SO_RCVBUF). The cap is
+            // also what lifts the Windows ceiling: a ~15.6 ms sleep overshoot is
+            // clamped to the bucket, so the paced maximum is BURST_CAP / 15.6 ms =
+            // ~65.6 Mbps instead of the ~21.5 Mbps a 42 KB bucket allowed. Tokens
+            // are only credited once enough time has elapsed to advance last_fill by
+            // >=1us, so fractional time is never double-counted (which would inflate
+            // the rate quadratically).
+            const BURST_CAP: usize = 128 * 1024;
+            const TOKEN_RATE: usize = 32 * 1024; // bytes per ms (256 Mbps)
             let mut tokens = BURST_CAP;
             let mut last_fill = tokio::time::Instant::now();
             while let Some(frame) = frame_rx.recv().await {
@@ -1778,21 +1785,30 @@ pub async fn connect_whip(endpoint: Endpoint, cfg: ViewerConfig) -> Result<()> {
             let mut last_kf: Option<Instant> = None;
             // Pace local UDP writes: ffplay opens its RTP socket via an SDP file
             // where FFmpeg ignores -buffer_size, so it is bounded by the OS default
-            // SO_RCVBUF (~50-212 KB). When the reorder stage flushes a held burst it
+            // SO_RCVBUF (~50-64 KB). When the reorder stage flushes a held burst it
             // can dump >100 KB at once and overrun that socket, dropping packets.
-            // A token bucket caps a burst to 42 KB and refills at 8 KB/ms (64 Mbps).
-            // The cap is strictly below the OS default UDP SO_RCVBUF (50 KB macOS, 64
-            // KB Windows), so a dense flush never overruns the kernel socket and gets
-            // its tail dropped (the "RTP: missed X packets" / decode-error symptom). On
-            // Windows a ~15.6 ms sleep overshoot credits ~125 KB, which the bucket caps
-            // at 42 KB, settling into a steady ~21.5 Mbps (42 KB per 15.6 ms) without
-            // clipping throughput. Tokens are only credited once enough time has
+            // The *physical* burst is still capped at 42 KB, strictly below the OS
+            // default UDP SO_RCVBUF (50 KB macOS, 64 KB Windows), so a dense flush
+            // never overruns the kernel socket and gets its tail dropped (the
+            // "RTP: missed X packets" / decode-error symptom). The bucket itself is
+            // decoupled from that cap: it banks up to MAX_TOKENS (1 MB) at 32 KB/ms
+            // (256 Mbps), and the burst limit is enforced with yield_now() instead of
+            // sleep(). A yield hands the runtime (and the CPU) back so the player
+            // process can drain the socket, then we keep writing. That is what removes
+            // the Windows ceiling: when the bucket *was* the burst cap, a ~15.6 ms
+            // sleep overshoot was clamped to 42 KB and throughput pinned at ~21.5
+            // Mbps, which backed the frame_rx queue up, dropped packets and starved
+            // the player's audio buffer. Tokens are only credited once enough time has
             // elapsed to advance last_fill by >=1us, so fractional time is never
             // double-counted (which would inflate the rate quadratically).
             const BURST_CAP: usize = 42 * 1024;
-            const TOKEN_RATE: usize = 8 * 1024; // bytes per ms (64 Mbps)
-            let mut tokens = BURST_CAP;
+            const MAX_TOKENS: usize = 1024 * 1024; // banked headroom (1 MB)
+            const TOKEN_RATE: usize = 32 * 1024; // bytes per ms (256 Mbps)
+            let mut tokens = MAX_TOKENS;
             let mut last_fill = tokio::time::Instant::now();
+            // Bytes handed to the player since the last yield; keeps every physical
+            // burst under BURST_CAP.
+            let mut burst_bytes: usize = 0;
             while let Some(msg) = forward_rx.recv().await {
                 match msg {
                     ForwardMsg::Epoch => {
@@ -1802,13 +1818,15 @@ pub async fn connect_whip(endpoint: Endpoint, cfg: ViewerConfig) -> Result<()> {
                         last_kf = Some(Instant::now());
                     }
                     ForwardMsg::Packet(port, packet, is_video) => {
+                        // `required` is capped by BURST_CAP, so a single packet can
+                        // never consume more than one physical burst.
                         let required = packet.len().min(BURST_CAP);
                         loop {
                             let now = tokio::time::Instant::now();
                             let elapsed_micros = now.duration_since(last_fill).as_micros() as u64;
                             if elapsed_micros >= 100_000 {
                                 // Idle for >= 100ms: snap to full, prevent huge multiplier
-                                tokens = BURST_CAP;
+                                tokens = MAX_TOKENS;
                                 last_fill = now;
                             } else {
                                 let added =
@@ -1819,8 +1837,8 @@ pub async fn connect_whip(endpoint: Endpoint, cfg: ViewerConfig) -> Result<()> {
                                 // double-counted across fast loop iterations.
                                 if consumed_micros > 0 {
                                     tokens += added;
-                                    if tokens >= BURST_CAP {
-                                        tokens = BURST_CAP;
+                                    if tokens >= MAX_TOKENS {
+                                        tokens = MAX_TOKENS;
                                         last_fill = now;
                                     } else {
                                         last_fill +=
@@ -1832,10 +1850,20 @@ pub async fn connect_whip(endpoint: Endpoint, cfg: ViewerConfig) -> Result<()> {
                                 tokens -= required;
                                 break;
                             }
-                            // Sleep (not yield_now) so we release the core to the media
-                            // player doing software decode instead of starving it.
+                            // Sleep (not yield_now) while *waiting for tokens*, so we
+                            // release the core to the media player doing software decode
+                            // instead of starving it. The burst limit below is the only
+                            // place that yields, and only when tokens are already banked.
                             tokio::time::sleep(std::time::Duration::from_millis(1)).await;
                         }
+                        // We have the tokens. Break the write up once the accumulated
+                        // burst reaches BURST_CAP so the player's small OS socket
+                        // buffer is never overrun, then hand the packet over.
+                        if burst_bytes + required > BURST_CAP {
+                            tokio::task::yield_now().await;
+                            burst_bytes = 0;
+                        }
+                        burst_bytes += required;
                         forward(
                             &forward_video,
                             &packet,
@@ -2699,6 +2727,173 @@ mod tests {
             kf_rx.try_recv(),
             Ok(()),
             "a gap is a gap whether or not it was delivered"
+        );
+    }
+
+    /// Host pacing: a 300 KB keyframe has to reach the wire in a few ms.
+    ///
+    /// Mirrors the token bucket of the host's QUIC forward loop in
+    /// `handle_viewer` (128 KB burst cap, refilling at 32 KB/ms) and measures
+    /// how long it takes to push a 300 KB keyframe. The previous 42 KB bucket
+    /// refilling at 8 KB/ms needed ~33 ms for the same keyframe, and on Windows
+    /// the ~15.6 ms sleep granularity pinned it at ~21.5 Mbps (~111 ms), which
+    /// backlogged the viewer's `frame_rx` queue until `try_send` started dropping
+    /// packets. The bucket is reproduced here rather than reached through, because
+    /// the production loop is welded to a live iroh connection.
+    #[tokio::test]
+    async fn host_pacer_drains_a_300_kb_keyframe_quickly() {
+        const BURST_CAP: usize = 128 * 1024;
+        const TOKEN_RATE: usize = 32 * 1024; // bytes per ms (256 Mbps)
+        const TOTAL: usize = 300 * 1024;
+        const DATAGRAM: usize = 1200;
+
+        let start = Instant::now();
+        let mut tokens = BURST_CAP;
+        let mut last_fill = tokio::time::Instant::now();
+        let mut sent = 0usize;
+        let mut sleeps = 0usize;
+        while sent < TOTAL {
+            let required = DATAGRAM.min(BURST_CAP);
+            loop {
+                let now = tokio::time::Instant::now();
+                let elapsed_micros = now.duration_since(last_fill).as_micros() as u64;
+                if elapsed_micros >= 100_000 {
+                    tokens = BURST_CAP;
+                    last_fill = now;
+                } else {
+                    let added = ((elapsed_micros * (TOKEN_RATE as u64)) / 1000) as usize;
+                    let consumed_micros = (added as u64 * 1000) / (TOKEN_RATE as u64);
+                    if consumed_micros > 0 {
+                        tokens += added;
+                        if tokens >= BURST_CAP {
+                            tokens = BURST_CAP;
+                            last_fill = now;
+                        } else {
+                            last_fill += Duration::from_micros(consumed_micros);
+                        }
+                    }
+                }
+                if tokens >= required {
+                    tokens -= required;
+                    break;
+                }
+                sleeps += 1;
+                sleep(Duration::from_millis(1)).await;
+            }
+            sent += DATAGRAM;
+        }
+        let elapsed = start.elapsed();
+        let mbps = (sent as f64 * 8.0) / (elapsed.as_secs_f64() * 1e6);
+        println!("PACER {sent} bytes in {elapsed:?} (~{mbps:.0} Mbps)");
+        assert!(
+            elapsed < Duration::from_millis(if cfg!(windows) { 50 } else { 10 }),
+            "300 KB drained in {elapsed:?} (~{mbps:.0} Mbps, {sleeps} sleeps): the \
+             paced ceiling must sit well above the old 21.5 Mbps"
+        );
+    }
+
+    /// Viewer pacing: 300 KB has to reach the local player in a few ms and
+    /// every burst has to be broken up so nothing overruns the player's socket.
+    ///
+    /// Mirrors the forward loop of `connect_whip`: the bucket banks up to
+    /// `MAX_TOKENS` (1 MB) at 32 KB/ms, while the *physical* burst stays under
+    /// `BURST_CAP` (42 KB, below the ~50-64 KB default SO_RCVBUF the player gets
+    /// from an SDP-launched ffplay) and is broken up with `yield_now()` so the
+    /// player keeps the CPU and drains the socket. A sleeping pacer capped at
+    /// 42 KB was the old ~21.5 Mbps ceiling on Windows that starved the player's
+    /// audio buffer and corrupted video; a yielding pacer with a banked bucket
+    /// clears 300 KB in a few ms.
+    #[tokio::test]
+    async fn viewer_pacer_drains_a_300_kb_keyframe_without_drops() {
+        const BURST_CAP: usize = 42 * 1024;
+        const MAX_TOKENS: usize = 1024 * 1024;
+        const TOKEN_RATE: usize = 32 * 1024; // bytes per ms (256 Mbps)
+        const TOTAL: usize = 300 * 1024;
+        const PACKET: usize = 1200;
+
+        let player = Arc::new(UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap());
+        // Same trick as `bind_ice`: give the stand-in player a big socket so the
+        // test measures the pacer and not the kernel's luck with a full buffer.
+        let sock = socket2::SockRef::from(&player);
+        let _ = sock.set_recv_buffer_size(8 * 1024 * 1024);
+        let port = player.local_addr().unwrap().port();
+        let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let dst = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+
+        // Drain the "player" concurrently, the way ffplay does.
+        let drain = {
+            let player = player.clone();
+            tokio::spawn(async move {
+                let mut buf = [0u8; 8192];
+                let mut received = 0usize;
+                while received < TOTAL {
+                    let (n, _) = player.recv_from(&mut buf).await.unwrap();
+                    received += n;
+                }
+                received
+            })
+        };
+
+        let start = Instant::now();
+        let mut tokens = MAX_TOKENS;
+        let mut last_fill = tokio::time::Instant::now();
+        let mut burst_bytes: usize = 0;
+        let mut yields = 0usize;
+        let mut sent = 0usize;
+        let mut seq = 0u8;
+        while sent < TOTAL {
+            let required = PACKET.min(BURST_CAP);
+            loop {
+                let now = tokio::time::Instant::now();
+                let elapsed_micros = now.duration_since(last_fill).as_micros() as u64;
+                if elapsed_micros >= 100_000 {
+                    tokens = MAX_TOKENS;
+                    last_fill = now;
+                } else {
+                    let added = ((elapsed_micros * (TOKEN_RATE as u64)) / 1000) as usize;
+                    let consumed_micros = (added as u64 * 1000) / (TOKEN_RATE as u64);
+                    if consumed_micros > 0 {
+                        tokens += added;
+                        if tokens >= MAX_TOKENS {
+                            tokens = MAX_TOKENS;
+                            last_fill = now;
+                        } else {
+                            last_fill += Duration::from_micros(consumed_micros);
+                        }
+                    }
+                }
+                if tokens >= required {
+                    tokens -= required;
+                    break;
+                }
+                sleep(Duration::from_millis(1)).await;
+            }
+            if burst_bytes + required > BURST_CAP {
+                tokio::task::yield_now().await;
+                burst_bytes = 0;
+                yields += 1;
+            }
+            burst_bytes += required;
+            sender
+                .send_to(&[seq; PACKET], dst)
+                .await
+                .expect("deliver to the player");
+            sent += PACKET;
+            seq = seq.wrapping_add(1);
+        }
+        let elapsed = start.elapsed();
+        let received = drain.await.unwrap();
+        let mbps = (sent as f64 * 8.0) / (elapsed.as_secs_f64() * 1e6);
+        println!("PACER {sent} bytes in {elapsed:?} (~{mbps:.0} Mbps)");
+
+        assert!(
+            received >= TOTAL,
+            "the player got {received} of {TOTAL} bytes, so a burst overran its socket"
+        );
+        assert!(
+            elapsed < Duration::from_millis(if cfg!(windows) { 50 } else { 10 }),
+            "300 KB reached the player in {elapsed:?} (~{mbps:.0} Mbps, {yields} \
+             yields): the 21.5 Mbps ceiling must be gone"
         );
     }
 
