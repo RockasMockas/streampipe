@@ -5,10 +5,20 @@
 //! into a bounded ring buffer the log panel renders. This is a `MakeWriter`,
 //! not a `registry` `Layer`, because `tracing-subscriber` is compiled without
 //! the `registry` feature.
+//!
+//! The writers handed out here are **wait-free**: they only push to an
+//! unbounded channel. They never touch `stderr` and never lock the ring,
+//! because the callers are the tokio workers of the engine runtime, and a
+//! stall there is a media outage: the WHIP host polls the ICE socket from one
+//! of those threads, so a worker parked on a Windows GUI `stderr`, or behind
+//! a mutex the UI thread re-acquires at 60 fps, overruns the OS UDP receive
+//! buffer during a keyframe burst and the viewer sees decode errors. One
+//! background thread drains the channel to `stderr` and the ring.
 
 use std::{
     collections::VecDeque,
     io::{self, Write},
+    sync::mpsc::Sender,
     sync::{Arc, Mutex},
     time::Instant,
 };
@@ -47,29 +57,33 @@ pub fn push(ring: &LogRing, line: impl Into<String>) {
     }
 }
 
-/// A writer that forwards to stderr and collects complete lines into the ring.
+/// A writer that hands complete lines to the background logging thread.
+///
+/// Non-blocking by design: `write` only appends to a local buffer and pushes
+/// finished lines onto a channel, so the engine worker that is logging never
+/// performs I/O and never locks a mutex.
 pub(crate) struct TeeWriter {
-    ring: LogRing,
+    tx: Sender<String>,
     buf: Vec<u8>,
 }
 
 impl TeeWriter {
-    /// Move any complete lines from the buffer into the ring.
+    /// Move any complete lines from the buffer to the logging thread.
     fn drain_lines(&mut self) {
         while let Some(pos) = self.buf.iter().position(|&b| b == b'\n') {
             let line: Vec<u8> = self.buf.drain(..=pos).collect();
             let text = String::from_utf8_lossy(&line)
                 .trim_end_matches('\n')
                 .to_string();
-            push(&self.ring, text);
+            // A closed channel means the process is shutting down; ignoring the
+            // error keeps logging cheap and infallible on the media hot path.
+            let _ = self.tx.send(text);
         }
     }
 }
 
 impl Write for TeeWriter {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        // Mirror to stderr so the GUI process shows the same output as the CLI.
-        io::stderr().write_all(bytes)?;
         self.buf.extend_from_slice(bytes);
         self.drain_lines();
         Ok(bytes.len())
@@ -79,16 +93,16 @@ impl Write for TeeWriter {
         // Surface any trailing partial line without a newline.
         if !self.buf.is_empty() {
             let text = String::from_utf8_lossy(&self.buf).trim_end().to_string();
-            push(&self.ring, text);
+            let _ = self.tx.send(text);
             self.buf.clear();
         }
-        io::stderr().flush()
+        Ok(())
     }
 }
 
-/// A `MakeWriter` handing out [`TeeWriter`]s bound to one ring.
+/// A `MakeWriter` handing out [`TeeWriter`]s bound to one channel.
 pub(crate) struct TeeMakeWriter {
-    ring: LogRing,
+    tx: Sender<String>,
 }
 
 impl<'a> MakeWriter<'a> for TeeMakeWriter {
@@ -96,7 +110,7 @@ impl<'a> MakeWriter<'a> for TeeMakeWriter {
 
     fn make_writer(&'a self) -> Self::Writer {
         TeeWriter {
-            ring: self.ring.clone(),
+            tx: self.tx.clone(),
             buf: Vec::new(),
         }
     }
@@ -106,17 +120,32 @@ impl<'a> MakeWriter<'a> for TeeMakeWriter {
 ///
 /// `RUST_LOG` wins if set, matching the CLI. ANSI is disabled so the ring
 /// holds plain text for the log panel.
+///
+/// The formatted lines go through an unbounded channel to one background
+/// thread, which is the only place that writes to `stderr` or locks the ring.
+/// The thread ends when the subscriber (and with it the last `Sender`) is
+/// dropped, so no explicit teardown is needed.
 pub fn install(ring: LogRing, verbosity: u8) {
     let filter = EnvFilter::builder()
         .with_default_directive(crate::log_level(verbosity).into())
         .from_env_lossy();
-    let tee = TeeMakeWriter { ring };
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let drain_ring = ring.clone();
+    std::thread::spawn(move || {
+        while let Ok(line) = rx.recv() {
+            // Mirror to stderr so the GUI process shows the same output as the
+            // CLI, from a thread whose blocking we do not care about.
+            eprintln!("{line}");
+            push(&drain_ring, line);
+        }
+    });
+    let tee = TeeMakeWriter { tx };
     // Ignore the "already installed" error: the GUI installs once, but a second
     // call (e.g. a stray re-init) must not panic.
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
-        .with_ansi(false)
         .with_writer(tee)
+        .with_ansi(false)
         .try_init();
 }
 
@@ -126,17 +155,42 @@ mod tests {
 
     #[test]
     fn writer_splits_lines_into_ring() {
-        let ring = new_ring();
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
         let mut w = TeeWriter {
-            ring: ring.clone(),
+            tx: tx.clone(),
             buf: Vec::new(),
         };
         w.write_all(b"first\nsecond").unwrap();
         w.flush().unwrap();
-        let snap = snapshot(&ring);
-        // Each line is tagged with an arrival instant; check the text in order.
-        let texts: Vec<&str> = snap.iter().map(|(s, _)| s.as_str()).collect();
-        assert_eq!(texts, vec!["first", "second"]);
+        // The writer only hands lines to the drain thread; dropping every
+        // sender closes the channel so collecting terminates.
+        drop(tx);
+        drop(w);
+        let texts: Vec<String> = rx.iter().collect();
+        assert_eq!(texts, vec!["first".to_string(), "second".to_string()]);
+    }
+
+    /// The whole pipeline: writer to channel to drain thread to ring.
+    #[test]
+    fn drained_lines_land_in_the_ring() {
+        let ring = new_ring();
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let drain_ring = ring.clone();
+        let drainer = std::thread::spawn(move || {
+            while let Ok(line) = rx.recv() {
+                push(&drain_ring, line);
+            }
+        });
+        let mut w = TeeWriter {
+            tx,
+            buf: Vec::new(),
+        };
+        w.write_all(b"a\nb\nc").unwrap();
+        w.flush().unwrap();
+        drop(w);
+        drainer.join().unwrap();
+        let texts: Vec<String> = snapshot(&ring).into_iter().map(|(s, _)| s).collect();
+        assert_eq!(texts, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
     }
 
     #[test]

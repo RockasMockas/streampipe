@@ -1,8 +1,11 @@
 //! The GUI front-end.
 //!
 //! `streampipe` with no arguments opens this. It owns the eframe event loop on
-//! the main thread and drives the async iroh engine on a background tokio
-//! runtime over channels. See [`state`] for the threading contract.
+//! the main thread and drives the async iroh engine over channels on two
+//! separate tokio runtimes: the primary one runs the UI's async work (the
+//! stats consumer that requests repaints), and a dedicated `streampipe-engine`
+//! runtime runs every media session, so nothing in the WebRTC hot path shares a
+//! thread with rendering. See [`state`] for the threading contract.
 
 mod broadcast;
 mod config;
@@ -126,7 +129,11 @@ pub struct App {
 }
 
 impl App {
-    /// Build the app from the runtime, config and channels.
+    /// Build the app from the engine runtime handle, config and channels.
+    ///
+    /// `handle` is the handle of the dedicated `streampipe-engine` runtime, so
+    /// every media session the UI starts runs on threads the renderer never
+    /// shares. The tests pass the handle of a runtime they keep alive.
     fn new(
         handle: Handle,
         config: Config,
@@ -1559,6 +1566,14 @@ fn normalize(x: f32, y: f32) -> (f32, f32) {
 ///
 /// Creates the background runtime, loads config, installs the tee logger, wires
 /// the stats channel and consumer task, and runs eframe until the window closes.
+///
+/// Two runtimes: the primary one hosts the eframe event loop's async work (the
+/// stats consumer that requests repaints), the second one — `streampipe-engine`
+/// — hosts the streaming engine. Media must not share threads with the renderer:
+/// the WHIP host polls the ICE socket from a worker thread, and if that worker is
+/// stalled the OS UDP receive buffer (clamped to a few hundred KB long before the
+/// 8 MiB we ask for) overflows during a keyframe burst, which the viewer sees as
+/// smearing, `error while decoding MB` and jumping timestamps.
 pub fn run() {
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(runtime) => runtime,
@@ -1568,6 +1583,22 @@ pub fn run() {
         }
     };
     let handle = runtime.handle().clone();
+
+    // The engine runtime: every media session (broadcast and watch) and every
+    // task they spawn runs here, on threads no UI repaint or stats consumer
+    // ever touches.
+    let engine_runtime = match tokio::runtime::Builder::new_multi_thread()
+        .thread_name("streampipe-engine")
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("error: unable to start engine runtime: {e}");
+            std::process::exit(1);
+        }
+    };
+    let engine_handle = engine_runtime.handle().clone();
 
     let mut config = Config::load();
     let secret = config.ensure_secret();
@@ -1582,7 +1613,10 @@ pub fn run() {
     // see the channel close between broadcast start/stops.
     let keepalive = stats_tx.clone();
 
-    let app = App::new(handle.clone(), config, state.clone(), log.clone(), stats_tx);
+    // The app gets the engine handle, so `spawn_broadcast`/`spawn_watch` land on
+    // the engine runtime; the stats consumer stays on the GUI runtime with the
+    // renderer it asks to repaint.
+    let app = App::new(engine_handle, config, state.clone(), log.clone(), stats_tx);
     let consumer_state = state.clone();
 
     let options = eframe::NativeOptions {
@@ -1608,6 +1642,7 @@ pub fn run() {
     // Close the stats channel so the consumer task exits, then give any teardown
     // (e.g. the player kill task) a moment to run before the runtime stops.
     drop(keepalive);
+    engine_runtime.shutdown_timeout(Duration::from_millis(1000));
     runtime.shutdown_timeout(Duration::from_millis(1000));
 
     // A normal window close returns `Ok`. An `Err` means the window/GL context

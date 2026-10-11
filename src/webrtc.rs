@@ -392,7 +392,11 @@ impl StreamReport {
     ///
     /// Silence is reported too: a publisher that stopped sending is the one
     /// thing a line full of zeroes says best.
-    fn log(&mut self, now: Instant, viewers: usize) {
+    ///
+    /// `gui_mode` (set when a stats channel is wired up) sends the line through
+    /// `tracing`, whose writer is the non-blocking tee, instead of blocking a
+    /// media worker on synchronous `stderr`. The CLI keeps `eprintln!`.
+    fn log(&mut self, now: Instant, viewers: usize, gui_mode: bool) {
         let Some(started) = self.started else {
             return;
         };
@@ -438,27 +442,43 @@ impl StreamReport {
             ));
         }
         line.push_str(&format!(", {viewers} viewer(s)"));
-        eprintln!("{line}");
+        if gui_mode {
+            tracing::info!("{line}");
+        } else {
+            eprintln!("{line}");
+        }
         self.video.restart(now);
         self.audio.restart(now);
     }
 
     /// Print the final summary of the session.
-    fn log_final(&self, now: Instant) {
+    ///
+    /// `gui_mode` routes the line through `tracing` (see [`Self::log`]).
+    fn log_final(&self, now: Instant, gui_mode: bool) {
         let Some(started) = self.started else {
-            eprintln!("whip input closed without ever receiving media");
+            let line = "whip input closed without ever receiving media";
+            if gui_mode {
+                tracing::info!("{line}");
+            } else {
+                eprintln!("{line}");
+            }
             return;
         };
         let secs = now.duration_since(started).as_secs_f64().max(0.001);
         let bytes = self.video.bytes + self.audio.bytes;
         let kbit = (bytes as f64 * 8.0 / secs / 1000.0).round();
-        eprintln!(
+        let line = format!(
             "whip input closed after {elapsed}: {kbit} kbit/s average of \
              {bytes} bytes, video {packets} packet(s) with {keyframes} keyframe(s)",
             elapsed = human_duration(now.duration_since(started)),
             keyframes = self.video.keyframes_total,
             packets = self.video.packets,
         );
+        if gui_mode {
+            tracing::info!("{line}");
+        } else {
+            eprintln!("{line}");
+        }
     }
 }
 
@@ -952,7 +972,14 @@ impl Host {
     }
 
     /// Handle one event from the viewer acceptor.
+    ///
+    /// Session events are logged through `tracing` when a stats channel is wired
+    /// up (GUI) and through `eprintln!` in the CLI, so a media worker never
+    /// blocks on terminal I/O where the GUI has a tee behind it.
     fn on_viewer_event(&mut self, event: ViewerEvent) {
+        // The GUI has a tee writer that hands the line to a background thread;
+        // the CLI writes straight to stderr.
+        let gui_mode = self.stats_tx.is_some();
         match event {
             ViewerEvent::Joined { id, port, tx } => {
                 self.viewers.retain(|v| v.id != id);
@@ -961,14 +988,19 @@ impl Host {
                     tx,
                     streaming: false,
                 });
-                eprintln!(
+                let line = format!(
                     "viewer {id} connected on udp://127.0.0.1:{port}, \
                      {count} viewer(s) now watching, waiting for a keyframe",
                     count = self.viewers.len()
                 );
-                tracing::info!(
-                    "viewer {id} joined on udp://127.0.0.1:{port}, waiting for a keyframe"
-                );
+                if gui_mode {
+                    tracing::info!("{line}");
+                } else {
+                    eprintln!("{line}");
+                    tracing::info!(
+                        "viewer {id} joined on udp://127.0.0.1:{port}, waiting for a keyframe"
+                    );
+                }
                 self.refresh_header(true);
                 self.request_keyframe();
                 self.send_cached_stats();
@@ -988,11 +1020,16 @@ impl Host {
             }
             ViewerEvent::Left { id } => {
                 self.viewers.retain(|v| v.id != id);
-                eprintln!(
+                let line = format!(
                     "viewer {id} disconnected, {count} viewer(s) now watching",
                     count = self.viewers.len()
                 );
-                tracing::info!("viewer {id} left");
+                if gui_mode {
+                    tracing::info!("{line}");
+                } else {
+                    eprintln!("{line}");
+                    tracing::info!("viewer {id} left");
+                }
                 self.send_cached_stats();
             }
         }
@@ -1238,11 +1275,14 @@ impl Host {
     /// this is the first moment we can honestly say the stream works. The line
     /// names the codec the publisher actually chose, which is the thing an
     /// operator staring at a black player wants to see confirmed.
+    ///
+    /// Routed through `tracing` in GUI mode, `eprintln!` in the CLI.
     fn log_streaming(&mut self, kind: MediaKind, params: &sdp::Payload, keyframe: bool) {
         if self.seen.contains(&kind) {
             return;
         }
         self.seen.push(kind);
+        let gui_mode = self.stats_tx.is_some();
         let viewers = self.viewers.len();
         if kind == MediaKind::Video {
             let gate = if keyframe {
@@ -1250,18 +1290,28 @@ impl Host {
             } else {
                 format!("waiting for a keyframe to open the gate for {viewers} viewer(s)")
             };
-            eprintln!(
+            let line = format!(
                 "whip streaming video: {codec}/{clock}, {gate}",
                 codec = params.codec,
                 clock = params.clock
             );
+            if gui_mode {
+                tracing::info!("{line}");
+            } else {
+                eprintln!("{line}");
+            }
         } else {
-            eprintln!(
+            let line = format!(
                 "whip streaming audio: {codec}/{clock}/{channels}",
                 codec = params.codec,
                 clock = params.clock,
                 channels = params.channels
             );
+            if gui_mode {
+                tracing::info!("{line}");
+            } else {
+                eprintln!("{line}");
+            }
         }
     }
 
@@ -1288,7 +1338,9 @@ impl Host {
             0.0
         };
         // Unchanged CLI log: prints the periodic line and restarts the tallies.
-        self.report.log(now, self.viewers.len());
+        // In GUI mode the line goes through the non-blocking tee writer.
+        self.report
+            .log(now, self.viewers.len(), self.stats_tx.is_some());
         // Cache the last non-zero rates so a viewer join/leave can refresh the
         // viewer count without zeroing the bitrate between ticks.
         if video_kbps > 0.0 {
@@ -1370,11 +1422,19 @@ impl Host {
     }
 
     /// Handle one str0m event.
+    ///
+    /// The connected line goes through `tracing` in GUI mode (see
+    /// [`Self::log_streaming`]) and straight to stderr in the CLI.
     fn on_event(&mut self, event: Event) {
         match event {
             Event::Connected => {
-                eprintln!("whip publisher connected, ICE and DTLS up, waiting for media");
-                tracing::info!("webrtc publisher connected");
+                let line = "whip publisher connected, ICE and DTLS up, waiting for media";
+                if self.stats_tx.is_some() {
+                    tracing::info!("{line}");
+                } else {
+                    eprintln!("{line}");
+                    tracing::info!("webrtc publisher connected");
+                }
             }
             Event::IceConnectionStateChange(state) => {
                 tracing::debug!("ice connection state: {state:?}");
@@ -1498,7 +1558,8 @@ async fn host_loop(
         }
     }
     host.counters.log_final();
-    host.report.log_final(Instant::now());
+    host.report
+        .log_final(Instant::now(), host.stats_tx.is_some());
     Ok(())
 }
 
@@ -2842,14 +2903,14 @@ mod tests {
         let start = Instant::now();
         let mut report = StreamReport::new(start);
         // Nothing recorded yet: reporting is a no-op and must not panic.
-        report.log(start + Duration::from_secs(5), 0);
+        report.log(start + Duration::from_secs(5), 0, false);
         report.record(MediaKind::Video, start, true, true, 1000);
         report.record(MediaKind::Audio, start, true, false, 500);
         assert_eq!(report.video.packets, 1);
         assert_eq!(report.video.frames, 1);
         assert_eq!(report.video.keyframes, 1);
         assert_eq!(report.audio.packets, 1);
-        report.log(start + Duration::from_secs(5), 3);
+        report.log(start + Duration::from_secs(5), 3, false);
         // The per interval tallies reset, the running keyframe total does not.
         assert_eq!(report.video.packets, 0);
         assert_eq!(report.video.keyframes, 0);
