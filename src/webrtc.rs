@@ -110,6 +110,16 @@ const ICE_BUF: usize = 2048;
 /// louder. Starting it 20 points lower lines the three up by ear: GUI 100 opens
 /// ffplay at 80, GUI 40 at 20, and GUI 20 and below at silence.
 const FFPLAY_VOLUME_OFFSET: u8 = 20;
+/// Initial size of the launched player window, in pixels: 720p.
+///
+/// All three players open at this size and anchored to the top-left corner, so
+/// one window is as big as it can be while still fitting the smallest common
+/// displays (1366x768 laptops, netbooks, projectors) entirely inside the screen:
+/// 1280x720 leaves room for a panel/taskbar on a 768-high screen, and a window
+/// at 0,0 can never be placed so far out that the picture falls off the edge.
+const WINDOW_WIDTH: u32 = 1280;
+/// Height of the launched player window, in pixels (see [`WINDOW_WIDTH`]).
+const WINDOW_HEIGHT: u32 = 720;
 
 /// The players `connect-whip` knows how to launch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
@@ -143,6 +153,10 @@ impl Player {
     /// `-volume <0-100>` ("set startup volume 0=min 100=max") shifted 20 points down
     /// by `FFPLAY_VOLUME_OFFSET`, because its scale is louder per point than the
     /// other two. 100 is unity in all three, so the default is as loud as each gets.
+    ///
+    /// Every player is also told where and how big to open: a [`WINDOW_WIDTH`] x
+    /// [`WINDOW_HEIGHT`] (720p) window in the top-left corner, which is the largest
+    /// window that still fits a small laptop screen whole.
     pub fn command(
         &self,
         sdp: &Path,
@@ -164,6 +178,10 @@ impl Player {
                     // story: no config-file options can quietly re-add buffering.
                     "--no-config".to_string(),
                     "--force-window=immediate".to_string(),
+                    // Open as a 720p window in the top-left corner: the largest
+                    // window that still fits a small laptop screen whole, anchored
+                    // at 0,0 so no window manager can push it off the edge.
+                    format!("--geometry={WINDOW_WIDTH}x{WINDOW_HEIGHT}+0+0"),
                     // Start at the chosen level: mpv's `--volume` is a percentage
                     // of full scale (its own default is 100).
                     format!("--volume={volume}"),
@@ -202,6 +220,13 @@ impl Player {
                     // the startup level goes through the audio-output `--gain`, a
                     // linear multiplier where 1.0 is full scale.
                     format!("--gain={:.2}", f64::from(volume) / 100.0),
+                    // The window: 720p, pinned to the top-left corner of the
+                    // screen, so it fits a small display whole instead of opening
+                    // at the video's own size (which can exceed the screen).
+                    format!("--width={WINDOW_WIDTH}"),
+                    format!("--height={WINDOW_HEIGHT}"),
+                    "--video-x=0".into(),
+                    "--video-y=0".into(),
                     "--no-loop".into(),
                     file,
                 ]
@@ -215,6 +240,17 @@ impl Player {
                     bin("ffplay"),
                     "-volume".into(),
                     ffplay_volume.to_string(),
+                    // The window: `-x`/`-y` force the window size (720p, which every
+                    // screen can show whole), `-left`/`-top` pin it to the top-left
+                    // corner so it cannot be placed off-screen.
+                    "-x".into(),
+                    WINDOW_WIDTH.to_string(),
+                    "-y".into(),
+                    WINDOW_HEIGHT.to_string(),
+                    "-left".into(),
+                    "0".into(),
+                    "-top".into(),
+                    "0".into(),
                 ];
                 match buffer {
                     Some(ms) => {
@@ -2578,6 +2614,46 @@ mod tests {
             // A custom binary keeps its player's volume flag.
             let mpv = Player::Mpv.command(path, buffer, Some(Path::new("/opt/mpv")), 40);
             assert!(mpv.contains(&"--volume=40".to_string()));
+        }
+    }
+
+    /// Every player is told where and how big to open: a 1280x720 window in the
+    /// top-left corner, the largest window that still fits a small laptop screen
+    /// (1366x768) whole. mpv takes a single `--geometry=WxH+X+Y`; VLC
+    /// `--width`/`--height` plus `--video-x`/`--video-y`; ffplay `-x`/`-y` plus
+    /// `-left`/`-top`. The flags must be present whatever the buffering.
+    #[test]
+    fn player_windows_open_at_720p_in_the_corner() {
+        let path = Path::new("/tmp/x.sdp");
+        for buffer in [None, Some(Duration::from_millis(250))] {
+            let mpv = Player::Mpv.command(path, buffer, None, 60);
+            assert!(
+                mpv.contains(&"--geometry=1280x720+0+0".to_string()),
+                "{mpv:?}"
+            );
+            assert_eq!(mpv.last().unwrap(), "/tmp/x.sdp");
+
+            let vlc = Player::Vlc.command(path, buffer, None, 60);
+            assert!(vlc.contains(&"--width=1280".to_string()), "{vlc:?}");
+            assert!(vlc.contains(&"--height=720".to_string()), "{vlc:?}");
+            assert!(vlc.contains(&"--video-x=0".to_string()), "{vlc:?}");
+            assert!(vlc.contains(&"--video-y=0".to_string()), "{vlc:?}");
+            assert_eq!(vlc.last().unwrap(), "/tmp/x.sdp");
+
+            let ffplay = Player::Ffplay.command(path, buffer, None, 60);
+            // ffplay's window flags are space-separated pairs, so check the pair.
+            let pair = |name: &str, value: &str| {
+                let i = ffplay
+                    .iter()
+                    .position(|a| a == name)
+                    .unwrap_or_else(|| panic!("no {name} in {ffplay:?}"));
+                assert_eq!(ffplay[i + 1], value, "{name}");
+            };
+            pair("-x", "1280");
+            pair("-y", "720");
+            pair("-left", "0");
+            pair("-top", "0");
+            assert_eq!(ffplay.last().unwrap(), "/tmp/x.sdp");
         }
     }
 
