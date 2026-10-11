@@ -49,7 +49,7 @@ local player.
 2. Paste the **stream ticket** you received from the broadcaster into the
    ticket box.
 3. Pick a **Player** from the dropdown (`mpv` by default, `ffplay`, `vlc`, or
-   `none` to get just the stream description and open it yourself).
+   `none` to get just the stream description and open it yourself). (Note `ffplay` has lowest delay, followed my `mpv`, followed by `vlc`)
 4. *(Optional)* Set a **Buffer (ms)** jitter buffer. Leave it blank for the
    lowest latency (right on a local network); raise it for a lossy or
    long-distance link.
@@ -70,3 +70,20 @@ The **Settings** button in the bottom menu bar opens a panel with two sections:
 - **Watching** — the default player (auto-selected on the Watch tab when the
   app opens), a per-player binary path for players not on `PATH`, the default
   buffer, and the local play address.
+
+
+## Recommended OBS Settings
+
+In personal testing across a few hundred kilometers of distance, it was possible to get as low as ~200-300ms delay with generally quite high quality video (viewed in `ffplay`) using these obs settings:
+
+- Audio Encoder: FFmpeg Opus
+- Video Encoder: Nvidia nvenc H.264
+- Rescale Output: Disabled
+- Rate Control: Constant Bitrate
+- Bitrate: 5000-20,000 kbps
+- Keyframe Interval: 2s 
+- Preset: P4 (Medium Quality)
+- Tuning: Low Latency
+- Multipass Mode: Single Pass
+- Profile: High
+- B-Frames: 0
