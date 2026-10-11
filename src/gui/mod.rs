@@ -37,6 +37,9 @@ const FLASH: Duration = Duration::from_millis(450);
 const ACCENT: egui::Color32 = egui::Color32::from_rgb(80, 200, 120);
 /// The "watching" accent: the watch status dot and the connecting spinner.
 const WATCH_ACCENT: egui::Color32 = egui::Color32::from_rgb(90, 160, 255);
+/// How long the tab content's fade-in takes, so a tab switch fades the new content
+/// in rather than hard-cutting. Short enough to feel instant, long enough to read.
+const TAB_FADE_SECS: f32 = 0.16;
 
 /// The two main tabs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +93,15 @@ pub struct App {
     tab_slide: f32,
     /// The previous frame's wall clock, for the tab underline tween's frame delta.
     last_frame: Instant,
+    /// The tab content's fade-in alpha: 0.0 = hidden, 1.0 = fully shown. Reset to
+    /// 0.0 by [`App::switch_tab`] and eased up over ~160 ms in [`App::draw`], so a
+    /// tab switch fades the new content in instead of hard-cutting to it.
+    tab_fade: f32,
+    /// Whether the tab fade-in is in flight; arms the repaint guard in [`App::draw`]
+    /// so frames keep coming until the fade settles, then an idle window sleeps.
+    tab_fade_active: bool,
+    /// The instant of the last tab switch, the fade-in's clock origin.
+    tab_switched_at: Instant,
 }
 
 impl App {
@@ -124,6 +136,9 @@ impl App {
             focus_primary: true,
             tab_slide: 0.0,
             last_frame: Instant::now(),
+            tab_fade: 1.0,
+            tab_fade_active: false,
+            tab_switched_at: Instant::now(),
         }
     }
 
@@ -158,7 +173,13 @@ impl App {
                 base
             };
             ui.spacing_mut().item_spacing.x = 4.0;
-            ui.colored_label(dot, "●");
+            let dot_resp = ui.colored_label(dot, "●");
+            // A soft sonar pulse around the live dot, so "live" reads as an active
+            // signal rather than a static glyph. Sized small enough to stay within
+            // the menu bar's bounds.
+            if pulsing {
+                sonar_pulse(ui.painter(), dot_resp.rect.center(), 4.0, secs, 2.0, base);
+            }
             ui.colored_label(base, snap.status());
             let err = snap.broadcast_error.as_ref().or(snap.watch_error.as_ref());
             if let Some(err) = err {
@@ -192,6 +213,22 @@ impl App {
             painter.galley(pos + off, shadow_galley.clone(), egui::Color32::PLACEHOLDER);
         }
         painter.galley(pos, fg_galley, egui::Color32::PLACEHOLDER);
+    }
+
+    /// Switch to `tab`, re-arming the content fade-in and the primary-control
+    /// autofocus. A no-op (no fade) when already on `tab`, so clicking the active
+    /// tab does not replay the transition. The fade is reset here — not in the
+    /// tween — so the new tab's content is hidden on the very frame the switch is
+    /// detected, then fades in over the following frames.
+    fn switch_tab(&mut self, tab: Tab) {
+        if self.tab == tab {
+            return;
+        }
+        self.tab = tab;
+        self.focus_primary = true;
+        self.tab_fade = 0.0;
+        self.tab_fade_active = true;
+        self.tab_switched_at = Instant::now();
     }
 
     /// The tab strip.
@@ -265,12 +302,10 @@ impl App {
                 let w = make(ui, "Watch Stream", self.tab == Tab::Watch);
                 let b = make(ui, "Broadcast", self.tab == Tab::Broadcast);
                 if w.clicked() {
-                    self.tab = Tab::Watch;
-                    self.focus_primary = true;
+                    self.switch_tab(Tab::Watch);
                 }
                 if b.clicked() {
-                    self.tab = Tab::Broadcast;
-                    self.focus_primary = true;
+                    self.switch_tab(Tab::Broadcast);
                 }
                 (w, b)
             })
@@ -402,6 +437,19 @@ impl App {
         if tab_moving {
             self.tab_slide = tab_slide_step(self.tab_slide, target, dt);
         }
+        // Fade the tab content in after a switch: an ease-out over ~160 ms from the
+        // switch instant. [`App::switch_tab`] reset `tab_fade` to 0.0 and armed this;
+        // the tween advances it toward 1.0 and requests frames only while it is in
+        // flight, so an idle window falls asleep the moment the fade settles (and the
+        // overlay is a no-op at full alpha, so no painting lingers either).
+        if self.tab_fade_active {
+            let (eased, settled) = tab_fade_step(
+                (now - self.tab_switched_at).as_secs_f32(),
+                TAB_FADE_SECS,
+            );
+            self.tab_fade = eased;
+            self.tab_fade_active = !settled;
+        }
         // Persist a ticket minted while idle (via Refresh Relay / Reset Ticket) so the
         // saved "current ticket" survives restarts. Guarded to a real change so we
         // never rewrite config.json every frame. The live broadcast path persists its
@@ -424,6 +472,11 @@ impl App {
         // The underline slide wants frames at the display rate, not the 250 ms
         // session cadence, so it gets its own as-soon-as-possible repaint.
         if tab_moving {
+            ui.ctx().request_repaint();
+        }
+        // The tab content fade-in wants display-rate frames too, but only while it is
+        // in flight; the moment it settles the guard disarms and an idle window sleeps.
+        if self.tab_fade_active {
             ui.ctx().request_repaint();
         }
         // The connecting/starting spinner rotates on the wall clock, so while it is
@@ -466,11 +519,10 @@ impl App {
         } else if !self.show_options
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab))
         {
-            self.tab = match self.tab {
+            self.switch_tab(match self.tab {
                 Tab::Watch => Tab::Broadcast,
                 Tab::Broadcast => Tab::Watch,
-            };
-            self.focus_primary = true;
+            });
             // egui armed a focus traversal (`focus_direction = Next`) from this Tab
             // press before `draw` ran, so cancelling it here stops the first widget
             // (the menu-bar Settings button) from stealing keyboard focus and showing
@@ -526,9 +578,22 @@ impl App {
             .show(ui, |ui| {
                 self.tab_bar(ui);
                 ui.add_space(8.0);
+                // The top of the tab content, so the fade-in overlay covers only the
+                // content (below the tab strip), not the brand title and tabs.
+                let content_top = ui.cursor().min.y;
                 match self.tab {
                     Tab::Watch => self.watch_tab(ui),
                     Tab::Broadcast => self.broadcast_tab(ui),
+                }
+                // Fade the new tab's content in after a switch: an overlay matching
+                // the ground, fading out over ~160 ms. A no-op at full alpha, so an
+                // idle window paints nothing extra.
+                if self.tab_fade < 1.0 {
+                    let overlay = egui::Rect::from_min_max(
+                        egui::pos2(ui.max_rect().min.x, content_top),
+                        ui.max_rect().max,
+                    );
+                    central_gradient(ui.painter(), overlay, 1.0 - self.tab_fade);
                 }
             });
         {
@@ -536,7 +601,7 @@ impl App {
                 egui::Order::Background,
                 egui::Id::new("central_panel_gradient"),
             ));
-            central_gradient(&painter, central.response.rect);
+            central_gradient(&painter, central.response.rect, 1.0);
         }
         // Drawn last, on its own foreground layer, so it floats over the panels
         // without taking part in their layout.
@@ -654,9 +719,13 @@ fn top_bevel(painter: &egui::Painter, rect: egui::Rect, corner_radius: u8) {
 /// panel fill: an opaque fill would sit on the middle order and hide the gradient,
 /// so the panel fill is cleared and the gradient becomes the ground the content
 /// sits on.
-fn central_gradient(painter: &egui::Painter, rect: egui::Rect) {
-    let top = egui::Color32::from_rgb(27, 29, 34);
-    let bottom = egui::Color32::from_rgb(21, 23, 27);
+///
+/// `alpha` scales the whole gradient's opacity: at 1.0 it is the ground itself; at
+/// a lower value it is the tab fade-in's reveal overlay (painted on the middle
+/// order over the content), which matches the ground so the fade is seamless.
+fn central_gradient(painter: &egui::Painter, rect: egui::Rect, alpha: f32) {
+    let top = egui::Color32::from_rgb(27, 29, 34).gamma_multiply(alpha);
+    let bottom = egui::Color32::from_rgb(21, 23, 27).gamma_multiply(alpha);
     let mut mesh = egui::epaint::Mesh::default();
     mesh.colored_vertex(rect.left_top(), top);
     mesh.colored_vertex(rect.right_top(), top);
@@ -675,11 +744,53 @@ fn central_gradient(painter: &egui::Painter, rect: egui::Rect) {
 /// on top) covers the halo's centre and only the rim around the button's edge
 /// shows. `color` is the action's accent: the live green for a Start/Watch, a
 /// muted red for a Stop, so the halo's hue matches the button's intent.
-fn primary_button_glow(painter: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
+///
+/// `hover` lifts the halo: the alphas roughly double, so the hero action reads as
+/// lit brighter under the mouse. The hero buttons use a fixed `.fill()`, which
+/// suppresses egui's own hover feedback, so the glow carries the hover response.
+fn primary_button_glow(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    color: egui::Color32,
+    hover: bool,
+) {
     let corner = egui::CornerRadius::same(10);
-    for (expand, alpha) in [(6.0, 0.02), (4.0, 0.05), (2.0, 0.09)] {
+    let (a1, a2, a3) = if hover { (0.04, 0.09, 0.16) } else { (0.02, 0.05, 0.09) };
+    for (expand, alpha) in [(6.0, a1), (4.0, a2), (2.0, a3)] {
         painter.rect_filled(rect.expand(expand), corner, color.gamma_multiply(alpha));
     }
+}
+
+/// Whether the pointer is over `rect` this frame, for a hand-painted widget's hover
+/// response. The hero buttons use a fixed `.fill()`, which suppresses egui's own
+/// hover feedback, so the hover is read from the pointer position instead.
+fn pointer_over(ui: &Ui, rect: egui::Rect) -> bool {
+    ui.ctx()
+        .input(|i| i.pointer.latest_pos())
+        .is_some_and(|p| rect.contains(p))
+}
+
+/// A sonar pulse: a soft ring that expands from a live indicator's dot and fades
+/// out, looping on `period` seconds, so "live" reads as an active signal rather than
+/// a static glyph. `center` is the dot's centre, `base` its resting radius, `color`
+/// the accent, `secs` the animation clock (expected to advance between repaints,
+/// which already fire while live). Purely decorative: it paints on the caller's
+/// painter and takes no layout space.
+fn sonar_pulse(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    base: f32,
+    secs: f32,
+    period: f32,
+    color: egui::Color32,
+) {
+    let phase = (secs % period) / period; // 0..1, loops
+    let radius = base + phase * base; // expand to 2× the resting radius
+    let alpha = (1.0 - phase) * 0.4; // fade out as it expands
+    if alpha <= 0.005 {
+        return;
+    }
+    painter.circle_stroke(center, radius, egui::Stroke::new(1.0, color.gamma_multiply(alpha)));
 }
 
 /// One step of the tab underline's exponential ease: `current` moves toward
@@ -695,6 +806,19 @@ fn tab_slide_step(current: f32, target: f32, dt: f32) -> f32 {
         target
     } else {
         next
+    }
+}
+
+/// One step of the tab content's fade-in: the eased alpha after `elapsed` seconds
+/// from the switch, and whether the fade has settled. An ease-out cubic over
+/// `duration`, so the new content appears quickly then settles gently. Pure (the
+/// clock is injected) so the settle is testable without a live window.
+fn tab_fade_step(elapsed: f32, duration: f32) -> (f32, bool) {
+    let t = (elapsed / duration).clamp(0.0, 1.0);
+    if t >= 1.0 {
+        (1.0, true)
+    } else {
+        (1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t), false)
     }
 }
 
@@ -1577,6 +1701,124 @@ mod tests {
         assert_eq!(
             count, 3,
             "the stop button should paint a 3-layer red halo"
+        );
+    }
+
+    /// The tab content's fade-in starts hidden, eases out monotonically, and settles
+    /// exactly on fully-visible at the duration (so the repaint guard can disarm and
+    /// an idle window falls asleep).
+    #[test]
+    fn tab_fade_settles_on_fully_visible_without_overshooting() {
+        // Starts hidden, not settled.
+        assert_eq!(tab_fade_step(0.0, TAB_FADE_SECS), (0.0, false));
+        // Mid-fade: partway, not settled, never above fully visible.
+        let (mid, settled) = tab_fade_step(TAB_FADE_SECS * 0.5, TAB_FADE_SECS);
+        assert!((0.0..1.0).contains(&mid), "mid-fade is partway, got {mid}");
+        assert!(!settled, "mid-fade is not settled");
+        // Settles exactly on 1.0 at the duration, and stays settled past it.
+        assert_eq!(tab_fade_step(TAB_FADE_SECS, TAB_FADE_SECS), (1.0, true));
+        assert_eq!(tab_fade_step(TAB_FADE_SECS * 5.0, TAB_FADE_SECS), (1.0, true));
+        // Monotonic: the alpha never decreases as the fade advances.
+        let mut prev = 0.0;
+        let mut t = 0.0;
+        while t <= TAB_FADE_SECS {
+            let (alpha, _) = tab_fade_step(t, TAB_FADE_SECS);
+            assert!(alpha >= prev, "alpha must be monotonic at t={t}");
+            prev = alpha;
+            t += 0.01;
+        }
+    }
+
+    /// The sonar pulse paints a ring that expands over the pulse and fades out near
+    /// the end (so "live" reads as an active signal), and paints nothing once faded.
+    #[test]
+    fn sonar_pulse_paints_a_fading_ring_that_expands() {
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(100.0, 100.0),
+            )),
+            ..Default::default()
+        };
+        let ring = |secs: f32| {
+            let ctx = egui::Context::default();
+            let mut out = ctx.run_ui(raw.clone(), |ui| {
+                sonar_pulse(ui.painter(), egui::pos2(50.0, 50.0), 5.0, secs, 2.0, ACCENT);
+            });
+            out.textures_delta.clear();
+            out.shapes
+                .iter()
+                .filter_map(|s| match &s.shape {
+                    egui::epaint::Shape::Circle(c) => Some(*c),
+                    _ => None,
+                })
+                .next()
+        };
+        // Mid-pulse: a ring is painted, and it expands over the pulse.
+        let early = ring(0.2).expect("an early-pulse frame paints a ring");
+        let late = ring(1.0).expect("a late-pulse frame paints a ring");
+        assert!(
+            late.radius > early.radius,
+            "the ring should expand over the pulse ({} -> {})",
+            early.radius,
+            late.radius
+        );
+        // Near the end of the pulse the ring has faded out: nothing is painted.
+        assert!(
+            ring(1.99).is_none(),
+            "a nearly-faded ring paints nothing"
+        );
+    }
+
+    /// The button's own fill rect: full-width and 36 tall. The halo layers are
+    /// expanded (taller), so a 34..=38 height band isolates the button's fill.
+    ///
+    /// (Locating by the button's unique resting fill below is more robust: the idle
+    /// ticket copy box is also ~34 tall and full-width, so a size-only match would tie.)
+    #[test]
+    fn hovering_the_start_button_lifts_its_fill() {
+        let (mut app, _rt) = test_app();
+        app.tab = Tab::Broadcast;
+        let size = egui::vec2(760.0, 560.0);
+        // The Start button's fill is unique to it (the halo uses 0.02/0.05/0.09, the
+        // ticket box a flat alpha-14 tint), so it can be located by exact colour.
+        let resting_fill = ACCENT.gamma_multiply(0.18);
+        let hover_fill = ACCENT.gamma_multiply(0.26);
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), size)),
+            ..Default::default()
+        };
+        // Idle: locate the button by its resting fill.
+        let ctx = egui::Context::default();
+        let mut out = ctx.run_ui(raw.clone(), |ui| app.draw(ui));
+        out.textures_delta.clear();
+        let btn_rect = out
+            .shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                egui::epaint::Shape::Rect(r) if r.fill == resting_fill => Some(r.rect),
+                _ => None,
+            })
+            .expect("the idle start button paints its resting fill");
+
+        // Hover: the pointer moves over the button; egui reads the hover from the
+        // pointer position, so two passes make the lifted fill live.
+        let ctx2 = egui::Context::default();
+        let raw_hover = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), size)),
+            events: vec![egui::Event::PointerMoved(btn_rect.center())],
+            ..Default::default()
+        };
+        let mut out2 = ctx2.run_ui(raw_hover.clone(), |ui| app.draw(ui));
+        out2.textures_delta.clear();
+        let mut out3 = ctx2.run_ui(raw_hover, |ui| app.draw(ui));
+        out3.textures_delta.clear();
+        assert!(
+            out3
+                .shapes
+                .iter()
+                .any(|s| matches!(&s.shape, egui::epaint::Shape::Rect(r) if r.fill == hover_fill)),
+            "hovering the start button should lift its fill to the hover shade"
         );
     }
 }

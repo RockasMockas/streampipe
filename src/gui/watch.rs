@@ -8,7 +8,7 @@ use eframe::egui::{self, Context, Ui};
 use super::{
     config::{player_key, PLAYERS},
     state::{self, Mode, WatchParams},
-    App, ACCENT, WATCH_ACCENT, primary_button_glow, spinner,
+    App, ACCENT, WATCH_ACCENT, pointer_over, primary_button_glow, spinner,
 };
 
 /// Parse a buffer field (milliseconds) into an option; blank or invalid is
@@ -144,7 +144,13 @@ impl App {
                 // tab, so the one control that stops a watch reads as a "stop" action.
                 let stop_rect =
                     egui::Rect::from_min_size(ui.cursor().min, egui::vec2(140.0, 30.0));
-                primary_button_glow(ui.painter(), stop_rect, egui::Color32::from_rgb(220, 90, 90));
+                let hovered = pointer_over(ui, stop_rect);
+                primary_button_glow(
+                    ui.painter(),
+                    stop_rect,
+                    egui::Color32::from_rgb(220, 90, 90),
+                    hovered,
+                );
                 if ui
                     .add(egui::Button::new("■  Stop").min_size(egui::vec2(140.0, 30.0)))
                     .clicked()
@@ -160,21 +166,27 @@ impl App {
             });
         } else {
             // Full-width primary action, matching the Broadcast tab's Start button.
-            let button = egui::Button::new("▶  Watch Stream")
-                .fill(ACCENT.gamma_multiply(0.18))
-                .stroke(egui::Stroke::new(1.0, ACCENT.gamma_multiply(0.55)));
             let can_start = watch_can_start(busy, &self.watch_ticket);
             let resp = ui
                 .add_enabled_ui(can_start, |ui| {
                     // A soft accent halo behind the hero action, lit by the live green.
                     // Only when the button is live: a disabled button should not glow.
+                    // The fixed `.fill()` suppresses egui's own hover feedback, so the
+                    // hover is read from the pointer and lifts both the halo and the fill.
+                    let start_rect = egui::Rect::from_min_size(
+                        ui.cursor().min,
+                        egui::vec2(ui.available_width(), 36.0),
+                    );
+                    let hovered = can_start && pointer_over(ui, start_rect);
                     if can_start {
-                        let start_rect = egui::Rect::from_min_size(
-                            ui.cursor().min,
-                            egui::vec2(ui.available_width(), 36.0),
-                        );
-                        primary_button_glow(ui.painter(), start_rect, ACCENT);
+                        primary_button_glow(ui.painter(), start_rect, ACCENT, hovered);
                     }
+                    let button = egui::Button::new("▶  Watch Stream")
+                        .fill(ACCENT.gamma_multiply(if hovered { 0.26 } else { 0.18 }))
+                        .stroke(egui::Stroke::new(
+                            1.0,
+                            ACCENT.gamma_multiply(if hovered { 0.75 } else { 0.55 }),
+                        ));
                     ui.add_sized([ui.available_width(), 36.0], button)
                 })
                 .inner;

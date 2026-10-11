@@ -13,7 +13,7 @@ use super::{
     config::Config,
     flash_alpha,
     state::{self, BindAddrs, BroadcastParams, Mode},
-    App, ACCENT, FLASH, primary_button_glow, spinner, top_bevel,
+    App, ACCENT, FLASH, pointer_over, primary_button_glow, sonar_pulse, spinner, top_bevel,
 };
 
 /// Horizontal room kept clear at the right edge of a copy box for the copy glyph,
@@ -229,7 +229,13 @@ impl App {
             // down a live stream reads as a "stop" action at a glance (the same muted
             // red the tab uses for errors).
             let stop_rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(bw, 36.0));
-            primary_button_glow(ui.painter(), stop_rect, egui::Color32::from_rgb(220, 90, 90));
+            let hovered = pointer_over(ui, stop_rect);
+            primary_button_glow(
+                ui.painter(),
+                stop_rect,
+                egui::Color32::from_rgb(220, 90, 90),
+                hovered,
+            );
             if ui
                 .add_sized([bw, 36.0], egui::Button::new("■  Stop Broadcasting"))
                 .clicked()
@@ -238,14 +244,20 @@ impl App {
                 self.config.save();
             }
         } else {
-            let button = egui::Button::new("●  Start Broadcasting")
-                .fill(ACCENT.gamma_multiply(0.18))
-                .stroke(egui::Stroke::new(1.0, ACCENT.gamma_multiply(0.55)));
             // A soft accent halo behind the hero action, so the one big commitment
             // reads as lit by the live green rather than a flat button. Painted
-            // before the button so the button covers the halo's centre.
+            // before the button so the button covers the halo's centre. The fixed
+            // `.fill()` below suppresses egui's own hover feedback, so the hover is
+            // read from the pointer and lifts both the halo and the fill.
             let start_rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(bw, 36.0));
-            primary_button_glow(ui.painter(), start_rect, ACCENT);
+            let hovered = pointer_over(ui, start_rect);
+            primary_button_glow(ui.painter(), start_rect, ACCENT, hovered);
+            let button = egui::Button::new("●  Start Broadcasting")
+                .fill(ACCENT.gamma_multiply(if hovered { 0.26 } else { 0.18 }))
+                .stroke(egui::Stroke::new(
+                    1.0,
+                    ACCENT.gamma_multiply(if hovered { 0.75 } else { 0.55 }),
+                ));
             // Autofocus the start control on the first window-focused idle frame so
             // Enter/Space starts it; the Stop button (shown while active) is never
             // autofocused, so a stray Enter can never tear down a live stream. The
@@ -584,7 +596,12 @@ fn viewers_cell(ui: &mut Ui, viewers: usize, secs: f32) {
     };
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
-        ui.label(egui::RichText::new("●").size(11.0).color(dot));
+        let dot_resp = ui.label(egui::RichText::new("●").size(11.0).color(dot));
+        // A soft sonar pulse around the dot while viewers are live, so "live" reads
+        // as an active signal rather than a static glyph.
+        if viewers > 0 {
+            sonar_pulse(ui.painter(), dot_resp.rect.center(), 5.0, secs, 2.0, green);
+        }
         ui.label(
             egui::RichText::new(viewers.to_string())
                 .strong()
