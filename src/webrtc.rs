@@ -399,6 +399,12 @@ impl StreamReport {
         let video = &self.video;
         let audio = &self.audio;
         if !video.active() && !audio.active() {
+            // Nothing arrived: still restart the tallies, so the next interval is
+            // measured from *now*. Returning early leaves `since` far behind, and
+            // the next report then divides its bytes by a ballooned interval,
+            // which reads as a wildly deflated bitrate after every stream gap.
+            self.video.restart(now);
+            self.audio.restart(now);
             return;
         }
         let secs = now.duration_since(video.since).as_secs_f64().max(0.001);
@@ -1741,7 +1747,21 @@ pub async fn connect_whip(endpoint: Endpoint, cfg: ViewerConfig) -> Result<()> {
                                 tokens -= required;
                                 break;
                             }
-                            tokio::task::yield_now().await;
+                            // Sleep until the bucket can pay for the packet. Never
+                            // spin: `yield_now` re-readies this task immediately, so
+                            // it pins a worker thread at 100% and starves every other
+                            // task on the runtime. Host and viewer share one runtime
+                            // in the GUI, and a starved ICE loop lets the OS UDP
+                            // receive buffer overflow, which is exactly the packet
+                            // loss this pacing exists to prevent.
+                            let missing = required - tokens;
+                            // Tokens refill at TOKEN_RATE per millisecond.
+                            let wait_micros =
+                                (missing as u64 * 1000).div_ceil(TOKEN_RATE as u64);
+                            // At least 1 ms: a sub-millisecond timer would wake on
+                            // the next tick anyway, so this is the cheapest real yield.
+                            let wait_micros = wait_micros.max(1000);
+                            sleep(Duration::from_micros(wait_micros)).await;
                         }
                         forward(
                             &forward_video,
