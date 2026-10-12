@@ -684,20 +684,39 @@ pub async fn listen_whip(endpoint: Endpoint, cfg: WhipConfig) -> Result<()> {
     let (req_tx, req_rx) = mpsc::channel::<WhipRequest>(16);
     let (viewer_tx, viewer_rx) = mpsc::channel::<ViewerEvent>(32);
 
-    let http = whip::serve(cfg.listen, cfg.bearer_token.clone(), req_tx);
-    let accept = accept_viewers(endpoint.clone(), viewer_tx);
-    let host = host_loop(ice, ice_addr, req_rx, viewer_rx, cfg.stats, cfg.stats_tx);
+    // Fan the three concurrent parts out onto their own tasks. Polling them on a
+    // single task (the old `select!` over bare futures) pinned the whole ingest
+    // pipeline to one OS thread at a time; on the multi-threaded
+    // `streampipe-engine` runtime this lets `host_loop` run on a worker of its
+    // own, so HTTP serving and viewer acceptance no longer share its scheduler
+    // slot and stall the media path during a keyframe burst.
+    let mut http = tokio::spawn(whip::serve(cfg.listen, cfg.bearer_token.clone(), req_tx));
+    let mut accept = tokio::spawn(accept_viewers(endpoint.clone(), viewer_tx));
+    let mut host = tokio::spawn(host_loop(
+        ice,
+        ice_addr,
+        req_rx,
+        viewer_rx,
+        cfg.stats,
+        cfg.stats_tx,
+    ));
 
     let result = tokio::select! {
-        res = http => res,
-        res = accept => res,
-        res = host => res,
+        res = &mut http => res.unwrap_or_else(|e| Err(anyerr!("http task panicked: {e}"))),
+        res = &mut accept => res.unwrap_or_else(|e| Err(anyerr!("accept task panicked: {e}"))),
+        res = &mut host => res.unwrap_or_else(|e| Err(anyerr!("host task panicked: {e}"))),
         _ = tokio::signal::ctrl_c() => {
             eprintln!("got ctrl-c, exiting");
             Ok(())
         }
     };
     tracing::info!("stopping whip input");
+    // Aborting the handles tears the components down exactly like dropping the
+    // old inline futures: each owns an `AbortOnDrop` set (serve, accept), so
+    // aborting its task also kills every connection/viewer it spawned.
+    http.abort();
+    accept.abort();
+    host.abort();
     endpoint.close().await;
     result
 }
@@ -1645,6 +1664,17 @@ async fn host_loop(
             res = ice.recv_from(&mut buf) => {
                 let (len, source) = res.std_context("error receiving from the ice socket")?;
                 host.on_ice(&buf[..len], source);
+
+                // Drain the OS UDP receive buffer completely before yielding back to
+                // the Tokio scheduler. A keyframe burst can deliver hundreds of packets
+                // at once; returning through `select!` after every single packet pays
+                // the macro/scheduler overhead and lets the (clamped) kernel buffer
+                // overflow mid-burst, which the viewer sees as RTP loss and a corrupt
+                // P frame. `try_recv_from` returns `WouldBlock` once the socket is
+                // empty, so this loop terminates and we re-enter `select!`.
+                while let Ok((len, source)) = ice.try_recv_from(&mut buf) {
+                    host.on_ice(&buf[..len], source);
+                }
             }
             _ = sleep => host.on_timeout(),
             _ = header_tick.tick() => host.refresh_header(true),
