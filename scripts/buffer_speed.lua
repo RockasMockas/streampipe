@@ -17,13 +17,12 @@ local FLOOR, CEIL = 1.0, 1.10 -- the speed is clamped to this, always
 local MAX = CEIL - FLOOR -- the most speed-up there is
 local ALPHA = 0.35 -- low-pass weight of a new reading
 local SLEW_UP, SLEW_DOWN = 0.02, 0.20 -- speed units per second, asymmetric
-local SLEW_DT_MAX = 1.0 -- the slew rate is per wall-clock second, so a
--- long idle gap must not hand it a big step
-local WRITE_EPS = 0.005 -- only write a speed the player can notice
+local SLEW_DT_MAX = 1.0 -- the slew rate is per wall-clock second
+local WRITE_EPS = 0.02 -- only write a speed the player can notice; keep speed
 local BASE, SPREAD, CAP = 1.0, 120.0, 60.0 -- watchdog interval policy
 local PAUSE_DT = 60.0 -- the interval while paused
 local MIN_DT = 0.25 -- never arm shorter than this
-local OSD_LIFE = 4.0 -- seconds the label stays up
+local OSD_LIFE = 65.0 -- the label is re-raised on every evaluation; its
 local B_EPS = 0.05 -- a bhat move bigger than this is a change
 local ABSURD = 3600.0 -- past an hour of buffer it is not a reading
 
@@ -130,22 +129,22 @@ local function evaluate(reason)
 	end
 	local new_s = clamp(s + step, FLOOR, CEIL)
 
-	-- 4. act: write the speed and raise the label together, only on a change
-	-- big enough to be visible. One write, one label, then silence.
+	-- 4. act: write the speed only on a change big enough to be visible
+	-- (churning scaletempo2 makes the audio wobble).
 	local visible = math.abs(new_s - s_written) >= WRITE_EPS
 	local safe = new_s <= FLOOR -- clamped, so this means == FLOOR
 	if visible or (safe and s_written > FLOOR) then
 		mp.set_property_number("speed", new_s)
 		s_written = new_s
-		local osd = ("Speed: %.2fx"):format(new_s)
-		if osd ~= last_osd then
-			mp.osd_message(osd, OSD_LIFE)
-			last_osd = osd
-		end
 		-- A change is what makes the next interval short. This is the invariant:
 		-- long intervals only happen while everything is flat.
 		quiet_since = now
 	end
+
+	local osd = ("Speed: %.2fx"):format(new_s)
+	-- Refresh the label on every evaluation.
+	mp.osd_message(osd, OSD_LIFE)
+	last_osd = osd
 
 	-- One line per evaluation, so the trace shows the whole
 	-- curve, not just the writes. `gap` is the real time since the last one.
@@ -207,4 +206,5 @@ local function watchdog()
 	mp.add_timeout(dt, watchdog)
 end
 
+mp.osd_message(("Speed: %.2fx"):format(s), OSD_LIFE)
 mp.add_timeout(BASE, watchdog)

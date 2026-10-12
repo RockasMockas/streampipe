@@ -207,6 +207,16 @@ impl Player {
                         cmd.push("--demuxer-lavf-o=buffer_size=4194304".into());
                     }
                 }
+                // The control script changes `speed` to drain the buffer. The
+                // low-latency profile sets `audio-buffer=0` (play as live as
+                // possible), which leaves the audio pipeline with no slack:
+                // every speed change resamples the audio (scaletempo2) and it
+                // drifts ~10% off the video (about 1s per 10s). Give the audio
+                // output real slack so the resampled audio tracks the speed
+                // changes instead of desyncing. Must come after
+                // `--profile=low-latency` so it overrides that profile's
+                // `audio-buffer=0` (last occurrence of a scalar wins).
+                cmd.push("--audio-buffer=0.5".into());
                 // The buffer-drain control script, staged on disk by `launch()`.
                 // It goes before the SDP, which must stay the last argument.
                 if let Some(script) = script {
@@ -2658,6 +2668,13 @@ mod tests {
         // nothing and makes the `speed` control script inert: never pass it.
         assert!(!mpv.contains(&"--untimed".to_string()));
         assert!(mpv.contains(&"--profile=low-latency".to_string()));
+        assert!(mpv.contains(&"--audio-buffer=0.5".to_string()), "{mpv:?}");
+        let profile_i = mpv
+            .iter()
+            .position(|a| a == "--profile=low-latency")
+            .unwrap();
+        let abuf_i = mpv.iter().position(|a| a == "--audio-buffer=0.5").unwrap();
+        assert!(abuf_i > profile_i, "audio-buffer must override the profile");
         assert!(mpv.contains(&"--no-resume-playback".to_string()));
         assert_eq!(mpv.last().unwrap(), "/tmp/x.sdp");
 
