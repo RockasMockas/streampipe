@@ -127,7 +127,7 @@ impl<'a> MakeWriter<'a> for TeeMakeWriter {
 /// dropped, so no explicit teardown is needed.
 pub fn install(ring: LogRing, verbosity: u8) {
     let filter = EnvFilter::builder()
-        .with_default_directive(crate::log_level(verbosity).into())
+        .with_default_directive(crate::common::log_level(verbosity).into())
         .from_env_lossy();
     let (tx, rx) = std::sync::mpsc::channel::<String>();
     let drain_ring = ring.clone();

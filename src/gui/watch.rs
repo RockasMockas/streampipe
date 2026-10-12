@@ -3,7 +3,7 @@
 use std::{path::PathBuf, str::FromStr};
 
 use eframe::egui::{self, Context, Ui};
-use streampipe::EndpointTicket;
+use crate::EndpointTicket;
 
 use super::{
     config::{player_key, PLAYERS},
@@ -462,10 +462,10 @@ mod tests {
         assert_eq!(watch_action_label(Mode::Starting, true), "connecting…");
         assert_eq!(
             watch_action_label(Mode::Watching, true),
-            "playing in a player window"
+            "Playing stream in player window"
         );
-        // Regression: `Watching` used to claim "playing in a player window" even while
-        // the broadcaster had sent nothing, so the tab lied about a blank window.
+        // Regression: `Watching` used to claim it was playing even while the
+        // broadcaster had sent nothing, so the tab lied about a blank window.
         assert_eq!(
             watch_action_label(Mode::Watching, false),
             "Waiting for streamer to begin broadcasting..."

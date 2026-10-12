@@ -16,7 +16,7 @@ use std::{
 
 use iroh::SecretKey;
 use serde::{Deserialize, Serialize};
-use streampipe::webrtc::Player;
+use crate::webrtc::Player;
 
 /// The application name used for the config directory.
 const APP_DIR: &str = "streampipe";
@@ -151,7 +151,7 @@ impl Default for Config {
             player_paths: PlayerPaths::default(),
             buffer_ms: None,
             volume: DEFAULT_VOLUME,
-            play_addr: streampipe::webrtc::DEFAULT_PLAY_ADDR.to_string(),
+            play_addr: crate::webrtc::DEFAULT_PLAY_ADDR.to_string(),
             broadcast_host: "127.0.0.1".to_string(),
             broadcast_port: 8080,
             bearer_token: None,
@@ -292,11 +292,8 @@ pub fn config_path() -> PathBuf {
 
 /// Serializes the tests that redirect `$XDG_CONFIG_HOME`: it is a process-wide
 /// variable, so two of them setting it at once would read each other's config dir
-/// and make the assertions flicker. Lives at module scope (not inside the test
-/// module) so the panel tests in `super::mod`, which also write the config, can
-/// take the same lock.
-#[cfg(test)]
-pub(crate) static CONFIG_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// and make the assertions flicker.
+pub static CONFIG_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// A sibling temp path used for atomic writes.
 fn tmp_path(path: &Path) -> PathBuf {

@@ -26,13 +26,14 @@ use std::{
 
 use eframe::egui;
 use iroh::{Endpoint, EndpointAddr, SecretKey};
-use streampipe::{
+use tokio::{runtime::Handle, sync::mpsc, task::JoinHandle, time::timeout};
+
+use crate::{
+    common::{create_endpoint, webrtc_alpn, CommonArgs, ONLINE_TIMEOUT},
+    udp,
     webrtc::{self, Player, StreamStats, ViewerConfig, WhipConfig},
     EndpointTicket, WEBRTC_ALPN,
 };
-use tokio::{runtime::Handle, sync::mpsc, task::JoinHandle, time::timeout};
-
-use crate::{udp, CommonArgs, ONLINE_TIMEOUT};
 
 /// How many video-bitrate samples the stats sparkline keeps (oldest first).
 /// At the 5-second stats tick that is a two-minute window.
@@ -99,42 +100,42 @@ pub struct SharedState {
     /// endpoint on the old (ephemeral) socket.
     bind: BindAddrs,
     /// The running broadcast task, if any.
-    pub(crate) broadcast_session: Option<JoinHandle<()>>,
+    pub broadcast_session: Option<JoinHandle<()>>,
     /// The running watch task, if any. Broadcasting and watching are independent
     /// sessions that may run at the same time (watch your own broadcast, or a
     /// friend's, while you are live), so each track owns its own handle.
-    pub(crate) watch_session: Option<JoinHandle<()>>,
+    pub watch_session: Option<JoinHandle<()>>,
     /// What the live watch session was launched with: `(player, buffer_ms)`, or
     /// `None` while no watch session is up.
-    pub(crate) watch_applied: Option<(Player, Option<u64>)>,
+    pub watch_applied: Option<(Player, Option<u64>)>,
     /// Whether the live watch session is currently receiving media from the
     /// broadcaster: `false` while it is idle, connecting, connected-but-waiting for
     /// the streamer to begin, or after the stream ends.
-    pub(crate) watch_receiving: bool,
+    pub watch_receiving: bool,
     /// The broadcast track's mode (`Idle` / `Starting` / `Broadcasting`).
-    pub(crate) broadcast: Mode,
+    pub broadcast: Mode,
     /// The watch track's mode (`Idle` / `Starting` / `Watching`).
-    pub(crate) watch: Mode,
+    pub watch: Mode,
     /// The live statistics of a broadcast, `None` when not broadcasting.
-    pub(crate) stats: Option<StreamStats>,
+    pub stats: Option<StreamStats>,
     /// Recent video-bitrate samples (kbit/s), oldest first, for the stats
     /// sparkline. Fed by [`consume_stats`]; cleared when the broadcast ends.
-    pub(crate) video_kbps_history: VecDeque<f64>,
+    pub video_kbps_history: VecDeque<f64>,
     /// The current broadcast ticket, shown after the endpoint is online.
-    pub(crate) ticket: Option<String>,
+    pub ticket: Option<String>,
     /// Whether a ticket refresh is in flight (rebinding the endpoint to pick up a
     /// fresh relay / socket and mint a new ticket). Disables the refresh button so a
     /// double click cannot rebind twice.
-    pub(crate) refreshing: bool,
+    pub refreshing: bool,
     /// A one-shot completion notice for the UI (e.g. "Relay refreshed ✓"), set by a
     /// finished refresh/reset task and taken by the draw loop to raise a toast.
-    pub(crate) notice: Option<String>,
+    pub notice: Option<String>,
     /// The WHIP URL to give OBS, tracking the configured host and port.
-    pub(crate) whip_url: String,
+    pub whip_url: String,
     /// The last error surfaced on the Broadcast tab.
-    pub(crate) broadcast_error: Option<String>,
+    pub broadcast_error: Option<String>,
     /// The last error surfaced on the Watch tab.
-    pub(crate) watch_error: Option<String>,
+    pub watch_error: Option<String>,
 }
 
 impl SharedState {
@@ -254,7 +255,7 @@ pub fn whip_url(host: &str, port: u16) -> String {
 async fn ensure_endpoint(
     state: &Arc<Mutex<SharedState>>,
     bind: BindAddrs,
-) -> crate::Result<Endpoint> {
+) -> n0_error::Result<Endpoint> {
     let cached = {
         let g = state.lock().unwrap();
         g.endpoint.clone().filter(|_| g.bind == bind)
@@ -274,8 +275,8 @@ async fn ensure_endpoint(
         verbose: 1,
         verbose_max: 3,
     };
-    let alpn = crate::webrtc_alpn(&common)?;
-    let endpoint = crate::create_endpoint(secret, &common, vec![alpn]).await?;
+    let alpn = webrtc_alpn(&common)?;
+    let endpoint = create_endpoint(secret, &common, vec![alpn]).await?;
     let mut g = state.lock().unwrap();
     g.endpoint = Some(endpoint.clone());
     g.bind = bind;
@@ -663,7 +664,7 @@ pub fn spawn_watch(
             verbose_max: 3,
         };
         let secret = SecretKey::generate();
-        let endpoint = match crate::create_endpoint(secret, &common, vec![]).await {
+        let endpoint = match create_endpoint(secret, &common, vec![]).await {
             Ok(endpoint) => endpoint,
             Err(e) => {
                 return fail(

@@ -11,6 +11,8 @@ pub const HANDSHAKE: [u8; 5] = *b"hello";
 /// WebRTC viewer can never be mistaken for a pipe connector.
 pub const WEBRTC_ALPN: &[u8] = b"STREAMPIPE_WEBRTC_V0";
 
+pub mod common;
+pub mod gui;
 pub mod rtp;
 pub mod sdp;
 pub mod udp;

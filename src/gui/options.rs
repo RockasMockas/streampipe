@@ -18,7 +18,7 @@ use super::{
 /// The neutral grey the Close button is painted in: the same halo/fill/stroke
 /// language as the accent-green primary "Save", just desaturated, so the two read
 /// as one set of matching actions with Save leading.
-pub(crate) const CLOSE_GREY: egui::Color32 = egui::Color32::from_rgb(150, 155, 165);
+pub const CLOSE_GREY: egui::Color32 = egui::Color32::from_rgb(150, 155, 165);
 /// The size of both action buttons in the panel's footer, so Save and Close are
 /// the same box.
 const BUTTON: egui::Vec2 = egui::vec2(90.0, 30.0);

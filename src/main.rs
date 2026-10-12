@@ -1,11 +1,9 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 //! Command line arguments.
-mod gui;
-mod udp;
 
 use std::{
     io,
-    net::{SocketAddr, SocketAddrV4, SocketAddrV6, ToSocketAddrs},
+    net::{SocketAddr, ToSocketAddrs},
     path::PathBuf,
     str::FromStr,
     sync::Arc,
@@ -13,12 +11,15 @@ use std::{
 };
 
 use clap::{Parser, Subcommand};
-use iroh::{
-    endpoint::{presets, Accepting, QuicTransportConfig},
-    Endpoint, EndpointAddr, SecretKey,
-};
+use iroh::{endpoint::Accepting, Endpoint, EndpointAddr, SecretKey};
 use n0_error::{bail_any, ensure_any, AnyError, Result, StdResultExt};
-use streampipe::{webrtc, EndpointTicket};
+use streampipe::{
+    common::{
+        create_endpoint, log_level, stats_enabled, udp_alpn, webrtc_alpn, CommonArgs,
+        ONLINE_TIMEOUT,
+    },
+    gui, udp, webrtc, EndpointTicket,
+};
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 use tokio::{
@@ -28,13 +29,9 @@ use tokio::{
     time::timeout,
 };
 use tokio_util::sync::CancellationToken;
+#[cfg(test)]
 use tracing::Level;
 use tracing_subscriber::EnvFilter;
-
-const ONLINE_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// The highest verbosity level supported by `--verbose` / `--verbose-max`.
-const MAX_VERBOSE: u8 = 3;
 
 /// The verbosity used by subcommands that have no common args.
 const DEFAULT_VERBOSITY: u8 = 0;
@@ -194,91 +191,6 @@ impl Commands {
     }
 }
 
-#[derive(Parser, Debug)]
-pub struct CommonArgs {
-    /// The IPv4 address that the endpoint will listen on.
-    ///
-    /// If None, defaults to a random free port, but it can be useful to specify a fixed
-    /// port, e.g. to configure a firewall rule.
-    #[clap(long, default_value = None)]
-    pub ipv4_addr: Option<SocketAddrV4>,
-
-    /// The IPv6 address that the endpoint will listen on.
-    ///
-    /// If None, defaults to a random free port, but it can be useful to specify a fixed
-    /// port, e.g. to configure a firewall rule.
-    #[clap(long, default_value = None)]
-    pub ipv6_addr: Option<SocketAddrV6>,
-
-    /// A custom ALPN to use for the endpoint.
-    ///
-    /// This is an expert feature that allows streampipe to be used to interact
-    /// with existing iroh protocols.
-    ///
-    /// When using this option, the connect side must also specify the same ALPN.
-    /// The listen side will not expect a handshake, and the connect side will
-    /// not send one.
-    ///
-    /// Alpns are byte strings. To specify an utf8 string, prefix it with `utf8:`.
-    /// Otherwise, it will be parsed as a hex string.
-    #[clap(long)]
-    pub custom_alpn: Option<String>,
-
-    /// The verbosity level. Repeat to increase verbosity.
-    ///
-    /// Each level includes everything from the levels below it.
-    ///
-    /// 0 (default): errors only.
-    ///
-    /// 1 (`-v`): info. Connection lifecycle: endpoint creation, dialing and
-    /// accepting, handshakes, local socket binds, and byte/packet totals when a
-    /// tunnel closes.
-    ///
-    /// 2 (`-vv`): debug. Everything above, plus every stream and datagram event,
-    /// the negotiated ALPN and max datagram size, non-fatal errors, and a stats
-    /// line every few seconds while a tunnel is running.
-    ///
-    /// 3 (`-vvv`): trace. Everything above, plus one line per copied chunk and
-    /// per datagram with sizes and addresses, and iroh's own internal logging.
-    ///
-    /// Capped by `--verbose-max`. Overridden by `RUST_LOG`, which wins if set.
-    #[clap(short = 'v', long, action = clap::ArgAction::Count)]
-    pub verbose: u8,
-
-    /// The highest verbosity level that `--verbose` can reach.
-    ///
-    /// The effective verbosity is `min(verbose, verbose_max)`, so
-    /// `-v -v -v --verbose-max 1` logs at info level only. This is useful when
-    /// verbosity is set globally (e.g. in a wrapper script or `alias`) but the
-    /// full detail would be too noisy or too slow.
-    ///
-    /// Defaults to 3 (trace), the highest supported level. Values above that are
-    /// clamped. Ignored when `RUST_LOG` is set, since `RUST_LOG` overrides the
-    /// verbosity entirely.
-    #[clap(long, default_value_t = MAX_VERBOSE)]
-    pub verbose_max: u8,
-}
-
-impl CommonArgs {
-    fn alpn(&self) -> Result<Vec<u8>> {
-        Ok(match &self.custom_alpn {
-            Some(alpn) => parse_alpn(alpn)?,
-            None => streampipe::ALPN.to_vec(),
-        })
-    }
-
-    fn is_custom_alpn(&self) -> bool {
-        self.custom_alpn.is_some()
-    }
-
-    /// The effective verbosity: the `-v` count, clamped to `--verbose-max`.
-    ///
-    /// Always in the range `0..=MAX_VERBOSE`.
-    fn verbosity(&self) -> u8 {
-        self.verbose.min(self.verbose_max).min(MAX_VERBOSE)
-    }
-}
-
 /// Set up logging based on the verbosity flags.
 ///
 /// `RUST_LOG` takes precedence if it is set, otherwise the default filter is
@@ -306,51 +218,6 @@ fn init_logging(common: Option<&CommonArgs>) {
             }
         }
     }
-}
-
-/// The log level for a verbosity level.
-fn log_level(verbosity: u8) -> Level {
-    match verbosity {
-        0 => Level::ERROR,
-        1 => Level::INFO,
-        2 => Level::DEBUG,
-        _ => Level::TRACE,
-    }
-}
-
-/// Whether per-tunnel periodic stats should be logged while running.
-fn stats_enabled(verbosity: u8) -> bool {
-    verbosity >= 2
-}
-
-fn parse_alpn(alpn: &str) -> Result<Vec<u8>> {
-    Ok(if let Some(text) = alpn.strip_prefix("utf8:") {
-        text.as_bytes().to_vec()
-    } else {
-        hex::decode(alpn).anyerr()?
-    })
-}
-
-/// The ALPN to use for a udp tunnel.
-///
-/// Unless a custom ALPN is given, the dedicated udp ALPN is used instead of
-/// the stream ALPN, so that udp and stream tunnels cannot be confused.
-fn udp_alpn(common: &CommonArgs) -> Result<Vec<u8>> {
-    Ok(match &common.custom_alpn {
-        Some(alpn) => parse_alpn(alpn)?,
-        None => udp::ALPN.to_vec(),
-    })
-}
-
-/// The ALPN to use for a webrtc tunnel.
-///
-/// Unless a custom ALPN is given, the dedicated webrtc ALPN is used, so that a
-/// webrtc viewer can never be mistaken for a stream or udp connector.
-fn webrtc_alpn(common: &CommonArgs) -> Result<Vec<u8>> {
-    Ok(match &common.custom_alpn {
-        Some(alpn) => parse_alpn(alpn)?,
-        None => streampipe::WEBRTC_ALPN.to_vec(),
-    })
 }
 
 #[derive(Parser, Debug)]
@@ -672,50 +539,6 @@ fn get_or_create_secret() -> Result<SecretKey> {
             Ok(key)
         }
     }
-}
-
-/// QUIC datagram buffers for the media path.
-const DATAGRAM_BUFFER: usize = 8 * 1024 * 1024;
-
-/// The QUIC transport config for a media tunnel: default state machine, but with
-/// the datagram buffers widened for high bitrate. See [`DATAGRAM_BUFFER`].
-fn media_transport_config() -> QuicTransportConfig {
-    QuicTransportConfig::builder()
-        .datagram_receive_buffer_size(Some(DATAGRAM_BUFFER))
-        .datagram_send_buffer_size(DATAGRAM_BUFFER)
-        .build()
-}
-
-async fn create_endpoint(
-    secret_key: SecretKey,
-    common: &CommonArgs,
-    alpns: Vec<Vec<u8>>,
-) -> Result<Endpoint> {
-    for alpn in &alpns {
-        tracing::debug!(
-            "endpoint alpn: {} (hex {})",
-            String::from_utf8_lossy(alpn),
-            hex::encode(alpn)
-        );
-    }
-    if alpns.is_empty() {
-        tracing::debug!("endpoint has no alpns (connect-only)");
-    }
-    let mut builder = Endpoint::builder(presets::N0)
-        .secret_key(secret_key)
-        .alpns(alpns)
-        .transport_config(media_transport_config());
-    if let Some(addr) = common.ipv4_addr {
-        tracing::debug!("binding ipv4 addr {addr}");
-        builder = builder.bind_addr(addr)?;
-    }
-    if let Some(addr) = common.ipv6_addr {
-        tracing::debug!("binding ipv6 addr {addr}");
-        builder = builder.bind_addr(addr)?;
-    }
-    let endpoint = builder.bind().await.anyerr()?;
-    tracing::debug!("endpoint bound: {:?}", endpoint.addr());
-    Ok(endpoint)
 }
 
 fn cancel_token<T>(token: CancellationToken) -> impl Fn(T) -> T {
@@ -1639,6 +1462,7 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use streampipe::common::MAX_VERBOSE;
 
     fn common(verbose: u8, verbose_max: u8) -> CommonArgs {
         CommonArgs {

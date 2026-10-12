@@ -6,12 +6,12 @@
 //! session, so nothing in the WebRTC hot path shares a thread with rendering.
 //! See [`state`] for the threading contract.
 
-mod broadcast;
-mod config;
-mod log;
-mod options;
-mod state;
-mod watch;
+pub mod broadcast;
+pub mod config;
+pub mod log;
+pub mod options;
+pub mod state;
+pub mod watch;
 
 use std::{
     sync::{Arc, Mutex},
@@ -19,7 +19,7 @@ use std::{
 };
 
 use eframe::egui::{self, Ui};
-use streampipe::webrtc::{Player, StreamStats};
+use crate::webrtc::{Player, StreamStats};
 use tokio::{runtime::Handle, sync::mpsc};
 
 use self::{
@@ -28,27 +28,27 @@ use self::{
 };
 
 /// Session cadence: enough for logs/stats to refresh without a repaint storm.
-const REPAINT: Duration = Duration::from_millis(250);
+pub const REPAINT: Duration = Duration::from_millis(250);
 /// How long a toast stays visible.
-const TOAST: Duration = Duration::from_millis(1500);
+pub const TOAST: Duration = Duration::from_millis(1500);
 /// Toast fades need ~60 fps; at [`REPAINT`] a 1.5 s fade only gets six visible steps.
-const TOAST_FRAME: Duration = Duration::from_millis(16);
+pub const TOAST_FRAME: Duration = Duration::from_millis(16);
 /// How long a copy box's click flash lasts.
-const FLASH: Duration = Duration::from_millis(450);
+pub const FLASH: Duration = Duration::from_millis(450);
 /// The "live/success" accent: broadcasting status, copy toast, viewers.
-const ACCENT: egui::Color32 = egui::Color32::from_rgb(80, 200, 120);
+pub const ACCENT: egui::Color32 = egui::Color32::from_rgb(80, 200, 120);
 /// The "watching" accent: the watch status dot and the connecting spinner.
-const WATCH_ACCENT: egui::Color32 = egui::Color32::from_rgb(90, 160, 255);
+pub const WATCH_ACCENT: egui::Color32 = egui::Color32::from_rgb(90, 160, 255);
 /// The "error" red: failed sessions, the stop halo, the error callout.
-const ERROR: egui::Color32 = egui::Color32::from_rgb(220, 90, 90);
+pub const ERROR: egui::Color32 = egui::Color32::from_rgb(220, 90, 90);
 /// How long a tab's content takes to fade in after a tab switch.
-const TAB_FADE_SECS: f32 = 0.16;
+pub const TAB_FADE_SECS: f32 = 0.16;
 /// How long a new log line takes to fade in.
-const LOG_FADE_SECS: f32 = 0.2;
+pub const LOG_FADE_SECS: f32 = 0.2;
 
 /// The two main tabs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Tab {
+pub enum Tab {
     Watch,
     Broadcast,
 }
@@ -56,64 +56,64 @@ enum Tab {
 /// The application.
 pub struct App {
     /// Handle to the `streampipe-engine` runtime that runs media sessions.
-    handle: Handle,
+    pub handle: Handle,
     /// Cross-thread shared state.
-    state: Arc<Mutex<SharedState>>,
+    pub state: Arc<Mutex<SharedState>>,
     /// The persisted configuration, edited live and saved on change and quit.
-    config: Config,
+    pub config: Config,
     /// The log ring fed by the tee writer.
-    log: log::LogRing,
+    pub log: log::LogRing,
     /// The stats channel sender, cloned to each broadcast.
-    stats_tx: mpsc::UnboundedSender<StreamStats>,
+    pub stats_tx: mpsc::UnboundedSender<StreamStats>,
     /// The selected tab.
-    tab: Tab,
+    pub tab: Tab,
     /// Whether the options panel is open.
-    show_options: bool,
+    pub show_options: bool,
     /// Whether the bottom log panel is expanded.
-    log_open: bool,
+    pub log_open: bool,
     /// Whether the WHIP bearer token is shown in cleartext. Masked by default so a
     /// shared secret is not left legible on screen.
-    show_bearer: bool,
+    pub show_bearer: bool,
     /// The ticket text on the Watch tab.
-    watch_ticket: String,
+    pub watch_ticket: String,
     /// The player selected on the Watch tab.
-    watch_player: Player,
+    pub watch_player: Player,
     /// The buffer field on the Watch tab, in milliseconds (empty = auto).
-    watch_buffer: String,
+    pub watch_buffer: String,
     /// The initial player volume on the Watch tab, in percent (0-100).
-    watch_volume: u8,
+    pub watch_volume: u8,
     /// The last copied box and when, for the transient toast.
-    copied: Option<(&'static str, Instant)>,
+    pub copied: Option<(&'static str, Instant)>,
     /// A transient action-complete toast (e.g. "Relay refreshed ✓") and when raised.
-    toast: Option<(String, Instant)>,
+    pub toast: Option<(String, Instant)>,
     /// Clock origin for the pulse animations, so they advance between repaints.
-    pulse: Instant,
+    pub pulse: Instant,
     /// Whether the next window-focused frame should autofocus the active tab's primary
     /// control. Set on open and on tab switch, cleared once consumed, so it never
     /// steals focus from a widget the user already chose.
-    focus_primary: bool,
+    pub focus_primary: bool,
     /// The tab underline's slide position: 0.0 = Watch, 1.0 = Broadcast.
-    tab_slide: f32,
+    pub tab_slide: f32,
     /// The previous frame's clock, for the underline tween's frame delta.
-    last_frame: Instant,
+    pub last_frame: Instant,
     /// The tab content's fade-in alpha (0.0 = hidden), reset on tab switch.
-    tab_fade: f32,
+    pub tab_fade: f32,
     /// Whether the tab fade is in flight; arms the repaint guard while true.
-    tab_fade_active: bool,
+    pub tab_fade_active: bool,
     /// The instant of the last tab switch, the fade-in's clock origin.
-    tab_switched_at: Instant,
+    pub tab_switched_at: Instant,
     /// The log panel's open fraction (0.0 = closed), tweened so it slides.
-    log_anim: f32,
+    pub log_anim: f32,
     /// The previous frame's clock, for the log panel tween's frame delta.
-    log_last_frame: Instant,
+    pub log_last_frame: Instant,
     /// The eased *display* of the live broadcast stats, tweened toward the latest
     /// [`StreamStats`] each frame so the numbers settle instead of jumping on each
     /// 5-second tick. Reset to zero when the broadcast goes idle, so a new broadcast
     /// starts from a clean zero.
-    disp_viewers: f32,
-    disp_video_kbps: f32,
-    disp_video_fps: f32,
-    disp_audio_kbps: f32,
+    pub disp_viewers: f32,
+    pub disp_video_kbps: f32,
+    pub disp_video_fps: f32,
+    pub disp_audio_kbps: f32,
 }
 
 impl App {
@@ -122,7 +122,7 @@ impl App {
     /// `handle` is the `streampipe-engine` runtime, so every media session the UI
     /// starts runs on threads the renderer never shares. Tests pass a handle of a
     /// runtime they keep alive.
-    fn new(
+    pub fn new(
         handle: Handle,
         config: Config,
         state: Arc<Mutex<SharedState>>,
@@ -556,7 +556,7 @@ impl App {
     ///
     /// Split out of [`eframe::App::ui`] (which only forwards here) so the real frame
     /// can be driven headlessly by tests without a window or GL context.
-    fn draw(&mut self, ui: &mut Ui) {
+    pub fn draw(&mut self, ui: &mut Ui) {
         // Expire toasts before deciding on the next frame. A click later in this same
         // frame re-arms them with a fresh `Instant`, so this never races a click.
         self.copied = expire_copied(self.copied, TOAST);
@@ -762,7 +762,7 @@ impl eframe::App for App {
 ///
 /// Extracted with the window length injected so the "idle window must fall asleep"
 /// regression is testable without a live window.
-fn expire_copied(
+pub fn expire_copied(
     copied: Option<(&'static str, Instant)>,
     toast: Duration,
 ) -> Option<(&'static str, Instant)> {
@@ -770,7 +770,7 @@ fn expire_copied(
 }
 
 /// Truncate a string to `max` chars, adding an ellipsis.
-fn truncate(s: &str, max: usize) -> String {
+pub fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
     } else {
@@ -781,12 +781,12 @@ fn truncate(s: &str, max: usize) -> String {
 
 /// The status-dot breath: a shallow ~2 s pulse bounded to `0.6..=1.0` of the base
 /// colour, so "live" reads at a glance without blinking out.
-fn pulse_factor(secs: f32) -> f32 {
+pub fn pulse_factor(secs: f32) -> f32 {
     0.6 + 0.4 * (0.5 + 0.5 * (secs * std::f32::consts::TAU * 0.5).cos())
 }
 
 /// The copy-box click flash: a linear fade from `1.0` to `0.0` over `window`.
-fn flash_alpha(elapsed: Duration, window: Duration) -> f32 {
+pub fn flash_alpha(elapsed: Duration, window: Duration) -> f32 {
     if window.is_zero() {
         return 0.0;
     }
@@ -796,7 +796,7 @@ fn flash_alpha(elapsed: Duration, window: Duration) -> f32 {
 /// A rotating 270° arc, shown beside "connecting…" / "starting…" so the wait has
 /// visible progress. Drawn as a mesh of quads (crisper than a stroked arc, and it
 /// avoids the layer-ordering pitfalls of a separate background layer).
-fn spinner(ui: &mut Ui, secs: f32, color: egui::Color32) {
+pub fn spinner(ui: &mut Ui, secs: f32, color: egui::Color32) {
     let size = 14.0;
     let (rect, _resp) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
     let center = rect.center();
@@ -946,7 +946,7 @@ fn primary_button_glow(
 /// A soft glow around a secondary interactive surface (a copy box's hover, a ticket or
 /// buffer field's focus). Two stacked rounded rects, dimmer than the hero buttons'
 /// [`primary_button_glow`]; takes no layout space.
-pub(crate) fn soft_glow(
+pub fn soft_glow(
     painter: &egui::Painter,
     rect: egui::Rect,
     corner: egui::CornerRadius,
@@ -993,7 +993,7 @@ fn pointer_pressed_over(ui: &Ui, rect: egui::Rect) -> bool {
 /// A sonar pulse: a soft ring expanding from a live indicator's dot and fading out,
 /// looping on `period` seconds. Decorative — takes no layout space. `secs` is the
 /// animation clock, which advances between the repaints that already fire while live.
-fn sonar_pulse(
+pub fn sonar_pulse(
     painter: &egui::Painter,
     center: egui::Pos2,
     base: f32,
@@ -1046,7 +1046,7 @@ fn live_badge(ui: &mut Ui, color: egui::Color32, breath: f32) {
 }
 
 /// A section heading: a small accent bar beside a bold label.
-fn section_tick(ui: &mut Ui, text: &str, color: egui::Color32) {
+pub fn section_tick(ui: &mut Ui, text: &str, color: egui::Color32) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         let (bar, _) = ui.allocate_exact_size(egui::vec2(3.0, 12.0), egui::Sense::hover());
@@ -1062,7 +1062,7 @@ fn section_tick(ui: &mut Ui, text: &str, color: egui::Color32) {
 
 /// A soft error callout: a muted red-tinted surface with a red left bar (mirroring
 /// [`section_tick`] in the error hue) and the message in the error red.
-fn error_callout(ui: &mut Ui, text: &str) {
+pub fn error_callout(ui: &mut Ui, text: &str) {
     let frame = egui::Frame::group(ui.style())
         .fill(ERROR.gamma_multiply(0.12))
         .stroke(egui::Stroke::new(1.0, ERROR.gamma_multiply(0.35)))
@@ -1084,7 +1084,7 @@ fn error_callout(ui: &mut Ui, text: &str) {
 
 /// The display colour of a log line, keyed off its leading tracing level word
 /// (`LEVEL target: message`). Info and unlevelled lines take the default colour.
-fn log_line_color(line: &str, default: egui::Color32) -> egui::Color32 {
+pub fn log_line_color(line: &str, default: egui::Color32) -> egui::Color32 {
     match line.split_whitespace().next() {
         Some("ERROR") => ERROR,
         Some("WARN") => WARN_AMBER,
@@ -1095,7 +1095,7 @@ fn log_line_color(line: &str, default: egui::Color32) -> egui::Color32 {
 
 /// The muted amber a `WARN` line is coloured with, shared by [`log_line_color`] and
 /// [`log_level_chip`] so a warning's text and chip always match.
-const WARN_AMBER: egui::Color32 = egui::Color32::from_rgb(214, 178, 94);
+pub const WARN_AMBER: egui::Color32 = egui::Color32::from_rgb(214, 178, 94);
 
 /// A small level chip ("ERR" / "WARN") leading a log line, so a problem pops out of a
 /// wall of grey text. INFO and unlevelled lines get no chip. `alpha` fades the chip in
@@ -1192,7 +1192,7 @@ fn close_button(ui: &mut Ui) -> bool {
 /// One step of the tab underline's exponential ease toward `target`, scaled by the
 /// wall-clock `dt` so the slide's speed is frame-rate independent. Never overshoots,
 /// and snaps on within ~a pixel so the caller can stop requesting repaints.
-fn tab_slide_step(current: f32, target: f32, dt: f32) -> f32 {
+pub fn tab_slide_step(current: f32, target: f32, dt: f32) -> f32 {
     let next = current + (target - current) * (1.0 - (-dt * 30.0).exp());
     if (next - target).abs() <= 0.002 {
         target
@@ -1203,7 +1203,7 @@ fn tab_slide_step(current: f32, target: f32, dt: f32) -> f32 {
 
 /// One step of the log panel's height tween (open fraction). Same shape as
 /// [`tab_slide_step`] but slower, so the larger travel reads as a deliberate slide.
-fn log_anim_step(current: f32, target: f32, dt: f32) -> f32 {
+pub fn log_anim_step(current: f32, target: f32, dt: f32) -> f32 {
     let next = current + (target - current) * (1.0 - (-dt * 18.0).exp());
     if (next - target).abs() <= 0.002 {
         target
@@ -1215,7 +1215,7 @@ fn log_anim_step(current: f32, target: f32, dt: f32) -> f32 {
 /// One step of the live stats' eased display. Same shape as [`tab_slide_step`], slower
 /// still; the 0.05 epsilon is well below one unit of every displayed stat, so the snap
 /// is never visible.
-fn stat_ease(current: f32, target: f32, dt: f32) -> f32 {
+pub fn stat_ease(current: f32, target: f32, dt: f32) -> f32 {
     let next = current + (target - current) * (1.0 - (-dt * 8.0).exp());
     if (next - target).abs() <= 0.05 {
         target
@@ -1227,7 +1227,7 @@ fn stat_ease(current: f32, target: f32, dt: f32) -> f32 {
 /// The tab content's fade-in alpha after `elapsed` seconds, and whether it has settled.
 /// An ease-out cubic, so new content appears quickly then settles gently. Pure (the
 /// clock is injected) so the settle is testable headlessly.
-fn tab_fade_step(elapsed: f32, duration: f32) -> (f32, bool) {
+pub fn tab_fade_step(elapsed: f32, duration: f32) -> (f32, bool) {
     let t = (elapsed / duration).clamp(0.0, 1.0);
     if t >= 1.0 {
         (1.0, true)
@@ -1270,7 +1270,7 @@ fn apply_theme(ctx: &egui::Context) {
 /// The window / task-bar icon: a rounded square (dark ground, lit from above) carrying a
 /// green "stream" — a diagonal conduit with a soft glow and a flow arrow at its tip.
 /// Generated in code, so there is no asset file to ship.
-fn app_icon() -> Arc<egui::IconData> {
+pub fn app_icon() -> Arc<egui::IconData> {
     let size = 64usize;
     let mut rgba = vec![0u8; size * size * 4];
     for y in 0..size {
@@ -1983,7 +1983,7 @@ mod tests {
     /// make every click-through assertion vacuous — so anything clicking a start control
     /// mints a real one.
     fn real_ticket() -> String {
-        streampipe::EndpointTicket::new(iroh::EndpointAddr::new(SecretKey::generate().public()))
+        crate::EndpointTicket::new(iroh::EndpointAddr::new(SecretKey::generate().public()))
             .to_string()
     }
 
@@ -2059,7 +2059,7 @@ mod tests {
             .shapes
             .iter()
             .find_map(|s| match &s.shape {
-                egui::epaint::Shape::Text(t) if t.galley.text() == "playing in a player window" => {
+                egui::epaint::Shape::Text(t) if t.galley.text() == "Playing stream in player window" => {
                     Some(egui::Rect::from_min_size(t.pos, t.galley.rect.size()))
                 }
                 _ => None,
