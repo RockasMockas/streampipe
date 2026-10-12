@@ -2,9 +2,7 @@
 
 mod common;
 
-use std::{
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 use common::{assert_awake, settled_repaint_delay, test_app};
 use streampipe::gui::{state::Mode, TOAST, TOAST_FRAME};

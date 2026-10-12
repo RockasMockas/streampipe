@@ -12,13 +12,11 @@ use std::{
 
 use eframe::egui;
 use iroh::SecretKey;
-use streampipe::{
-    gui::{
-        config::Config,
-        log,
-        state::{self, Mode, SharedState},
-        App, REPAINT,
-    },
+use streampipe::gui::{
+    config::Config,
+    log,
+    state::{self, Mode, SharedState},
+    App, REPAINT,
 };
 use tokio::sync::mpsc;
 

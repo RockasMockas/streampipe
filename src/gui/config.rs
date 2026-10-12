@@ -1,35 +1,30 @@
 //! Persisted GUI configuration.
 //!
-//! Stored as JSON in the platform config directory under `streampipe/`. A
-//! missing or corrupt file yields the defaults, so the GUI always starts.
+//! Stored as JSON in the platform config directory under `streampipe/`. A missing or
+//! corrupt file yields the defaults, so the GUI always starts.
 //!
-//! The iroh secret is persisted (as hex) so that the broadcast endpoint keeps
-//! the same identity across restarts, which is what makes the ticket stable for
-//! friends who saved it. This is a deliberate trade-off: the secret sits in the
-//! user's own config directory in plaintext. It can be overridden by setting
-//! `IROH_SECRET`, which takes precedence and is never written to disk.
+//! The iroh secret is persisted (as hex) so the broadcast endpoint keeps the same
+//! identity across restarts, which keeps the ticket stable for friends who saved it.
+//! This is a deliberate trade-off: the secret sits in the user's config directory in
+//! plaintext. `IROH_SECRET` overrides it and is never written to disk.
 
 use std::{
     fs, io,
     path::{Path, PathBuf},
 };
 
+use crate::webrtc::Player;
 use iroh::SecretKey;
 use serde::{Deserialize, Serialize};
-use crate::webrtc::Player;
 
 /// The application name used for the config directory.
 const APP_DIR: &str = "streampipe";
 /// The config file name inside [`APP_DIR`].
 const CONFIG_FILE: &str = "config.json";
 
-/// The initial player volume the app starts with when nothing was saved yet:
-/// half volume.
-///
-/// Only the first run (or a config written before this setting existed) uses it.
-/// Every value the user sets on the Watch tab is persisted, so from the second
-/// launch on the slider reopens where they left it; this is the fallback, and a
-/// mid-scale start is a friendlier one than full volume on a shared machine.
+/// The initial player volume when nothing was saved yet: half. Only the first run
+/// (or a config predating this setting) uses it; every value the user sets is
+/// persisted, so the slider reopens where it was left.
 pub const DEFAULT_VOLUME: u8 = 50;
 
 /// The players the GUI offers, in dropdown order.
@@ -60,7 +55,6 @@ pub fn player_from_key(key: &str) -> Player {
 #[serde(default)]
 pub struct Config {
     /// The iroh secret key as lowercase hex, so the endpoint id is stable.
-    ///
     /// `None` until the first broadcast/watch generates and persists one.
     pub secret_hex: Option<String>,
     /// The ticket most recently watched, prefilled on the Watch tab.
@@ -74,9 +68,7 @@ pub struct Config {
     /// The jitter buffer in milliseconds, `None` for lowest latency.
     pub buffer_ms: Option<u64>,
     /// The player's initial volume in percent (0-100), used on every launch.
-    ///
-    /// 100 means "leave the player at its own default", which is what each
-    /// player's flag means at that value (see [`Player::command`]).
+    /// 100 means "leave the player at its own default" (see [`Player::command`]).
     pub volume: u8,
     /// The local address the viewer plays out on.
     pub play_addr: String,
@@ -90,16 +82,13 @@ pub struct Config {
     pub verbosity: u8,
     /// The most recently issued broadcast ticket, remembered across restarts.
     ///
-    /// Stored for reference only. It is *not* re-advertised as the live ticket on
-    /// the next broadcast: that ticket is always freshly minted from the live
-    /// endpoint address (see [`crate::gui::state::spawn_broadcast`]) so viewers get
-    /// current transport hints and can hole-punch direct instead of falling back to
-    /// a slow, lossy relay path. The endpoint identity stays stable via
-    /// [`Config::secret_hex`], so an older ticket a friend saved still resolves to
-    /// this endpoint — it just carries stale addresses and may route via a relay.
+    /// Stored for reference only — *not* re-advertised as the live ticket on the next
+    /// broadcast, which is always freshly minted from the live endpoint address (see
+    /// [`crate::gui::state::spawn_broadcast`]) so viewers get current transport hints
+    /// and can hole-punch direct. Identity stays stable via [`Config::secret_hex`], so
+    /// an older saved ticket still resolves to this endpoint.
     pub broadcast_ticket: Option<String>,
     /// Optional fixed IPv4 bind address (`ip:port`) for the broadcast endpoint.
-    ///
     /// Empty by default (ephemeral port, ticket changes each session). A streamer
     /// with a static public IP can set this to keep the ticket stable.
     pub broadcast_bind_ipv4: Option<String>,
@@ -174,10 +163,9 @@ impl Config {
         self.bearer_token.clone().filter(|t| !t.trim().is_empty())
     }
 
-    /// Load the config from disk, falling back to defaults.
-    ///
-    /// A missing file is normal (first run). A corrupt file is reported on
-    /// stderr and treated as defaults, so the GUI still opens.
+    /// Load the config from disk, falling back to defaults. A missing file is normal
+    /// (first run); a corrupt file is reported on stderr and treated as defaults, so
+    /// the GUI still opens.
     pub fn load() -> Self {
         let path = config_path();
         match fs::read_to_string(&path) {
@@ -193,10 +181,9 @@ impl Config {
         }
     }
 
-    /// Write the config to disk, creating the directory if needed.
-    ///
-    /// Errors are reported on stderr but never fatal: the GUI keeps running
-    /// with the in-memory config.
+    /// Write the config to disk, creating the directory if needed. Errors are
+    /// reported on stderr but never fatal: the GUI keeps running with the in-memory
+    /// config.
     pub fn save(&self) {
         let path = config_path();
         if let Some(dir) = path.parent() {
@@ -226,11 +213,9 @@ impl Config {
         }
     }
 
-    /// Load the secret, generating and persisting one if there is none.
-    ///
-    /// `IROH_SECRET` wins and is not persisted. Otherwise the stored secret is
-    /// reused so the endpoint id is stable; if there is none, a fresh one is
-    /// generated and saved.
+    /// Load the secret, generating and persisting one if there is none. `IROH_SECRET`
+    /// wins and is not persisted; otherwise the stored secret is reused (stable
+    /// endpoint id), and a fresh one is generated and saved if there is none.
     pub fn ensure_secret(&mut self) -> SecretKey {
         if let Ok(secret) = std::env::var("IROH_SECRET") {
             if let Ok(key) = secret.parse::<SecretKey>() {
@@ -262,11 +247,10 @@ impl Config {
     }
 }
 
-/// The directory the config lives in, per platform conventions.
-///
-/// Uses the standard environment variables directly (no `dirs` dependency):
-/// `$XDG_CONFIG_HOME` or `~/.config` on Linux, `%APPDATA%` on Windows, and
-/// `~/Library/Application Support` on macOS.
+/// The directory the config lives in, per platform conventions. Uses standard
+/// environment variables directly (no `dirs` dependency): `$XDG_CONFIG_HOME` or
+/// `~/.config` on Linux, `%APPDATA%` on Windows, `~/Library/Application Support` on
+/// macOS.
 pub fn config_dir() -> PathBuf {
     let base = if cfg!(target_os = "windows") {
         std::env::var_os("APPDATA").map(PathBuf::from).or_else(|| {
@@ -290,9 +274,8 @@ pub fn config_path() -> PathBuf {
     config_dir().join(CONFIG_FILE)
 }
 
-/// Serializes the tests that redirect `$XDG_CONFIG_HOME`: it is a process-wide
-/// variable, so two of them setting it at once would read each other's config dir
-/// and make the assertions flicker.
+/// Serializes the tests that redirect `$XDG_CONFIG_HOME` (a process-wide variable, so
+/// two running at once would read each other's config dir).
 pub static CONFIG_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// A sibling temp path used for atomic writes.
@@ -318,8 +301,7 @@ mod tests {
         assert_eq!(cfg.default_player(), Player::Mpv);
         assert!(cfg.last_ticket.is_empty());
         assert!(cfg.secret_hex.is_none());
-        // The volume starts at half, not full: a mid-scale default is what a fresh
-        // install opens with, and the last value set is persisted from then on.
+        // The volume starts at half, not full.
         assert_eq!(cfg.volume, DEFAULT_VOLUME);
         assert_eq!(DEFAULT_VOLUME, 50);
     }
@@ -349,17 +331,14 @@ mod tests {
         assert_eq!(back.last_ticket, "ticket-b");
     }
 
-    /// The last volume the user set goes to disk and comes back from it.
-    ///
-    /// `Config::save` writes the JSON, `Config::load` reads it, and the app seeds
-    /// the Watch-tab slider from the loaded value (`App::new`), so a value set in
-    /// one process is what the next process shows. A config written before the
-    /// setting existed (or no config at all) opens at the half-volume default.
+    /// The last volume the user set goes to disk and comes back: `save` writes the JSON,
+    /// `load` reads it, and `App::new` seeds the Watch-tab slider from the loaded value.
+    /// A config predating the setting (or no config) opens at the half-volume default.
     #[test]
     fn volume_survives_a_restart() {
         let _guard = CONFIG_ENV.lock().unwrap();
-        // Redirect the config dir into a temp folder so the test never writes to the
-        // real user config.
+        // Redirect the config dir into a temp folder so the test never writes to the real
+        // user config.
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("XDG_CONFIG_HOME", dir.path());
         let path = config_path();
@@ -369,8 +348,7 @@ mod tests {
         assert!(!path.exists());
         assert_eq!(Config::load().volume, DEFAULT_VOLUME);
 
-        // The user drags to 37 % and the app persists it (Watch tab: on release,
-        // and again on start / on close).
+        // The user drags to 37 % and the app persists it.
         let mut cfg = Config::default();
         cfg.volume = 37;
         cfg.save();
@@ -384,9 +362,8 @@ mod tests {
         fs::write(&path, "{}").unwrap();
         assert_eq!(Config::load().volume, DEFAULT_VOLUME);
 
-        // A hand-edited config naming a louder setting than the slider can show
-        // still loads; `App::new` seeds the slider with `min(100)`, so it is
-        // clamped to full rather than wrapped to a quiet value.
+        // A hand-edited config louder than the slider can show still loads; `App::new`
+        // seeds the slider with `min(100)`, so it is clamped, not wrapped.
         fs::write(&path, "{\"volume\":180}").unwrap();
         assert_eq!(Config::load().volume.min(100), 100);
     }
@@ -425,11 +402,10 @@ mod tests {
 
     #[test]
     fn old_config_without_ticket_fields_still_loads() {
-        // A config written before the broadcast ticket was persisted must load with
-        // sensible defaults rather than failing (struct-level `serde(default)`).
-        // A config that still carries the now-removed `broadcast_ticket_host` /
-        // `broadcast_ticket_port` keys must also load: struct-level `serde(default)`
-        // ignores unknown fields.
+        // A config predating the persisted broadcast ticket must load with defaults,
+        // and one carrying the now-removed `broadcast_ticket_host` /
+        // `broadcast_ticket_port` keys must too (struct-level `serde(default)` ignores
+        // unknown fields).
         let back =
             serde_json::from_str::<Config>("{\"broadcast_port\":9001,\"broadcast_ticket_host\":\"0.0.0.0\",\"broadcast_ticket_port\":9001}").unwrap();
         assert_eq!(back.broadcast_port, 9001);
@@ -438,7 +414,7 @@ mod tests {
 
     #[test]
     fn corrupt_json_falls_back_to_default() {
-        // A corrupt file must not panic; empty/invalid JSON yields defaults.
+        // A corrupt file must not panic; invalid JSON yields defaults.
         let back =
             serde_json::from_str::<Config>("{ not json").unwrap_or_else(|_| Config::default());
         assert_eq!(back.broadcast_port, 8080);
@@ -447,9 +423,8 @@ mod tests {
     #[test]
     fn secret_round_trips() {
         let _guard = CONFIG_ENV.lock().unwrap();
-        // Redirect the config dir into a temp folder so the test never writes
-        // to the real user config, then confirm the secret is generated once
-        // and reused.
+        // Redirect the config dir into a temp folder so the test never writes to the
+        // real user config, then confirm the secret is generated once and reused.
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("XDG_CONFIG_HOME", dir.path());
         std::env::remove_var("IROH_SECRET");

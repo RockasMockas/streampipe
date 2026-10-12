@@ -12,7 +12,7 @@ use eframe::egui;
 use streampipe::{
     gui::{
         error_callout, log, log_line_color, section_tick, soft_glow, sonar_pulse, spinner,
-        state::Mode, Tab, ERROR, WATCH_ACCENT, WARN_AMBER, ACCENT,
+        state::Mode, Tab, ACCENT, ERROR, WARN_AMBER, WATCH_ACCENT,
     },
     webrtc::StreamStats,
 };
@@ -228,9 +228,9 @@ fn the_status_bar_tints_with_the_live_session() {
 fn the_status_bar_paints_a_live_badge_when_live() {
     let size = egui::vec2(760.0, 560.0);
     let has_live_badge = |shapes: &[egui::epaint::ClippedShape]| -> bool {
-        shapes.iter().any(
-            |s| matches!(&s.shape, egui::epaint::Shape::Text(t) if t.galley.text() == "LIVE"),
-        )
+        shapes
+            .iter()
+            .any(|s| matches!(&s.shape, egui::epaint::Shape::Text(t) if t.galley.text() == "LIVE"))
     };
 
     // Live (broadcasting): the badge is painted.
@@ -494,9 +494,7 @@ fn the_error_callout_paints_a_tinted_surface_with_a_red_bar() {
         })
         .expect("the callout should paint its message");
     let color = match &msg.shape {
-        egui::epaint::Shape::Text(t) => {
-            t.galley.job.sections.first().map(|sec| sec.format.color)
-        }
+        egui::epaint::Shape::Text(t) => t.galley.job.sections.first().map(|sec| sec.format.color),
         _ => None,
     };
     assert_eq!(color, Some(ERROR), "the message should be the error red");
@@ -565,14 +563,9 @@ fn the_log_panel_marks_errors_and_warnings_with_chips() {
             _ => None,
         })
     };
-    let err_expected =
-        egui::Color32::from_rgba_unmultiplied(ERROR.r(), ERROR.g(), ERROR.b(), 230);
-    let warn_expected = egui::Color32::from_rgba_unmultiplied(
-        WARN_AMBER.r(),
-        WARN_AMBER.g(),
-        WARN_AMBER.b(),
-        230,
-    );
+    let err_expected = egui::Color32::from_rgba_unmultiplied(ERROR.r(), ERROR.g(), ERROR.b(), 230);
+    let warn_expected =
+        egui::Color32::from_rgba_unmultiplied(WARN_AMBER.r(), WARN_AMBER.g(), WARN_AMBER.b(), 230);
     assert_eq!(
         chip_color("ERR"),
         Some(err_expected),
@@ -839,8 +832,7 @@ fn soft_glow_paints_a_halo_in_the_given_color() {
     // The watch blue, not the accent green, so the colour is proved honoured.
     let color = WATCH_ACCENT;
     let mut out = ctx.run_ui(raw, |ui| {
-        let rect =
-            egui::Rect::from_min_size(egui::pos2(10.0, 10.0), egui::vec2(80.0, 30.0));
+        let rect = egui::Rect::from_min_size(egui::pos2(10.0, 10.0), egui::vec2(80.0, 30.0));
         soft_glow(ui.painter(), rect, egui::CornerRadius::same(4), color);
     });
     out.textures_delta.clear();

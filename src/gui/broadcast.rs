@@ -17,16 +17,15 @@ use super::{
     top_bevel, App, ACCENT, ERROR, FLASH,
 };
 
-/// Horizontal room kept clear at the right edge of a copy box for the copy glyph,
-/// so a long value is elided before it reaches the mark.
+/// Horizontal room kept clear at the right edge of a copy box for the copy glyph, so
+/// a long value is elided before it reaches the mark.
 const GLYPH_GUTTER: f32 = 26.0;
 /// Height of the value line inside a copy box.
 const COPY_ROW_H: f32 = 22.0;
 /// Vertical inner margin of a copy box's frame; doubled, it pads the value line.
 const COPY_V_MARGIN: f32 = 6.0;
-/// Horizontal inner margin of a copy box's frame; the frame's outer width is the
-/// value line's `width` plus twice this, so callers must reserve it to avoid the
-/// box (and any trailing button) overflowing past the right edge.
+/// Horizontal inner margin of a copy box's frame; the frame's outer width is the value
+/// line's `width` plus twice this, so callers must reserve it to avoid overflowing.
 const COPY_H_MARGIN: f32 = 10.0;
 
 impl App {
@@ -36,14 +35,13 @@ impl App {
         let active = snap.broadcast.active();
         let broadcasting = snap.broadcast == Mode::Broadcasting;
         let starting = snap.broadcast == Mode::Starting;
-        // Read window focus up front so the idle start button can autofocus itself
-        // on the first focused frame (immutable read; the layout borrows follow).
+        // Read window focus up front so the idle start button can autofocus on the
+        // first focused frame (immutable read; the layout borrows follow).
         let window_focused = ui.input(|i| i.focused);
 
-        // Advanced settings: host, port, bearer token and optional fixed bind
-        // sockets, prefilled. Collapsed by default so the common case is just the
-        // start button. Each field is a full-width box with its label stacked above
-        // it, at a larger (1.3×) font, so the panel reads as one unified column.
+        // Advanced settings: host, port, bearer token and optional fixed bind sockets,
+        // prefilled. Collapsed by default so the common case is just the start button.
+        // Each field is a full-width box with its label stacked above, at 1.3× font.
         egui::CollapsingHeader::new("Advanced settings")
             .default_open(false)
             .show(ui, |ui| {
@@ -86,8 +84,8 @@ impl App {
                     ui.add_space(8.0);
                     ui.label(egui::RichText::new("Bearer token").size(big));
                     let mut token = self.config.bearer_token.clone().unwrap_or_default();
-                    // Mask the secret by default (password dots) so a bearer token is not
-                    // left legible on screen; the eye toggle reveals it in cleartext.
+                    // Mask the secret by default (password dots); the eye toggle reveals
+                    // it in cleartext.
                     let eye_w = 34.0;
                     let field_w =
                         (ui.available_width() - eye_w - ui.spacing().item_spacing.x).max(0.0);
@@ -112,10 +110,9 @@ impl App {
                         };
                     }
 
-                    // Optional fixed bind sockets. Empty (the default) binds an
-                    // ephemeral port and the ticket changes each session. A
-                    // streamer with a static public IP can pin `ip:port` here so
-                    // the ticket stays byte stable across sessions.
+                    // Optional fixed bind sockets. Empty (the default) binds an ephemeral
+                    // port and the ticket changes each session. A streamer with a static
+                    // public IP can pin `ip:port` here so the ticket stays byte-stable.
                     ui.add_space(8.0);
                     let mut v4 = self.config.broadcast_bind_ipv4.clone().unwrap_or_default();
                     field(ui, "Bind IPv4:", Some("e.g. 203.0.113.7:45678"), &mut v4);
@@ -130,10 +127,10 @@ impl App {
                 });
             });
 
-        // Once live, reveal the two click-to-copy boxes and the statistics. While
-        // idle, still surface the saved ticket so it can be copied and refreshed for
-        // the next broadcast — but never offer a refresh live, since rebinding the
-        // endpoint mid-stream would tear down the running session.
+        // Once live, reveal the two click-to-copy boxes and the statistics. While idle,
+        // still surface the saved ticket so it can be copied and refreshed for the next
+        // broadcast — but never offer a refresh live, since rebinding the endpoint
+        // mid-stream would tear down the running session.
         if broadcasting {
             ui.add_space(12.0);
             section_tick(ui, "Give OBS this WHIP server URL:", ACCENT);
@@ -145,12 +142,11 @@ impl App {
             let w = (ui.available_width() - COPY_H_MARGIN * 2.0).max(0.0);
             self.copy_box(ui, "ticket", &ticket, w);
 
-            // Remember the ticket we are actually showing, so the most recent
-            // broadcast survives restarts (for reference / history). This is *not*
-            // re-advertised as the live ticket on the next broadcast — that is
-            // always freshly minted from the live endpoint address so viewers get
-            // current transport hints. Guarded to a real change so we never
-            // rewrite config.json every frame.
+            // Remember the ticket we are showing, so the most recent broadcast survives
+            // restarts (for reference / history). This is *not* re-advertised as the
+            // live ticket on the next broadcast — that is always freshly minted from the
+            // live endpoint address so viewers get current transport hints. Guarded to a
+            // real change so we never rewrite config.json every frame.
             let changed = snap
                 .ticket
                 .as_ref()
@@ -189,19 +185,16 @@ impl App {
             error_callout(ui, err);
         }
 
-        // The hint sits under the content, just above the primary action. While OBS
-        // is actually delivering media, show nothing here: the statistics panel
-        // already proves the stream is live. The "waiting" hint only appears until
-        // the first media arrives from OBS, and a live viewer count in the accent
-        // colour reads at a glance once viewers join.
+        // The hint sits under the content, just above the primary action. While OBS is
+        // delivering media, show nothing: the statistics panel already proves the stream
+        // is live. A live viewer count in the accent colour reads at a glance.
         if broadcasting || starting {
             let viewers = snap.stats.map(|s| s.viewers).unwrap_or(0);
             let receiving = snap
                 .stats
                 .is_some_and(|s| s.video_kbps > 0.0 || s.audio_kbps > 0.0);
             if starting {
-                // A small rotating arc beside the hint so the wait for OBS to
-                // deliver has visible progress instead of a static label.
+                // A rotating arc beside the hint so the wait has visible progress.
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     spinner(ui, self.pulse.elapsed().as_secs_f32(), ACCENT);
@@ -216,10 +209,9 @@ impl App {
                     ),
                 );
             } else if !receiving {
-                // A small breathing dot (the same "live reads as an active signal"
-                // language as the status dot) so the wait for OBS to deliver reads
-                // as an active wait rather than a static label. The dot breathes on
-                // the shared pulse clock and carries a soft sonar ring.
+                // A breathing dot (the same "live reads as an active signal" language as
+                // the status dot) so the wait for OBS reads as active, not static. The
+                // dot breathes on the shared pulse clock and carries a soft sonar ring.
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     let secs = self.pulse.elapsed().as_secs_f32();
@@ -234,18 +226,16 @@ impl App {
             }
         }
 
-        // The primary action sits under the content, full width, so it reads as the
-        // one big commitment after the (optional) settings and the shareable
-        // ticket/stats above it, moving down the panel as the content grows.
+        // The primary action sits under the content, full width, so it reads as the one
+        // big commitment after the (optional) settings and shareable ticket/stats above.
         const BUTTON_H: f32 = 36.0;
         const BUTTON_GAP: f32 = 12.0;
         ui.add_space(BUTTON_GAP);
         let bw = ui.available_width();
         if broadcasting || starting {
             // A subtle red halo behind the Stop button, so the one control that tears
-            // down a live stream reads as a "stop" action at a glance (the same muted
-            // red the tab uses for errors). The halo also contracts on press, so the
-            // teardown reads as physically pressed in.
+            // down a live stream reads as a "stop" action at a glance (the same muted red
+            // the tab uses for errors). The halo also contracts on press.
             let stop_rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(bw, BUTTON_H));
             let hovered = pointer_over(ui, stop_rect);
             let pressed = pointer_pressed_over(ui, stop_rect);
@@ -258,13 +248,11 @@ impl App {
                 self.config.save();
             }
         } else {
-            // A soft accent halo behind the hero action, so the one big commitment
-            // reads as lit by the live green rather than a flat button. Painted
-            // before the button so the button covers the halo's centre. The fixed
-            // `.fill()` below suppresses egui's own hover feedback, so the hover is
-            // read from the pointer and lifts both the halo and the fill. The press
-            // is read the same way and pushes the button in (fill darkens, halo
-            // contracts), so the hero action feels tactile rather than flat.
+            // A soft accent halo behind the hero action, so the one big commitment reads
+            // as lit by the live green. Painted before the button so the button covers
+            // the halo's centre. The fixed `.fill()` suppresses egui's own hover
+            // feedback, so hover is read from the pointer and lifts both halo and fill;
+            // the press is read the same way and pushes the button in.
             let start_rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(bw, BUTTON_H));
             let hovered = pointer_over(ui, start_rect);
             let pressed = pointer_pressed_over(ui, start_rect);
@@ -290,8 +278,8 @@ impl App {
             // Autofocus the start control on the first window-focused idle frame so
             // Enter/Space starts it; the Stop button (shown while active) is never
             // autofocused, so a stray Enter can never tear down a live stream. The
-            // button's auto id is stable across frames, so focus requested off
-            // `resp` sticks to it without needing an explicit id.
+            // button's auto id is stable across frames, so focus requested off `resp`
+            // sticks without an explicit id.
             let resp = ui.add_sized([bw, BUTTON_H], button);
             if self.focus_primary && window_focused {
                 if !active {
@@ -299,8 +287,8 @@ impl App {
                 }
                 self.focus_primary = false;
             }
-            // Mouse click and keyboard (Space/Enter on the focused button) both
-            // arrive via `clicked()` — a single trigger, no parallel Enter gate.
+            // Mouse click and keyboard (Space/Enter on the focused button) both arrive
+            // via `clicked()` — a single trigger, no parallel Enter gate.
             if resp.clicked() {
                 self.start_broadcast(ui.ctx());
             }
@@ -310,10 +298,10 @@ impl App {
     /// A ticket copy box with an optional trailing button on its right edge.
     ///
     /// When `allow` is false the row is just the full-width copy box (used while
-    /// broadcasting, where a live rebind would tear down the running session). The
-    /// button shows `label`, or `busy_label` while a rebind is already in flight, and
-    /// is disabled meanwhile. Returns `true` on the frame the button is clicked, so the
-    /// caller dispatches the action (relay refresh vs. full ticket reset).
+    /// broadcasting, where a live rebind would tear down the running session). The button
+    /// shows `label`, or `busy_label` while a rebind is in flight, and is disabled
+    /// meanwhile. Returns `true` on the frame the button is clicked, so the caller
+    /// dispatches the action (relay refresh vs. full ticket reset).
     pub(crate) fn ticket_row(
         &mut self,
         ui: &mut Ui,
@@ -330,8 +318,8 @@ impl App {
         }
         let refreshing = self.state.lock().unwrap().refreshing;
         ui.horizontal(|ui| {
-            // Reserve room for the button (and the box frame's horizontal margins) so
-            // the box neither overflows the row nor pushes the button offscreen.
+            // Reserve room for the button (and the box frame's margins) so the box
+            // neither overflows the row nor pushes the button offscreen.
             let reserve = 120.0;
             let w = (ui.available_width()
                 - reserve
@@ -339,8 +327,8 @@ impl App {
                 - COPY_H_MARGIN * 2.0)
                 .max(0.0);
             self.copy_box(ui, key, text, w);
-            // Match the box's rendered height so the button sits flush with it, and
-            // tint it with the same accent so the pair reads as one control group.
+            // Match the box's rendered height so the button sits flush, and tint it with
+            // the same accent so the pair reads as one control group.
             let h = self.copy_box_height();
             let label = if refreshing { busy_label } else { label };
             let btn = egui::Button::new(label)
@@ -352,8 +340,8 @@ impl App {
         .inner
     }
 
-    /// The rendered height of a [`App::copy_box`] row (text line plus the frame's
-    /// vertical inner margins), used to size a trailing button to sit flush with it.
+    /// The rendered height of a [`App::copy_box`] row, used to size a trailing button to
+    /// sit flush with it.
     fn copy_box_height(&self) -> f32 {
         COPY_ROW_H + COPY_V_MARGIN * 2.0
     }
@@ -381,7 +369,7 @@ impl App {
 
     /// Mint a brand-new identity: generate a fresh keypair, persist it, then rebind and
     /// mint a ticket from it. Unlike a relay refresh this changes the endpoint id, so
-    /// previously shared tickets stop resolving to this stream.
+    /// previously shared tickets stop resolving.
     pub(crate) fn reset_ticket(&mut self, ctx: &Context) {
         let bind = match parse_bind(&self.config) {
             Ok(bind) => bind,
@@ -406,20 +394,17 @@ impl App {
 
     /// A read-only, selectable box that copies its text on click.
     ///
-    /// `width` is the box's laid-out width; callers pass `ui.available_width()` for
-    /// a full-row box, or a reduced width when a trailing widget (the refresh button)
-    /// shares the row.
+    /// `width` is the box's laid-out width; callers pass `ui.available_width()` for a
+    /// full-row box, or a reduced width when a trailing widget shares the row.
     ///
-    /// The "Copied" confirmation is drawn by [`App::toast_overlay`] as a floating
-    /// pill, so it never reflows the surrounding layout. This widget owns the
-    /// click and the hover affordance that advertises it.
+    /// The "Copied" confirmation is drawn by [`App::toast_overlay`] as a floating pill,
+    /// so it never reflows the surrounding layout. This widget owns the click and the
+    /// hover affordance that advertises it.
     fn copy_box(&mut self, ui: &mut Ui, key: &'static str, text: &str, width: f32) {
-        // A faint accent tint reads the box as an interactive input surface. The
-        // whole frame is the click target (not just the glyphs), so the copy
-        // affordance is easy to hit and the tinted padding never feels dead.
-        // A click briefly lifts the tint toward the accent (see `flash_alpha`).
-        // `copied` is `Copy`, so reading it here leaves it intact for the click
-        // handler below; the click's repaint shows the flash from the next frame.
+        // A faint accent tint reads the box as an interactive input surface. The whole
+        // frame is the click target (not just the glyphs), so the copy affordance is easy
+        // to hit and the tinted padding never feels dead. A click briefly lifts the tint
+        // toward the accent (see `flash_alpha`).
         let flash = self
             .copied
             .filter(|(k, _)| *k == key)
@@ -435,9 +420,9 @@ impl App {
                 COPY_V_MARGIN as i8,
             ));
         let inner = frame.show(ui, |ui| {
-            // Reserve a gutter on the right for the copy glyph so a long ticket
-            // neither runs under the mark nor off the box. The full string is still
-            // copied on click; only the *display* is elided.
+            // Reserve a gutter on the right for the copy glyph so a long ticket neither
+            // runs under the mark nor off the box. The full string is still copied on
+            // click; only the *display* is elided.
             let text_width = (width - GLYPH_GUTTER).max(0.0);
             let display = fit_monospace(ui, text, text_width);
             let font_id = egui::TextStyle::Monospace.resolve(ui.style());
@@ -445,41 +430,35 @@ impl App {
             let galley = ui
                 .painter()
                 .layout_no_wrap(display, font_id, egui::Color32::PLACEHOLDER);
-            // Lay the value out ourselves at the row's left edge rather than via
-            // `add_sized`, which was offsetting the galley toward the centre and
-            // spilling long values past the box.
+            // Lay the value out at the row's left edge rather than via `add_sized`,
+            // which was offsetting the galley toward the centre and spilling long values.
             let row = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(width, COPY_ROW_H));
             ui.allocate_rect(row, egui::Sense::hover());
             let y = row.center().y - galley.rect.height() * 0.5;
             ui.painter().galley(egui::pos2(row.min.x, y), galley, color);
         });
         // Sense the click over the frame's full rect so the padding is live too.
-        // `on_hover_text` consumes the response, so interactions are read off it
-        // before it is handed to the tooltip.
+        // `on_hover_text` consumes the response, so interactions are read off it before
+        // it is handed to the tooltip.
         let rect = inner.response.rect;
-        // Whether the pointer is over the box this frame, for the hover affordance.
-        // Read from the pointer (rather than the response, which is computed below)
-        // so the copy glyph and the soft glow can be lit before the interaction is
-        // sensed. For a stable rect this agrees with `resp.hovered()` below.
+        // Whether the pointer is over the box this frame, for the hover affordance. Read
+        // from the pointer (rather than the response, computed below) so the copy glyph
+        // and soft glow can be lit before the interaction is sensed.
         let hovered = pointer_over(ui, rect);
-        // A faint light catch along the top edge, so the box reads as a surface lit
-        // from above rather than a flat tint. Painted first, so the copy glyph and
-        // the hover stroke (drawn next) sit on top of it.
+        // A faint light catch along the top edge, so the box reads as a surface lit from
+        // above. Painted first, so the glyph and hover stroke sit on top.
         top_bevel(ui.painter(), rect, frame.corner_radius.nw);
         // A soft accent glow around the box on hover, so the copy affordance reads as
-        // lit and alive under the mouse (the same halo language as the hero buttons,
-        // but dimmer: the box is a secondary surface, not the hero action). Drawn
-        // before the glyph so the glyph sits on top of the glow.
+        // lit under the mouse (same halo language as the hero buttons, but dimmer: the
+        // box is a secondary surface). Drawn before the glyph so the glyph is on top.
         if hovered {
             soft_glow(ui.painter(), rect, frame.corner_radius, ACCENT);
         }
         // A small "copy" glyph (two overlapping sheets) at the right edge, painted
         // non-interactively so it never steals the box's click. It brightens on hover
-        // (0.5 -> 0.8) so the "click to copy" affordance reads at a glance. The moment
-        // the text is copied it cross-fades into a checkmark for the flash's life —
-        // the confirmation right at the point of action, not only in the toast far
-        // below — and fades back to the sheets as the flash fades. `flash` (0..1)
-        // drives both sides: the checkmark's strength and the sheets' dimming.
+        // (0.5 -> 0.8). The moment the text is copied it cross-fades into a checkmark
+        // for the flash's life — the confirmation right at the point of action, not only
+        // in the toast far below. `flash` (0..1) drives both sides.
         let rest = if hovered { 0.8f32 } else { 0.5f32 };
         let sheets = rest.max(flash) * (1.0 - flash);
         if flash > 0.005 {
@@ -522,11 +501,10 @@ impl App {
         let inner = ui.group(|ui| {
             section_tick(ui, "Statistics", ACCENT);
             let stats = snap.stats.unwrap_or_default();
-            // Ease the displayed measurements toward the latest sample, so the numbers
+            // Ease the displayed measurements toward the latest sample so the numbers
             // settle smoothly instead of jumping on each 5-second tick. The elapsed
-            // counter is shown exactly (it is a clock, not a measurement), so only the
-            // measured stats are eased. `self.last_frame` was set at the top of the
-            // frame in `draw`, so this is the current frame's wall-clock delta.
+            // counter is shown exactly (it's a clock, not a measurement).
+            // `self.last_frame` was set at the top of the frame in `draw`.
             let dt = (Instant::now() - self.last_frame)
                 .as_secs_f32()
                 .clamp(0.0, 0.1);
@@ -541,9 +519,8 @@ impl App {
             self.disp_video_fps = video_fps;
             self.disp_audio_kbps = audio_kbps;
             // While the numbers are still settling, ask for display-rate frames so the
-            // ease is smooth; the moment they all settle the guard disarms and the panel
-            // falls back to the 250 ms session cadence (the window is already awake while
-            // broadcasting, so this only tightens the cadence briefly after each tick).
+            // ease is smooth; once settled the guard disarms and the panel falls back to
+            // the 250 ms session cadence.
             let settled = (viewers - stats.viewers as f32).abs() <= 0.05
                 && (video_kbps - stats.video_kbps as f32).abs() <= 0.05
                 && (video_fps - stats.video_fps as f32).abs() <= 0.05
@@ -569,9 +546,8 @@ impl App {
                             ))
                             .monospace(),
                         );
-                        // A small trend arrow showing the bitrate's recent drift, so a
-                        // wobbly stream's direction (building, dropping, holding) is
-                        // readable at a glance without reading the number.
+                        // A trend arrow showing the bitrate's recent drift, so a wobbly
+                        // stream's direction is readable without reading the number.
                         trend_arrow(ui, bitrate_trend(&snap.video_kbps_history));
                     });
                     ui.end_row();
@@ -585,8 +561,7 @@ impl App {
                     ui.end_row();
                 });
             // A sparkline of the recent video bitrate, so a wobbly stream is visible
-            // at a glance without reading the number. Drawn only once two samples
-            // exist (the first 5-second tick alone is not enough to form a line).
+            // without reading the number. Drawn only once two samples exist.
             if snap.video_kbps_history.len() >= 2 {
                 ui.add_space(6.0);
                 bitrate_sparkline(
@@ -596,8 +571,7 @@ impl App {
                 );
             }
         });
-        // A faint light catch along the panel's top edge, matching the copy boxes,
-        // so the panel reads as a surface lit from above.
+        // A faint light catch along the panel's top edge, matching the copy boxes.
         top_bevel(
             ui.painter(),
             inner.response.rect,
@@ -618,9 +592,9 @@ impl App {
         let listen = format!("{host}:{port}");
         let bearer_token = self.config.bearer_token();
 
-        // Parse the optional fixed bind addresses. Empty means ephemeral; a bad
-        // value is surfaced to the UI rather than silently ignored, so a typo does
-        // not quietly fall back to an ephemeral socket and a changing ticket.
+        // Parse the optional fixed bind addresses. Empty means ephemeral; a bad value is
+        // surfaced to the UI rather than silently ignored, so a typo doesn't quietly fall
+        // back to an ephemeral socket and a changing ticket.
         let bind = match parse_bind(&self.config) {
             Ok(bind) => bind,
             Err(e) => {
@@ -648,11 +622,9 @@ impl App {
     }
 }
 
-/// Parse the configured fixed bind addresses, `None`/empty meaning ephemeral.
-///
-/// IPv4 is parsed as `ip:port`; IPv6 as `[ip]:port` (the brackets are optional, so
-/// a bare `::1:45678` is rejected in favour of the explicit `[::1]:45678` form,
-/// matching `SocketAddrV6`'s expected syntax).
+/// Parse the configured fixed bind addresses, `None`/empty meaning ephemeral. IPv4 is
+/// parsed as `ip:port`; IPv6 as `[ip]:port` (brackets optional, so a bare `::1:45678`
+/// is rejected in favour of `[::1]:45678`, matching `SocketAddrV6`'s syntax).
 fn parse_bind(config: &Config) -> Result<BindAddrs, String> {
     let ipv4 = match config.broadcast_bind_ipv4.as_deref().map(str::trim) {
         Some(s) if !s.is_empty() => Some(
@@ -671,12 +643,10 @@ fn parse_bind(config: &Config) -> Result<BindAddrs, String> {
     Ok(BindAddrs { ipv4, ipv6 })
 }
 
-/// The Viewers cell: a large count.
-///
-/// With viewers it reads bright green so "live" is obvious at a glance; at zero it
-/// sits dim, so an idle broadcast does not shout. `viewers` (the true count) picks
-/// the colour; `display` is the eased count shown as the number, so the value
-/// counts up smoothly as viewers join.
+/// The Viewers cell: a large count. With viewers it reads bright green so "live" is
+/// obvious at a glance; at zero it sits dim, so an idle broadcast doesn't shout.
+/// `viewers` (the true count) picks the colour; `display` is the eased count shown as
+/// the number, so the value counts up smoothly as viewers join.
 fn viewers_cell(ui: &mut Ui, viewers: usize, display: f32) {
     let count = if viewers > 0 {
         ACCENT
@@ -691,10 +661,9 @@ fn viewers_cell(ui: &mut Ui, viewers: usize, display: f32) {
     );
 }
 
-/// Map bitrate samples (kbit/s, oldest first) to pixel points spanning `rect`:
-/// the oldest sample at the left edge, newest at the right, auto-scaled to the
-/// window's peak with a 60 kbit/s floor so a quiet but steady stream still
-/// shows its shape instead of hugging the bottom edge.
+/// Map bitrate samples (kbit/s, oldest first) to pixel points spanning `rect`: oldest at
+/// the left edge, newest at the right, auto-scaled to the window's peak with a 60 kbit/s
+/// floor so a quiet but steady stream still shows its shape.
 fn sparkline_points(samples: &[f64], rect: egui::Rect) -> Vec<egui::Pos2> {
     let max = samples.iter().copied().fold(0.0, f64::max).max(60.0);
     samples
@@ -708,9 +677,8 @@ fn sparkline_points(samples: &[f64], rect: egui::Rect) -> Vec<egui::Pos2> {
         .collect()
 }
 
-/// The direction of the video bitrate over the recent samples: a small visual cue
-/// beside the Video stat so a wobbly stream's drift (building up, dropping, or
-/// holding steady) is readable at a glance without reading the number.
+/// The direction of the video bitrate over the recent samples, a small visual cue beside
+/// the Video stat so a wobbly stream's drift is readable without reading the number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Trend {
     /// The bitrate is building up over the recent samples.
@@ -721,13 +689,12 @@ pub(crate) enum Trend {
     Flat,
 }
 
-/// Classify the video bitrate's recent direction from its samples (kbit/s, oldest
-/// first). The newest sample is compared against the sample up to three ticks back
-/// (about fifteen seconds at the 5-second stats tick); a change larger than a small
-/// relative band (3% of the older sample, floored at 5 kbit/s) reads as rising or
-/// falling, and anything within the band — or too few samples to judge — reads as
-/// flat. Pure (the samples are injected) so the classification is testable without a
-/// live window.
+/// Classify the video bitrate's recent direction from its samples (kbit/s, oldest first).
+/// The newest sample is compared against the sample up to three ticks back (~15 s at the
+/// 5-second tick); a change larger than a small relative band (3% of the older sample,
+/// floored at 5 kbit/s) reads as rising or falling, and anything within the band — or
+/// too few samples to judge — reads as flat. Pure (samples injected) so the
+/// classification is testable without a live window.
 pub(crate) fn bitrate_trend(samples: &[f64]) -> Trend {
     if samples.len() < 2 {
         return Trend::Flat;
@@ -736,8 +703,8 @@ pub(crate) fn bitrate_trend(samples: &[f64]) -> Trend {
     let prev = samples[samples.len() - 1 - back];
     let last = *samples.last().unwrap();
     let delta = last - prev;
-    // A small relative band, so a steady stream does not flicker between arrows on
-    // normal jitter, but a real drift (a viewer joining, a codec switching) shows.
+    // A small relative band, so a steady stream doesn't flicker between arrows on normal
+    // jitter, but a real drift (a viewer joining, a codec switching) shows.
     let band = prev.abs() * 0.03 + 5.0;
     if delta > band {
         Trend::Rising
@@ -749,11 +716,11 @@ pub(crate) fn bitrate_trend(samples: &[f64]) -> Trend {
 }
 
 /// A small hand-painted trend arrow for the Video stat: an up triangle in the live
-/// accent (rising), a down triangle in the error red (falling), or a short dash in a
-/// dim grey (flat). Hand-painted (a mesh / line segment) rather than a text glyph, so
-/// it does not depend on a symbol the bundled faces may not carry — the same reason
-/// the copy glyph and the close button are drawn by hand. Purely decorative: it takes
-/// a hover-sense slot but is never clicked.
+/// accent (rising), a down triangle in the error red (falling), or a short dash in dim
+/// grey (flat). Hand-painted (mesh / line segment) rather than a text glyph, so it
+/// doesn't depend on a symbol the bundled faces may not carry — the same reason the copy
+/// glyph and close button are drawn by hand. Decorative: takes a hover-sense slot, never
+/// clicked.
 fn trend_arrow(ui: &mut Ui, trend: Trend) {
     let size = 9.0;
     let (rect, _resp) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
@@ -795,13 +762,11 @@ fn trend_arrow(ui: &mut Ui, trend: Trend) {
     }
 }
 
-/// A small video-bitrate sparkline for the statistics panel: a vertical
-/// gradient area fill under a 1.5 px line, with a small "now" dot on the newest
-/// sample. Purely decorative of data the panel already shows as a number, so it
-/// is non-interactive apart from a hover tooltip. `secs` drives the "now" dot's
-/// sonar pulse and is expected to advance between repaints (repaints already fire
-/// while broadcasting), so the live edge reads as an active signal rather than a
-/// static mark.
+/// A small video-bitrate sparkline for the statistics panel: a vertical gradient area
+/// fill under a 1.5 px line, with a small "now" dot on the newest sample. Decorative of
+/// data the panel already shows as a number, so it is non-interactive apart from a hover
+/// tooltip. `secs` drives the "now" dot's sonar pulse and is expected to advance between
+/// repaints, so the live edge reads as an active signal.
 fn bitrate_sparkline(ui: &mut Ui, samples: &[f64], secs: f32) {
     let width = ui.available_width();
     let height = 26.0;
@@ -810,11 +775,10 @@ fn bitrate_sparkline(ui: &mut Ui, samples: &[f64], secs: f32) {
     }
     let now = samples.last().copied().unwrap_or(0.0);
     // A small "now" value, right-aligned above the chart, so the current bitrate is
-    // readable at a glance without hovering (the tooltip keeps the fuller two-minute
-    // context). Weak and monospaced so it reads as a caption, not a competing number.
-    // Allocated at a fixed height: `with_layout` would grow the child UI to fill all
-    // remaining space, inflating the stats group and forcing the scroll area to
-    // overflow (and show its bar) on every frame.
+    // readable without hovering (the tooltip keeps the fuller two-minute context). Weak
+    // and monospaced so it reads as a caption. Allocated at a fixed height:
+    // `with_layout` would grow the child UI to fill all remaining space, inflating the
+    // stats group and forcing the scroll area to overflow on every frame.
     ui.allocate_ui_with_layout(
         egui::vec2(width, 14.0),
         egui::Layout::right_to_left(egui::Align::Center),
@@ -832,21 +796,19 @@ fn bitrate_sparkline(ui: &mut Ui, samples: &[f64], secs: f32) {
         return;
     }
     let points = sparkline_points(samples, rect);
-    // A faint baseline along the bottom edge, so the area fill and the line read as
-    // sitting on a ground rather than floating. Dimmer than the line, so it never
-    // competes with the data.
+    // A faint baseline along the bottom edge, so the area fill and line read as sitting
+    // on a ground. Dimmer than the line, so it never competes with the data.
     ui.painter().hline(
         rect.left()..=rect.right(),
         rect.bottom(),
         egui::Stroke::new(1.0, ACCENT.gamma_multiply(0.25)),
     );
-    // Area fill under the line: a triangle fan from the bottom-left corner whose
-    // alpha is a function of height — strongest just below the line, fading to
-    // nothing at the bottom edge. A colour that is linear in y interpolates exactly
-    // across each triangle, so the gradient is smooth. The same "lit from above" cue
-    // as the panel ground and the top bevels. The fan is closed with a bottom-right
-    // vertex so the fill reaches the line across the full width (a fan to the line
-    // points alone leaves the region under the right end of the line unfilled).
+    // Area fill under the line: a triangle fan from the bottom-left corner whose alpha is
+    // a function of height — strongest just below the line, fading to nothing at the
+    // bottom edge. A colour linear in y interpolates exactly across each triangle, so
+    // the gradient is smooth (the same "lit from above" cue as the panel ground and top
+    // bevels). The fan is closed with a bottom-right vertex so the fill reaches the line
+    // across the full width.
     let fill = |y: f32| {
         let t = ((rect.max.y - y) / rect.height()).clamp(0.0, 1.0);
         ACCENT.gamma_multiply(0.22 * t)
@@ -861,11 +823,10 @@ fn bitrate_sparkline(ui: &mut Ui, samples: &[f64], secs: f32) {
     // Close the fan along the bottom edge: bottom-left → last point → bottom-right.
     mesh.colored_vertex(egui::pos2(rect.right(), rect.bottom()), fill(rect.bottom()));
     ui.painter().add(egui::Shape::mesh(mesh));
-    // A faint dashed horizontal line at the recent average, so the current value and
-    // the peak can be read against the stream's "normal" level (the peak marker shows
-    // the high, the "now" dot the current, and this the level they drift around).
-    // Dashed (not solid) and a muted green-grey (not the data's accent), so it reads
-    // as a reference, not a fourth data series.
+    // A faint dashed horizontal line at the recent average, so the current value and the
+    // peak can be read against the stream's "normal" level. Dashed (not solid) and a
+    // muted green-grey (not the data's accent), so it reads as a reference, not a fourth
+    // data series.
     let avg = samples.iter().sum::<f64>() / samples.len() as f64;
     let max = samples.iter().copied().fold(0.0, f64::max).max(60.0);
     let avg_y = rect.max.y - 2.0 - (avg / max) as f32 * (rect.height() - 6.0);
@@ -886,11 +847,10 @@ fn bitrate_sparkline(ui: &mut Ui, samples: &[f64], secs: f32) {
             .line_segment([w[0], w[1]], egui::Stroke::new(1.5, ACCENT));
     }
     // A subtle peak marker: a faint vertical line from the recent peak down to the
-    // baseline, with a small dot at the peak, so a wobbly stream's headroom is
-    // visible at a glance (how far the current bitrate is from the recent peak).
-    // It is drawn before the "now" dot so the live edge stays on top, and is
-    // skipped when the peak *is* the newest sample (the "now" dot already marks
-    // that point, so a second mark there would only clutter the live edge).
+    // baseline, with a small dot at the peak, so a wobbly stream's headroom is visible
+    // (how far the current bitrate is from the recent peak). Drawn before the "now" dot
+    // so the live edge stays on top, and skipped when the peak *is* the newest sample
+    // (the "now" dot already marks that point).
     if let Some((peak_idx, _)) = samples
         .iter()
         .enumerate()
@@ -907,33 +867,29 @@ fn bitrate_sparkline(ui: &mut Ui, samples: &[f64], secs: f32) {
                 .circle_filled(peak, 1.8, ACCENT.gamma_multiply(0.55));
         }
     }
-    // A small dot on the newest sample, so "where the stream is right now" has a
-    // mark of its own rather than only the line's right edge. A soft sonar pulse
-    // around the dot (the same language as the status and viewers dots) makes the
-    // live edge read as an active signal rather than a static mark.
+    // A small dot on the newest sample, so "where the stream is right now" has a mark
+    // of its own. A soft sonar pulse around the dot (same language as the status and
+    // viewers dots) makes the live edge read as an active signal.
     if let Some(last) = points.last() {
         ui.painter().circle_filled(*last, 2.5, ACCENT);
         sonar_pulse(ui.painter(), *last, 3.0, secs, 2.0, ACCENT);
     }
-    // The tooltip carries the current value, so a hover reads the number without
-    // leaving the chart. The recent peak is included too (the peak marker's value),
-    // and the recent average (the dashed reference line's value), so a hover reads
-    // where the stream is now, its recent high, and its normal level.
+    // The tooltip carries the current value, the recent peak, and the recent average, so
+    // a hover reads where the stream is now, its recent high, and its normal level.
     let peak = samples.iter().copied().fold(0.0, f64::max);
     resp.on_hover_text(format!(
         "video bitrate, last two minutes — now {now:.0} kbit/s, peak {peak:.0} kbit/s, avg {avg:.0} kbit/s"
     ));
 }
 
-/// Middle-elide a monospace string so its rendered width fits `max_width`: the
-/// first and last runs of characters are kept and the middle is replaced with an
-/// ellipsis. Only the *display* is truncated — callers still copy the full string.
+/// Middle-elide a monospace string so its rendered width fits `max_width`: the first
+/// and last runs of characters are kept and the middle is replaced with an ellipsis.
+/// Only the *display* is truncated — callers still copy the full string.
 ///
 /// The tail is kept on purpose: a ticket's transport hints (relay, ephemeral ports)
 /// change at the end, so a head-only truncation would look identical between refreshes
-/// even when the ticket had actually changed. Measured with the same monospace face
-/// the box renders with, so the estimate is exact; the constant advance of a monospace
-/// font lets us compute the cut in one step rather than re-laying out per character.
+/// even when the ticket had changed. Measured with the same monospace face the box
+/// renders with, so the estimate is exact.
 fn fit_monospace(ui: &Ui, text: &str, max_width: f32) -> String {
     let font_id = egui::TextStyle::Monospace.resolve(ui.style());
     let full = ui
@@ -949,7 +905,7 @@ fn fit_monospace(ui: &Ui, text: &str, max_width: f32) -> String {
     }
     // Whole characters that fit, minus one slot for the ellipsis. Split the budget so
     // both ends stay visible; the head gets the leftover so the tail (the part that
-    // actually changes) is never squeezed to nothing.
+    // changes) is never squeezed to nothing.
     let budget = ((max_width / advance) as usize).saturating_sub(1);
     if budget < 2 {
         return "…".to_string();
@@ -961,11 +917,10 @@ fn fit_monospace(ui: &Ui, text: &str, max_width: f32) -> String {
     format!("{head_s}…{tail_s}")
 }
 
-/// The two sheets of the copy glyph, anchored at the right edge of a copy box.
-///
-/// Returns `[back, front]`: two small overlapping rounded rects, the front offset
-/// up-right of the back, so the pair reads as the universal "copy" mark without
-/// relying on a font glyph the bundled faces may not carry.
+/// The two sheets of the copy glyph, anchored at the right edge of a copy box. Returns
+/// `[back, front]`: two small overlapping rounded rects, the front offset up-right of
+/// the back, so the pair reads as the universal "copy" mark without relying on a font
+/// glyph the bundled faces may not carry.
 fn copy_glyph_rects(rect: egui::Rect) -> [egui::Rect; 2] {
     let size = egui::vec2(8.0, 9.0);
     let cx = rect.right() - 16.0;
@@ -977,10 +932,9 @@ fn copy_glyph_rects(rect: egui::Rect) -> [egui::Rect; 2] {
 }
 
 /// The two strokes of the checkmark the copy glyph becomes the moment its text is
-/// copied: a short down-stroke into a long up-stroke, centred on the glyph's
-/// position (the same anchor as [`copy_glyph_rects`]), so the confirmation reads as
-/// a "done" mark right at the point of action. Kept inside the box's right gutter,
-/// so it never overflows the value line or the window.
+/// copied: a short down-stroke into a long up-stroke, centred on the glyph's position
+/// (the same anchor as [`copy_glyph_rects`]), so the confirmation reads as a "done" mark
+/// at the point of action. Kept inside the box's right gutter.
 fn checkmark_segments(rect: egui::Rect) -> [[egui::Pos2; 2]; 2] {
     let cx = rect.right() - 16.0;
     let cy = rect.center().y;
@@ -1071,9 +1025,8 @@ mod tests {
         assert!(parse_bind(&cfg).is_err());
     }
 
-    /// The copy glyph's two sheets sit inside the box, are non-degenerate, and the
-    /// front reads up-right of the back. Guards against a misplaced or absent glyph
-    /// that a full-render shape count would not catch.
+    /// The copy glyph's two sheets sit inside the box, non-degenerate, front up-right
+    /// of the back — a misplaced glyph passes a shape-count check but not this.
     #[test]
     fn copy_glyph_sheets_are_in_bounds_and_offset() {
         let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 34.0));
@@ -1094,10 +1047,9 @@ mod tests {
         assert!(front_c.y < back_c.y, "front is above back");
     }
 
-    /// `fit_monospace` leaves text that already fits untouched, and middle-elides a
-    /// long value to a measured width that fits — keeping both the head and the tail
-    /// so a ticket whose transport hints change at the end visibly changes between
-    /// refreshes. The full string is still what gets copied; this checks the display.
+    /// `fit_monospace` leaves text that fits untouched, and middle-elides long values
+    /// to a width that fits — keeping head and tail so a ticket's changing transport
+    /// hints stay visible between refreshes. The full string is what gets copied.
     #[test]
     fn fit_monospace_elides_only_when_too_wide() {
         let ctx = egui::Context::default();
@@ -1140,9 +1092,9 @@ mod tests {
         out.textures_delta.clear();
     }
 
-    /// `sparkline_points` spans the rect edge to edge, puts the peak sample above
-    /// the troughs, keeps every point inside the rect, and floors the scale at
-    /// 60 kbit/s so a quiet stream does not hug the bottom edge.
+    /// `sparkline_points` spans the rect edge to edge, peak above troughs, all points
+    /// inside the rect, and floors the scale at 60 kbit/s so quiet streams don't hug
+    /// the bottom edge.
     #[test]
     fn sparkline_points_span_the_rect_and_scale_to_the_peak() {
         let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(100.0, 26.0));
@@ -1169,9 +1121,8 @@ mod tests {
         );
     }
 
-    /// The sparkline's area fill is a vertical gradient (the bottom-edge vertices
-    /// are fully transparent, the line vertices carry the accent's alpha, so the
-    /// fill reads as lit from the line down to nothing), and the newest sample
+    /// The sparkline's area fill is a vertical gradient (bottom-edge vertices
+    /// transparent, line vertices carry the accent's alpha), and the newest sample
     /// carries a small filled "now" dot.
     #[test]
     fn the_sparkline_fills_with_a_vertical_gradient_and_marks_the_now_point() {
@@ -1188,8 +1139,8 @@ mod tests {
         });
         out.textures_delta.clear();
 
-        // The area fill: one mesh; its two bottom-edge vertices are transparent,
-        // and the line vertices are more opaque the higher they sit — the gradient.
+        // The area fill: one mesh, bottom-edge vertices transparent, line vertices
+        // more opaque the higher they sit.
         let mesh = out
             .shapes
             .iter()
@@ -1225,11 +1176,9 @@ mod tests {
         assert!(dot, "the newest sample should carry a filled 'now' dot");
     }
 
-    /// The "now" dot carries a soft sonar pulse (a stroked ring in the accent), so
-    /// the live edge of the chart reads as an active signal rather than a static
-    /// mark — the same language as the status and viewers dots. The ring is a
-    /// stroked circle (width > 0), distinct from the filled dot (width == 0), and it
-    /// expands and fades over the pulse.
+    /// The "now" dot carries a soft sonar pulse (a stroked ring in the accent, same
+    /// language as the status/viewers dots), distinct from the filled dot (width 0);
+    /// it expands and fades over the pulse.
     #[test]
     fn the_sparkline_now_dot_carries_a_sonar_pulse() {
         let raw = egui::RawInput {
@@ -1267,9 +1216,9 @@ mod tests {
         assert!(ring(1.99).is_none(), "a nearly-faded ring paints nothing");
     }
 
-    /// `bitrate_trend` classifies the recent direction: a clear rise reads Rising, a
-    /// clear drop reads Falling, a change within the noise band (and too few samples
-    /// to judge) reads Flat, and a two-sample rise still compares against the first.
+    /// `bitrate_trend` classifies direction: clear rise → Rising, clear drop →
+    /// Falling, within the noise band (or too few samples) → Flat; a two-sample rise
+    /// compares against the first.
     #[test]
     fn bitrate_trend_classifies_rising_falling_and_flat() {
         assert_eq!(bitrate_trend(&[100.0, 100.0, 100.0, 200.0]), Trend::Rising);
@@ -1283,9 +1232,8 @@ mod tests {
         assert_eq!(bitrate_trend(&[100.0, 200.0]), Trend::Rising);
     }
 
-    /// `trend_arrow` paints a triangle mesh for a rising or falling trend (the up /
-    /// down triangle) and a plain dash (a line segment, no mesh) for a flat trend, so
-    /// the three states read as distinct marks.
+    /// `trend_arrow` paints a triangle mesh for rising/falling and a plain dash
+    /// (line segment, no mesh) for flat, so the three states read as distinct marks.
     #[test]
     fn the_trend_arrow_paints_a_triangle_or_a_dash() {
         let raw = egui::RawInput {
@@ -1329,10 +1277,9 @@ mod tests {
         );
     }
 
-    /// The sparkline paints a dashed horizontal average reference line (several short
-    /// segments at the same y in the muted green-grey), distinct from the data line
-    /// (the accent) and the baseline / peak (dimmed accent), so the stream's normal
-    /// level is visible against the current value and the peak.
+    /// The sparkline paints a dashed horizontal average line (short same-y segments in
+    /// muted green-grey), distinct from the accent data line, so normal level is
+    /// visible against current value and peak.
     #[test]
     fn the_sparkline_paints_a_dashed_average_reference_line() {
         let ctx = egui::Context::default();
@@ -1365,8 +1312,8 @@ mod tests {
         );
     }
 
-    /// The eye toggle paints a circle (the eyeball) always, plus a pupil when open and
-    /// a lid line when closed, so the two states read as distinct.
+    /// The eye toggle paints an eyeball circle always, plus a filled pupil when open
+    /// and a lid line when closed, so the two states read as distinct.
     #[test]
     fn the_eye_toggle_paints_an_open_or_closed_eye() {
         let ctx = egui::Context::default();

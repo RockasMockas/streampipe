@@ -44,7 +44,11 @@ fn pulse_factor_peaks_and_troughs_within_bounds() {
 fn flash_alpha_fades_linearly() {
     assert_eq!(flash_alpha(Duration::ZERO, FLASH), 1.0);
     assert_eq!(flash_alpha(FLASH, FLASH), 0.0);
-    assert_eq!(flash_alpha(FLASH * 2, FLASH), 0.0, "clamped past the window");
+    assert_eq!(
+        flash_alpha(FLASH * 2, FLASH),
+        0.0,
+        "clamped past the window"
+    );
     let half = flash_alpha(FLASH / 2, FLASH);
     assert!(half > 0.0 && half < 1.0, "mid-window is between 0 and 1");
     assert!(
@@ -116,7 +120,10 @@ fn log_anim_settles_on_the_target_without_overshooting() {
 fn stat_ease_settles_on_the_target_without_overshooting() {
     // One frame moves partway, never past.
     let step = stat_ease(0.0, 5000.0, 1.0 / 60.0);
-    assert!(step > 0.0 && step < 5000.0, "one frame is partway, got {step}");
+    assert!(
+        step > 0.0 && step < 5000.0,
+        "one frame is partway, got {step}"
+    );
 
     let mut pos = 0.0;
     let mut frames = 0;
@@ -148,7 +155,10 @@ fn tab_fade_settles_on_fully_visible_without_overshooting() {
     assert!(!settled, "mid-fade is not settled");
 
     assert_eq!(tab_fade_step(TAB_FADE_SECS, TAB_FADE_SECS), (1.0, true));
-    assert_eq!(tab_fade_step(TAB_FADE_SECS * 5.0, TAB_FADE_SECS), (1.0, true));
+    assert_eq!(
+        tab_fade_step(TAB_FADE_SECS * 5.0, TAB_FADE_SECS),
+        (1.0, true)
+    );
 
     let mut prev = 0.0;
     let mut t = 0.0;
@@ -165,5 +175,8 @@ fn tab_fade_settles_on_fully_visible_without_overshooting() {
 fn log_fade_settles_on_fully_visible() {
     assert_eq!(tab_fade_step(0.0, LOG_FADE_SECS), (0.0, false));
     assert_eq!(tab_fade_step(LOG_FADE_SECS, LOG_FADE_SECS), (1.0, true));
-    assert_eq!(tab_fade_step(LOG_FADE_SECS * 5.0, LOG_FADE_SECS), (1.0, true));
+    assert_eq!(
+        tab_fade_step(LOG_FADE_SECS * 5.0, LOG_FADE_SECS),
+        (1.0, true)
+    );
 }

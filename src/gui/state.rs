@@ -1,20 +1,18 @@
 //! Shared GUI state and the bridge to the iroh engine.
 //!
-//! All long-lived, cross-thread state lives behind a single
-//! `Arc<Mutex<SharedState>>`. The rule that keeps this sound with a plain
-//! `std::sync::Mutex` is that the lock is **never held across an `.await`**:
-//! engine code does not touch the mutex, the stats consumer task locks only
-//! inside its loop body, and the UI thread locks only to read a snapshot or to
-//! kick off a session before spawning.
+//! All long-lived, cross-thread state lives behind a single `Arc<Mutex<SharedState>>`.
+//! The rule that keeps this sound with a plain `std::sync::Mutex` is that the lock is
+//! **never held across an `.await`**: engine code doesn't touch the mutex, the stats
+//! consumer task locks only inside its loop body, and the UI thread locks only to read
+//! a snapshot or to kick off a session before spawning.
 //!
-//! A single [`Endpoint`] is created once (from the persisted secret) and reused
-//! across start/stop cycles, so the endpoint identity is stable. Stopping a
-//! session is a synchronous [`tokio::task::JoinHandle::abort`], which drops the
-//! WHIP `serve` future: the HTTP listener is freed, the accept loops stop, and
-//! — because the engine keeps every connection and viewer task in an
-//! `AbortOnDrop` join set — all of them are aborted too, so no socket,
-//! connection, or forwarding task outlives the stop. The endpoint itself is
-//! kept for reuse and only dropped when the app quits.
+//! A single [`Endpoint`] is created once (from the persisted secret) and reused across
+//! start/stop cycles, so the endpoint identity is stable. Stopping a session is a
+//! synchronous [`tokio::task::JoinHandle::abort`], which drops the WHIP `serve`
+//! future: the HTTP listener is freed, the accept loops stop, and — because the engine
+//! keeps every connection and viewer task in an `AbortOnDrop` join set — all of them
+//! are aborted too, so nothing outlives the stop. The endpoint itself is kept for
+//! reuse and only dropped when the app quits.
 
 use std::{
     collections::VecDeque,
@@ -35,18 +33,17 @@ use crate::{
     EndpointTicket, WEBRTC_ALPN,
 };
 
-/// How many video-bitrate samples the stats sparkline keeps (oldest first).
-/// At the 5-second stats tick that is a two-minute window.
+/// How many video-bitrate samples the stats sparkline keeps (oldest first). At the
+/// 5-second stats tick that is a two-minute window.
 const MAX_KBPS_SAMPLES: usize = 24;
 
 /// How long a restarted watch session waits for the session it replaces to unwind
 /// before bringing the new one up.
 ///
-/// A `Restart` click aborts the previous task, and the new task drains that handle
-/// first so the old player's kill has been signalled (its `PlayerHandle` drops,
-/// which fires the watcher's `stop_rx.recv()` arm) before a new player is launched
-/// onto the same UDP ports. The ceiling exists so a wedged old task can never block
-/// the new one: past two seconds we proceed regardless.
+/// A `Restart` click aborts the previous task; the new task drains that handle first so
+/// the old player's kill has been signalled (its `PlayerHandle` drops, firing the
+/// watcher's `stop_rx.recv()` arm) before a new player is launched onto the same UDP
+/// ports. The ceiling exists so a wedged old task can never block the new one.
 const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// What the GUI is currently doing.
@@ -72,13 +69,11 @@ impl Mode {
 /// Optional fixed bind addresses for the endpoint, mirroring the CLI's
 /// `--ipv4-addr` / `--ipv6-addr`.
 ///
-/// Empty by default, so the endpoint binds an ephemeral port and the ticket
-/// changes every session (the normal, hole-punched case). When a streamer has a
-/// static public IP and sets a fixed `ip:port` here, the endpoint binds that exact
-/// socket, the ticket's direct addresses stop churning, and the ticket stays byte
-/// stable across sessions — useful when a friend saved the ticket and you want it to
-/// keep working unchanged. It is opt-in: leaving it blank keeps the default
-/// ephemeral behaviour.
+/// Empty by default, so the endpoint binds an ephemeral port and the ticket changes
+/// every session (the normal, hole-punched case). When a streamer has a static public
+/// IP and sets a fixed `ip:port` here, the endpoint binds that exact socket, the
+/// ticket's direct addresses stop churning, and the ticket stays byte-stable across
+/// sessions — useful when a friend saved the ticket and you want it to keep working.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BindAddrs {
     /// The IPv4 socket to bind, if fixed.
@@ -87,8 +82,8 @@ pub struct BindAddrs {
     pub ipv6: Option<SocketAddrV6>,
 }
 
-/// The cross-thread state shared by the UI thread, the stats consumer task and
-/// the engine session task.
+/// The cross-thread state shared by the UI thread, the stats consumer task and the
+/// engine session task.
 #[derive(Debug)]
 pub struct SharedState {
     /// The stable endpoint identity.
@@ -102,15 +97,14 @@ pub struct SharedState {
     /// The running broadcast task, if any.
     pub broadcast_session: Option<JoinHandle<()>>,
     /// The running watch task, if any. Broadcasting and watching are independent
-    /// sessions that may run at the same time (watch your own broadcast, or a
-    /// friend's, while you are live), so each track owns its own handle.
+    /// sessions that may run at the same time, so each track owns its own handle.
     pub watch_session: Option<JoinHandle<()>>,
     /// What the live watch session was launched with: `(player, buffer_ms)`, or
     /// `None` while no watch session is up.
     pub watch_applied: Option<(Player, Option<u64>)>,
     /// Whether the live watch session is currently receiving media from the
-    /// broadcaster: `false` while it is idle, connecting, connected-but-waiting for
-    /// the streamer to begin, or after the stream ends.
+    /// broadcaster: `false` while idle, connecting, connected-but-waiting, or after
+    /// the stream ends.
     pub watch_receiving: bool,
     /// The broadcast track's mode (`Idle` / `Starting` / `Broadcasting`).
     pub broadcast: Mode,
@@ -118,8 +112,8 @@ pub struct SharedState {
     pub watch: Mode,
     /// The live statistics of a broadcast, `None` when not broadcasting.
     pub stats: Option<StreamStats>,
-    /// Recent video-bitrate samples (kbit/s), oldest first, for the stats
-    /// sparkline. Fed by [`consume_stats`]; cleared when the broadcast ends.
+    /// Recent video-bitrate samples (kbit/s), oldest first, for the stats sparkline.
+    /// Fed by [`consume_stats`]; cleared when the broadcast ends.
     pub video_kbps_history: VecDeque<f64>,
     /// The current broadcast ticket, shown after the endpoint is online.
     pub ticket: Option<String>,
@@ -163,10 +157,8 @@ impl SharedState {
     }
 }
 
-/// A locked snapshot of the fields the UI renders each frame.
-///
-/// Taken under one brief lock so the UI never holds the mutex while building
-/// widgets.
+/// A locked snapshot of the fields the UI renders each frame, taken under one brief
+/// lock so the UI never holds the mutex while building widgets.
 #[derive(Debug, Clone)]
 pub struct UiSnapshot {
     pub broadcast: Mode,
@@ -175,8 +167,7 @@ pub struct UiSnapshot {
     /// [`SharedState::watch_applied`]); `None` while the watch track is idle.
     pub watch_applied: Option<(Player, Option<u64>)>,
     /// Whether the live watch session is receiving media, so the tab can tell
-    /// "playing" from "waiting for the streamer" (see
-    /// [`SharedState::watch_receiving`]).
+    /// "playing" from "waiting for the streamer".
     pub watch_receiving: bool,
     pub stats: Option<StreamStats>,
     pub video_kbps_history: Vec<f64>,
@@ -187,14 +178,13 @@ pub struct UiSnapshot {
 }
 
 impl UiSnapshot {
-    /// Whether either track is running or coming up: a broadcast, a watch, or
-    /// both at once.
+    /// Whether either track is running or coming up: a broadcast, a watch, or both.
     pub fn any_active(&self) -> bool {
         self.broadcast.active() || self.watch.active()
     }
 
-    /// A short combined status label for the header, naming whichever tracks are
-    /// live ("Broadcasting", "Watching", or "Broadcasting + watching").
+    /// A short combined status label for the header, naming whichever tracks are live
+    /// ("Broadcasting", "Watching", or "Broadcasting + watching").
     pub fn status(&self) -> String {
         let mut parts: Vec<&str> = Vec::new();
         match self.broadcast {
@@ -221,8 +211,7 @@ pub fn snapshot(state: &Arc<Mutex<SharedState>>) -> UiSnapshot {
     UiSnapshot {
         broadcast: g.broadcast,
         watch: g.watch,
-        // `Copy`, so the record is read under the same brief lock as the mode it
-        // belongs to.
+        // `Copy`, so the record is read under the same brief lock as the mode it's in.
         watch_applied: g.watch_applied,
         watch_receiving: g.watch_receiving,
         stats: g.stats,
@@ -239,19 +228,17 @@ pub fn whip_url(host: &str, port: u16) -> String {
     format!("http://{host}:{port}/whip")
 }
 
-/// Bring up the shared endpoint, or return the existing one.
+/// Bring up the shared endpoint, or return the existing one. Never holds the mutex
+/// across the `bind`, so it is safe with `std::Mutex`.
 ///
-/// Never holds the mutex across the `bind`, so it is safe with `std::Mutex`.
-///
-/// A cached endpoint is reused only while it is still open. `listen_whip`
-/// closes the endpoint it is handed when it returns — including on an engine
-/// error, or when the WHIP bind fails (a port already in use) — and the abort
-/// path of `stop` deliberately leaves it open for reuse. So a stored endpoint
-/// that reports `is_closed` is a dead handle: handing it back would let the
-/// next broadcast bind nothing, `accept` would return `None` at once, and the
-/// session would flash to `Broadcasting` and straight back to `Idle` with no
-/// error. Drop it and bind a fresh one instead; the identity is unchanged (same
-/// secret), so a persisted ticket still points at this endpoint.
+/// A cached endpoint is reused only while it is still open. `listen_whip` closes the
+/// endpoint it is handed when it returns — including on an engine error, or when the
+/// WHIP bind fails (a port already in use) — and the abort path of `stop` deliberately
+/// leaves it open for reuse. So a stored endpoint that reports `is_closed` is a dead
+/// handle: handing it back would let the next broadcast bind nothing, `accept` would
+/// return `None` at once, and the session would flash to `Broadcasting` and straight
+/// back to `Idle` with no error. Drop it and bind a fresh one instead; the identity is
+/// unchanged (same secret), so a persisted ticket still points at this endpoint.
 async fn ensure_endpoint(
     state: &Arc<Mutex<SharedState>>,
     bind: BindAddrs,
@@ -283,17 +270,17 @@ async fn ensure_endpoint(
     Ok(endpoint)
 }
 
-/// Which session track a lifecycle action applies to. Broadcasting and watching
-/// run as independent sessions, so failures, mode changes and stops are routed
-/// to the owning track rather than to a single global session.
+/// Which session track a lifecycle action applies to. Broadcasting and watching run as
+/// independent sessions, so failures, mode changes and stops are routed to the owning
+/// track rather than to a single global session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Track {
     Broadcast,
     Watch,
 }
 
-/// Mark one track's session failed and return it to idle, surfacing `msg` to
-/// the UI on that track's tab.
+/// Mark one track's session failed and return it to idle, surfacing `msg` to the UI on
+/// that track's tab.
 fn fail(state: &Arc<Mutex<SharedState>>, ctx: &egui::Context, track: Track, msg: String) {
     tracing::error!("{msg}");
     {
@@ -331,10 +318,9 @@ pub struct BroadcastParams {
 
 /// Start a broadcast session, returning its task handle to store in the state.
 ///
-/// Sets the mode to `Starting` synchronously, then brings the endpoint online,
-/// mints a fresh ticket from the live endpoint address (exactly like the CLI
-/// `listen-whip`) and runs [`webrtc::listen_whip`] until it returns or is
-/// aborted.
+/// Sets the mode to `Starting` synchronously, then brings the endpoint online, mints a
+/// fresh ticket from the live endpoint address (exactly like the CLI `listen-whip`) and
+/// runs [`webrtc::listen_whip`] until it returns or is aborted.
 pub fn spawn_broadcast(
     state: Arc<Mutex<SharedState>>,
     handle: Handle,
@@ -367,16 +353,14 @@ pub fn spawn_broadcast(
             tracing::warn!("failed to connect to the home relay");
         }
         let addr = endpoint.addr();
-        // Always mint the ticket from the *live* endpoint address, like the CLI.
-        // The ticket embeds the endpoint's current relay and public socket hints,
-        // so a viewer dialing it can hole-punch direct instead of falling back to
-        // a far relay — which the player reports as a lossy "long-distance path"
-        // with missed RTP packets and H.264 decode errors. Re-displaying a
-        // persisted ticket here was the bug: its transport addresses go stale the
-        // moment the NAT mapping or relay changes. The endpoint identity stays
-        // stable via the persisted secret, so an *older* ticket a friend saved
-        // still resolves to this endpoint — it just carries stale hints and may
-        // route slowly through a relay.
+        // Always mint the ticket from the *live* endpoint address, like the CLI. The
+        // ticket embeds the endpoint's current relay and public socket hints, so a
+        // viewer dialing it can hole-punch direct instead of falling back to a far
+        // relay — which the player reports as a lossy "long-distance path" with missed
+        // RTP packets and H.264 decode errors. Re-displaying a persisted ticket was the
+        // bug: its transport addresses go stale the moment the NAT mapping or relay
+        // changes. Identity stays stable via the persisted secret, so an *older* ticket
+        // a friend saved still resolves to this endpoint.
         let shown = EndpointTicket::new(addr).to_string();
         tracing::debug!("fresh ticket for this session: {shown}");
         let listen = match udp::resolve(&params.listen) {
@@ -420,10 +404,9 @@ pub fn spawn_broadcast(
 }
 
 /// Bring an online endpoint's live address into a ticket, store it as the current
-/// ticket, clear `refreshing`, and raise `done_msg` as a completion notice.
-///
-/// Shared by the relay-refresh and ticket-reset tasks: both rebind and then need the
-/// identical "wait online, mint, publish" tail.
+/// ticket, clear `refreshing`, and raise `done_msg` as a completion notice. Shared by
+/// the relay-refresh and ticket-reset tasks: both rebind and then need the identical
+/// "wait online, mint, publish" tail.
 async fn mint_and_publish(
     state: &Arc<Mutex<SharedState>>,
     endpoint: &Endpoint,
@@ -445,13 +428,12 @@ async fn mint_and_publish(
 
 /// Refresh the saved broadcast ticket without starting a session.
 ///
-/// Drops the cached endpoint so the refresh rebinds and picks up a fresh relay /
-/// socket, then mints a new ticket from the live endpoint address (exactly like the
-/// start path) and stores it as the current ticket. The endpoint identity is unchanged
-/// (same secret), so previously shared tickets still resolve. The UI persists it to
-/// `config.broadcast_ticket`, so it is the ticket shown until the next broadcast mints
-/// its own. Only offered while idle, so a refresh can never rebind the endpoint out
-/// from under a running stream.
+/// Drops the cached endpoint so the refresh rebinds and picks up a fresh relay / socket,
+/// then mints a new ticket from the live endpoint address (exactly like the start path)
+/// and stores it as the current ticket. Identity is unchanged (same secret), so
+/// previously shared tickets still resolve. The UI persists it to
+/// `config.broadcast_ticket`. Only offered while idle, so a refresh can never rebind the
+/// endpoint out from under a running stream.
 pub fn spawn_refresh_ticket(
     state: Arc<Mutex<SharedState>>,
     handle: Handle,
@@ -464,9 +446,8 @@ pub fn spawn_refresh_ticket(
         g.refreshing = true;
         g.broadcast_error = None;
         g.notice = None;
-        // Drop the cached endpoint so `ensure_endpoint` rebinds rather than handing
-        // back the old socket — that rebind is what yields a new relay and a new
-        // ticket when addresses are ephemeral.
+        // Drop the cached endpoint so `ensure_endpoint` rebinds rather than handing back
+        // the old socket — that rebind is what yields a new relay and ticket.
         g.endpoint = None;
     }
     ctx.request_repaint();
@@ -488,10 +469,10 @@ pub fn spawn_refresh_ticket(
 
 /// Reset the broadcast identity to a brand-new keypair and mint a fresh ticket.
 ///
-/// Like [`spawn_refresh_ticket`] but installs `secret` as the endpoint's identity
-/// first, so the rebind produces a new endpoint id and a ticket that shares nothing
-/// with any previously issued one. The caller persists the new secret to
-/// `config.secret_hex`. Only offered while idle.
+/// Like [`spawn_refresh_ticket`] but installs `secret` as the endpoint's identity first,
+/// so the rebind produces a new endpoint id and a ticket that shares nothing with any
+/// previously issued one. The caller persists the new secret to `config.secret_hex`.
+/// Only offered while idle.
 pub fn spawn_reset_ticket(
     state: Arc<Mutex<SharedState>>,
     handle: Handle,
@@ -543,15 +524,14 @@ pub struct WatchParams {
 
 /// Whether a watch ticket points at our own endpoint identity.
 ///
-/// iroh refuses to `connect` to an `EndpointId` equal to the local one
-/// ("Connecting to ourself is not supported"), so a ticket carrying our own id
-/// cannot be dialled from the endpoint that holds that identity. This happens when
-/// you watch your own broadcast — in a second GUI sharing one config, or in this
-/// same instance while broadcasting. The comparison uses the live
-/// [`SharedState::secret`] — the identity `ensure_endpoint` binds and which
-/// `spawn_reset_ticket` mutates on an identity reset — so it never misclassifies
-/// mid-reset. [`spawn_watch`] dials under a throwaway id (so self-watch always
-/// works) and uses this only to log the reason clearly.
+/// iroh refuses to `connect` to an `EndpointId` equal to the local one ("Connecting to
+/// ourself is not supported"), so a ticket carrying our own id cannot be dialled from
+/// the endpoint that holds that identity. This happens when you watch your own broadcast
+/// — in a second GUI sharing one config, or in this same instance while broadcasting. The
+/// comparison uses the live [`SharedState::secret`] — the identity `ensure_endpoint`
+/// binds and which `spawn_reset_ticket` mutates on an identity reset — so it never
+/// misclassifies mid-reset. [`spawn_watch`] dials under a throwaway id (so self-watch
+/// always works) and uses this only to log the reason clearly.
 fn is_self_watch(addr: &EndpointAddr, secret: &SecretKey) -> bool {
     addr.id == secret.public()
 }
@@ -565,19 +545,18 @@ const DATAGRAM_READ_FAILED: &str = "error reading datagrams from the host:";
 
 /// Map a raw watch-session failure to the text the Watch tab shows.
 ///
-/// When the broadcaster stops, the viewer's datagram read is the first thing to
-/// fail, and the engine reports it as
-/// `error reading datagrams from the host: timed out` — the QUIC connection idles
-/// out with nothing left to read. That is transport noise to a viewer, who only
-/// wants to know the stream is over, so that one case is rewritten to
-/// [`STREAM_STOPPED`]. Every other failure is shown verbatim: there the transport
-/// detail is the part that actually explains what went wrong.
+/// When the broadcaster stops, the viewer's datagram read is the first thing to fail,
+/// and the engine reports it as `error reading datagrams from the host: timed out` — the
+/// QUIC connection idles out with nothing left to read. That is transport noise to a
+/// viewer, who only wants to know the stream is over, so that one case is rewritten to
+/// [`STREAM_STOPPED`]. Every other failure is shown verbatim: there the transport detail
+/// is the part that actually explains what went wrong.
 fn friendly_watch_error(raw: &str) -> &str {
     let Some(detail) = raw.strip_prefix(DATAGRAM_READ_FAILED) else {
         return raw;
     };
-    // Only the timeout, exactly: a reset or an application close means the
-    // broadcaster is already gone, and the wording says so.
+    // Only the timeout, exactly: a reset or an application close means the broadcaster is
+    // already gone, and the wording says so.
     if detail.trim() == "timed out" {
         STREAM_STOPPED
     } else {
@@ -588,31 +567,31 @@ fn friendly_watch_error(raw: &str) -> &str {
 /// Start a watch session, returning its task handle to store in the state.
 ///
 /// Mirrors [`spawn_broadcast`] on its own track: sets `watch` to `Starting`
-/// synchronously, then brings the endpoint online and resolves the play-out
-/// address, flipping to `Watching` only once the play address resolves and
-/// immediately before dialing (the closest honest "ready" signal available —
-/// [`ViewerConfig`] carries no player-launch callback).
+/// synchronously, then brings the endpoint online and resolves the play-out address,
+/// flipping to `Watching` only once the play address resolves and immediately before
+/// dialing (the closest honest "ready" signal available — [`ViewerConfig`] carries no
+/// player-launch callback).
 ///
 /// The watch always dials from its own throwaway connect-only endpoint built from a
 /// freshly generated [`SecretKey`], never the shared broadcast endpoint. That keeps
 /// broadcasting and watching fully independent within one instance:
 /// - it sidesteps iroh's self-connect rejection when the ticket is our own identity
 ///   ([`is_self_watch`]) — the throwaway id always differs from the broadcast id;
-/// - it avoids binding two endpoints with the *same* secret (a fresh id, so the
-///   relay never sees a duplicate) while we are also broadcasting on the shared one;
-/// - stopping either session can never tear down the other, because only
-///   `listen_whip` closes the shared endpoint and the watch never touches it.
+/// - it avoids binding two endpoints with the *same* secret (a fresh id, so the relay
+///   never sees a duplicate) while we are also broadcasting on the shared one;
+/// - stopping either session can never tear down the other, because only `listen_whip`
+///   closes the shared endpoint and the watch never touches it.
 ///
 /// The throwaway endpoint is never written to `config.secret_hex` nor stored in
-/// `SharedState::endpoint`; it drops when the task ends (normally, on error, or
-/// when aborted by [`stop`]).
+/// `SharedState::endpoint`; it drops when the task ends (normally, on error, or when
+/// aborted by [`stop`]).
 ///
 /// `previous` is the handle of the watch session this one replaces, if any (a
 /// `Restart` click). It is aborted in the same lock scope that arms `Starting` and
 /// records `watch_applied`, and the new task then waits (bounded by
-/// [`TEARDOWN_TIMEOUT`]) for it to unwind before doing any endpoint work — so the
-/// old player's kill has been signalled before a new player is launched onto the
-/// same UDP ports, and at most one watch session is ever live.
+/// [`TEARDOWN_TIMEOUT`]) for it to unwind before doing any endpoint work — so the old
+/// player's kill has been signalled before a new player is launched onto the same UDP
+/// ports, and at most one watch session is ever live.
 pub fn spawn_watch(
     state: Arc<Mutex<SharedState>>,
     handle: Handle,
@@ -621,9 +600,9 @@ pub fn spawn_watch(
     params: WatchParams,
 ) -> JoinHandle<()> {
     {
-        // One lock: mode flip, the record the prompt compares against, and the
-        // abort of the session being replaced all happen atomically, so the UI can
-        // never show a live track with no record (or the reverse).
+        // One lock: mode flip, the record the prompt compares against, and the abort of
+        // the session being replaced all happen atomically, so the UI can never show a
+        // live track with no record (or the reverse).
         let mut g = state.lock().unwrap();
         g.watch = Mode::Starting;
         g.watch_error = None;
@@ -634,18 +613,17 @@ pub fn spawn_watch(
     }
     ctx.request_repaint();
     handle.spawn(async move {
-        // Let the session we replace unwind first, outside every lock scope (the
-        // module's rule is that the lock is never held across an `.await`). Aborting
-        // it drops its `PlayerHandle`, whose sole `stop_tx` sender closing fires the
-        // watcher's `stop_rx.recv()` arm, i.e. the player's kill is signalled; the
-        // bounded wait gives that watcher time to finish. A finished handle returns
-        // immediately, and a wedged one is cut off at the ceiling — never blocked
-        // forever.
+        // Let the session we replace unwind first, outside every lock scope (the module's
+        // rule is that the lock is never held across an `.await`). Aborting it drops its
+        // `PlayerHandle`, whose sole `stop_tx` sender closing fires the watcher's
+        // `stop_rx.recv()` arm, i.e. the player's kill is signalled; the bounded wait
+        // gives that watcher time to finish. A finished handle returns immediately, and a
+        // wedged one is cut off at the ceiling.
         if let Some(previous) = previous {
             let _ = timeout(TEARDOWN_TIMEOUT, previous).await;
         }
-        // Read the live identity once, releasing the lock before any `.await`, purely
-        // to log a self-watch clearly; the endpoint is throwaway either way.
+        // Read the live identity once, releasing the lock before any `.await`, purely to
+        // log a self-watch clearly; the endpoint is throwaway either way.
         let is_self = is_self_watch(&params.addr, &state.lock().unwrap().secret);
         if is_self {
             tracing::info!(
@@ -653,9 +631,9 @@ pub fn spawn_watch(
                 params.addr.id
             );
         }
-        // Ephemeral bind (no fixed addrs), no registered alpns (the dial ALPN rides
-        // in `ViewerConfig`), and the same verbosity as `ensure_endpoint` so the log
-        // panel shows the endpoint lifecycle.
+        // Ephemeral bind (no fixed addrs), no registered alpns (the dial ALPN rides in
+        // `ViewerConfig`), and the same verbosity as `ensure_endpoint` so the log panel
+        // shows the endpoint lifecycle.
         let common = CommonArgs {
             ipv4_addr: None,
             ipv6_addr: None,
@@ -691,19 +669,19 @@ pub fn spawn_watch(
                 )
             }
         };
-        // The endpoint is online and the play address resolves: we are ready to
-        // dial. Flip to `Watching` now (just before `connect_whip`, the sole
-        // player-launch point) so the UI never claims "playing" during bring-up.
+        // The endpoint is online and the play address resolves: we are ready to dial.
+        // Flip to `Watching` now (just before `connect_whip`, the sole player-launch
+        // point) so the UI never claims "playing" during bring-up.
         {
             let mut g = state.lock().unwrap();
             g.watch = Mode::Watching;
         }
         ctx.request_repaint();
         // Mirror the engine's media gate into the shared state, so the tab can read
-        // "waiting for the streamer to begin broadcasting…" while the player has
-        // nothing to show, and "playing in a player window" once media actually flows.
-        // The sender lives in `cfg`, which `connect_whip` owns, so the channel closes
-        // when the session ends and the mirror drains with it.
+        // "waiting for the streamer to begin broadcasting…" while the player has nothing
+        // to show, and "playing in a player window" once media actually flows. The sender
+        // lives in `cfg`, which `connect_whip` owns, so the channel closes when the
+        // session ends and the mirror drains with it.
         let (media_tx, mut media_rx) = mpsc::unbounded_channel::<bool>();
         let cfg = ViewerConfig {
             addr: params.addr,
@@ -751,14 +729,13 @@ pub fn spawn_watch(
 
 /// Abort one track's session, if any, returning that track to idle.
 ///
-/// Synchronous by design: `abort` drops the engine future, which frees the
-/// WHIP port, stops accepting, kills the player, and — since the engine keeps
-/// its connection and viewer tasks in `AbortOnDrop` join sets — aborts every
-/// spawned connection handler too, so a stopped session leaves nothing bound,
-/// connected, or processing. The shared endpoint is kept for reuse. Stopping
-/// one track never disturbs the other — a live broadcast keeps serving while
-/// you stop a watch and vice versa — because the watch owns its own throwaway
-/// endpoint and the broadcast owns the shared one.
+/// Synchronous by design: `abort` drops the engine future, which frees the WHIP port,
+/// stops accepting, kills the player, and — since the engine keeps its connection and
+/// viewer tasks in `AbortOnDrop` join sets — aborts every spawned connection handler
+/// too, so a stopped session leaves nothing bound, connected, or processing. The shared
+/// endpoint is kept for reuse. Stopping one track never disturbs the other — a live
+/// broadcast keeps serving while you stop a watch and vice versa — because the watch
+/// owns its own throwaway endpoint and the broadcast owns the shared one.
 pub fn stop(state: &Arc<Mutex<SharedState>>, ctx: &egui::Context, track: Track) {
     let session = {
         let mut g = state.lock().unwrap();
@@ -783,8 +760,7 @@ pub fn stop(state: &Arc<Mutex<SharedState>>, ctx: &egui::Context, track: Track) 
     ctx.request_repaint();
 }
 
-/// Abort every running session (used when the window closes), leaving both tracks
-/// idle.
+/// Abort every running session (used when the window closes), leaving both tracks idle.
 pub fn stop_all(state: &Arc<Mutex<SharedState>>, ctx: &egui::Context) {
     let (broadcast, watch) = {
         let mut g = state.lock().unwrap();
@@ -805,10 +781,9 @@ pub fn stop_all(state: &Arc<Mutex<SharedState>>, ctx: &egui::Context) {
     ctx.request_repaint();
 }
 
-/// Drain the stats channel into the shared state and repaint.
-///
-/// This task owns the only async path that touches the mutex, and it locks only
-/// inside the loop body (never across an `.await`).
+/// Drain the stats channel into the shared state and repaint. This task owns the only
+/// async path that touches the mutex, and it locks only inside the loop body (never
+/// across an `.await`).
 pub async fn consume_stats(
     mut rx: mpsc::UnboundedReceiver<StreamStats>,
     state: Arc<Mutex<SharedState>>,
@@ -831,18 +806,17 @@ pub async fn consume_stats(
 #[cfg(test)]
 mod tests {
     use super::*;
-    // This module is `gui::state::tests`, so the sibling `config` module is two
-    // levels up.
+    // This module is `gui::state::tests`, so the sibling `config` module is two up.
     use crate::gui::config::DEFAULT_VOLUME;
 
-    /// Regression (AC1): `spawn_watch` used to set `Watching` synchronously, so
-    /// the Watch tab claimed "playing in a player window" the instant the button
-    /// was clicked, while the endpoint was still binding/coming online. It must
-    /// arm `Starting` synchronously (mirroring `spawn_broadcast`) and only flip to
+    /// Regression (AC1): `spawn_watch` used to set `Watching` synchronously, so the
+    /// Watch tab claimed "playing in a player window" the instant the button was
+    /// clicked, while the endpoint was still binding/coming online. It must arm
+    /// `Starting` synchronously (mirroring `spawn_broadcast`) and only flip to
     /// `Watching` later, after `udp::resolve` succeeds and just before dialing.
     ///
-    /// A `current_thread` runtime is built but never run, so the async body is
-    /// never polled and the mode stays where the synchronous block left it.
+    /// A `current_thread` runtime is built but never run, so the async body is never
+    /// polled and the mode stays where the synchronous block left it.
     #[test]
     fn spawn_watch_arms_starting_before_it_comes_online() {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -883,9 +857,9 @@ mod tests {
         drop(rt);
     }
 
-    /// Regression (AC1/AC2): a ticket carrying our own endpoint id must be detected
-    /// as a self-watch (so `spawn_watch` logs the reason and dials under a throwaway
-    /// id instead of the shared endpoint, which iroh would reject with "Connecting to
+    /// Regression (AC1/AC2): a ticket carrying our own endpoint id must be detected as
+    /// a self-watch (so `spawn_watch` logs the reason and dials under a throwaway id
+    /// instead of the shared endpoint, which iroh would reject with "Connecting to
     /// ourself is not supported"), while a ticket for any other id is not.
     #[test]
     fn self_watch_is_detected_from_the_ticket_endpoint_id() {
@@ -903,9 +877,8 @@ mod tests {
         );
     }
 
-    /// The combined status label names whichever tracks are live, so broadcasting
-    /// and watching at once is legible in the header rather than one hiding the
-    /// other.
+    /// The combined status label names whichever tracks are live, so broadcasting and
+    /// watching at once is legible in the header rather than one hiding the other.
     #[test]
     fn status_names_both_live_tracks() {
         let snap = |broadcast: Mode, watch: Mode| UiSnapshot {
@@ -934,9 +907,8 @@ mod tests {
         assert!(!snap(Mode::Idle, Mode::Idle).any_active());
     }
 
-    /// `consume_stats` appends each sample to the sparkline history, oldest
-    /// first, and keeps the window bounded at [`MAX_KBPS_SAMPLES`], evicting
-    /// the oldest first.
+    /// `consume_stats` appends each sample to the sparkline history, oldest first, and
+    /// keeps the window bounded at [`MAX_KBPS_SAMPLES`], evicting the oldest first.
     #[tokio::test]
     async fn consume_stats_feeds_and_bounds_the_bitrate_history() {
         let state = Arc::new(Mutex::new(SharedState::new(
@@ -1016,12 +988,12 @@ mod tests {
         drop(rt);
     }
 
-    /// A cached endpoint is reused while open, but a closed one (as `listen_whip`
-    /// leaves it on any early return, e.g. a WHIP bind failure) must be replaced
-    /// with a live handle so the next broadcast actually binds. Regression: the
-    /// old `ensure_endpoint` handed back the closed endpoint, whose `accept`
-    /// returns `None` at once, so a "port in use → fix port → Start again" cycle
-    /// flashed `Broadcasting` and fell back to `Idle` while serving nothing.
+    /// A cached endpoint is reused while open, but a closed one (as `listen_whip` leaves
+    /// it on any early return, e.g. a WHIP bind failure) must be replaced with a live
+    /// handle so the next broadcast actually binds. Regression: the old
+    /// `ensure_endpoint` handed back the closed endpoint, whose `accept` returns `None`
+    /// at once, so a "port in use → fix port → Start again" cycle flashed
+    /// `Broadcasting` and fell back to `Idle` while serving nothing.
     #[tokio::test]
     async fn a_closed_endpoint_is_replaced_on_the_next_session() {
         let state = Arc::new(Mutex::new(SharedState::new(
@@ -1050,8 +1022,7 @@ mod tests {
             !fresh.is_closed(),
             "a closed endpoint must be replaced with a live one"
         );
-        // Identity is stable across the rebind (same secret), so a persisted
-        // ticket still resolves to this endpoint.
+        // Identity is stable across the rebind (same secret).
         assert_eq!(fresh.id(), reused.id());
     }
 
@@ -1090,9 +1061,9 @@ mod tests {
         assert_eq!(reused_fixed.id(), rebound.id());
     }
 
-    /// The stream-ended case — the viewer's datagram read timing out — reads as a
-    /// plain sentence on the Watch tab, while every other failure keeps the
-    /// transport detail that makes it diagnosable.
+    /// The stream-ended case — the viewer's datagram read timing out — reads as a plain
+    /// sentence on the Watch tab, while every other failure keeps the transport detail
+    /// that makes it diagnosable.
     #[test]
     fn a_timed_out_datagram_read_reads_as_a_stopped_stream() {
         assert_eq!(
@@ -1105,24 +1076,24 @@ mod tests {
             "error connecting to the host: timed out",
             "error reading datagrams from the host: connection closed",
             "could not bind endpoint: address in use",
-            // Not the exact detail: do not rewrite a message that merely carries
-            // the words.
+            // Not the exact detail: do not rewrite a message that merely carries the
+            // words.
             "error reading datagrams from the host: timed out after 30s",
         ] {
             assert_eq!(friendly_watch_error(raw), raw, "{raw} must pass through");
         }
     }
 
-    /// AC3 (state level): a restart hands the previous session to `spawn_watch`,
-    /// which aborts it and drains it (bounded) before bringing the new one up — so
-    /// at most one watch session is live at any moment, the record moves to the new
-    /// pair, and `stop` clears both the handle and the record.
+    /// AC3 (state level): a restart hands the previous session to `spawn_watch`, which
+    /// aborts it and drains it (bounded) before bringing the new one up — so at most
+    /// one watch session is live at any moment, the record moves to the new pair, and
+    /// `stop` clears both the handle and the record.
     ///
-    /// This proves the previous *future* unwound, i.e. the player's kill was
-    /// *signalled* (dropping its `PlayerHandle` closes the sole `stop_tx` sender,
-    /// which fires the watcher's `stop_rx.recv()` arm). It does not prove the child
-    /// process is gone, nor that the UDP play ports are free — the manual run covers
-    /// that. Complementary, not redundant.
+    /// This proves the previous *future* unwound, i.e. the player's kill was *signalled*
+    /// (dropping its `PlayerHandle` closes the sole `stop_tx` sender, which fires the
+    /// watcher's `stop_rx.recv()` arm). It does not prove the child process is gone, nor
+    /// that the UDP play ports are free — the manual run covers that. Complementary, not
+    /// redundant.
     #[test]
     fn restarting_a_watch_tears_the_previous_session_down_first() {
         // A `current_thread` runtime, driven by `block_on` so the sleeps (and the
@@ -1138,9 +1109,9 @@ mod tests {
         )));
         let ctx = egui::Context::default();
 
-        // Session A: a stand-in that only sleeps, so nothing touches the network and
-        // the abort is observable. `JoinHandle` is not `Clone` and is moved into the
-        // state, so a drop-flag is what the test can watch from outside.
+        // Session A: a stand-in that only sleeps, so nothing touches the network and the
+        // abort is observable. `JoinHandle` is not `Clone` and is moved into the state,
+        // so a drop-flag is what the test can watch from outside.
         let torn_down = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = torn_down.clone();
         let a = rt.spawn(async move {
@@ -1153,17 +1124,16 @@ mod tests {
             let _flag = Flag(flag);
             tokio::time::sleep(Duration::from_secs(3600)).await;
         });
-        // Drive the runtime so A is up and running before the restart. The sleep
-        // future must be built *inside* `block_on`, where the time driver's context
-        // is live.
+        // Drive the runtime so A is up and running before the restart. The sleep future
+        // must be built *inside* `block_on`, where the time driver's context is live.
         rt.block_on(async { tokio::time::sleep(Duration::from_millis(50)).await });
         assert!(
             !torn_down.load(std::sync::atomic::Ordering::SeqCst),
             "A must still be live before the restart"
         );
 
-        // Restart: A goes in as `previous`, and the new session is armed with a
-        // different player/buffer pair.
+        // Restart: A goes in as `previous`; the new session is armed with a different
+        // player/buffer pair.
         let b = spawn_watch(
             state.clone(),
             rt.handle().clone(),
@@ -1200,8 +1170,8 @@ mod tests {
             "the new session must still be running while the old one is torn down"
         );
 
-        // `stop` returns the track to idle and clears both the handle and the record,
-        // so the prompt can never be shown against a dead session.
+        // `stop` returns the track to idle and clears both the handle and the record, so
+        // the prompt can never be shown against a dead session.
         stop(&state, &ctx, Track::Watch);
         let g = state.lock().unwrap();
         assert_eq!(g.watch, Mode::Idle, "stop returns the track to idle");

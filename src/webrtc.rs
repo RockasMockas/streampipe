@@ -73,9 +73,8 @@ pub const DEFAULT_WHIP_ADDR: &str = "127.0.0.1:8080";
 
 /// How often the session header is repeated to every viewer.
 ///
-/// The header is the only way a viewer learns the payload type, codec and
-/// parameter sets, so it is sent again and again rather than once: a lost
-/// datagram must not cost a viewer the stream.
+/// It is the only way a viewer learns payload type, codec and parameter sets, so
+/// it is resent, not sent once: a lost datagram must not cost a viewer the stream.
 const HEADER_INTERVAL: Duration = Duration::from_secs(1);
 /// How long a viewer waits for its player to open the RTP socket.
 const PLAYER_READY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -83,12 +82,10 @@ const PLAYER_READY_TIMEOUT: Duration = Duration::from_secs(10);
 const STALL_INTERVAL: Duration = Duration::from_secs(2);
 /// The shortest interval between two keyframe requests from one viewer.
 ///
-/// A gap in the stream nudges the encoder to refresh, but `last_keyframe` is
-/// refreshed by every keyframe that arrives, so a gap right after an IDR asks
-/// for nothing: only a sustained gap with no keyframe for this whole interval
-/// sends a PLI. Without that, on a lossy path nearly every frame has a gap and
-/// a PLI per gap makes the encoder produce IDR after IDR, which blows up the
-/// bitrate and drops even more packets.
+/// A gap nudges the encoder to refresh, but `last_keyframe` is refreshed by every
+/// keyframe that arrives, so a gap right after an IDR asks for nothing. Without
+/// this, on a lossy path nearly every frame has a gap and a PLI per gap makes the
+/// encoder produce IDR after IDR, blowing up bitrate and dropping more packets.
 const KF_REQUEST_INTERVAL: Duration = Duration::from_secs(2);
 /// A path with at least this round-trip time counts as long-distance and gets
 /// an automatic jitter buffer for the player.
@@ -105,19 +102,15 @@ const VIEWER_QUEUE: usize = 8192;
 const ICE_BUF: usize = 2048;
 /// How far below the level in the GUI ffplay is started, in percentage points.
 ///
-/// All three players read the same slider, but they do not land on the same
-/// loudness: ffplay's `-volume` scale falls away much more slowly than mpv's
-/// `--volume` or VLC's `--gain`, so the same number leaves ffplay noticeably
-/// louder. Starting it 20 points lower lines the three up by ear: GUI 100 opens
-/// ffplay at 80, GUI 40 at 20, and GUI 20 and below at silence.
+/// ffplay's `-volume` scale falls away much more slowly than mpv's `--volume` or
+/// VLC's `--gain`, so the same number leaves ffplay noticeably louder. Starting it
+/// 20 points lower lines the three up by ear (GUI 100 → ffplay 80, GUI 20 → 0).
 const FFPLAY_VOLUME_OFFSET: u8 = 20;
 /// Initial size of the launched player window, in pixels: 720p.
 ///
-/// All three players open at this size and anchored to the top-left corner, so
-/// one window is as big as it can be while still fitting the smallest common
-/// displays (1366x768 laptops, netbooks, projectors) entirely inside the screen:
-/// 1280x720 leaves room for a panel/taskbar on a 768-high screen, and a window
-/// at 0,0 can never be placed so far out that the picture falls off the edge.
+/// All three players open at this size, anchored top-left, so the window is as big
+/// as it can be while fitting small displays (1366x768) entirely on screen, with
+/// room for a taskbar and no chance of the picture falling off the edge.
 const WINDOW_WIDTH: u32 = 1280;
 /// Height of the launched player window, in pixels (see [`WINDOW_WIDTH`]).
 const WINDOW_HEIGHT: u32 = 720;
@@ -140,20 +133,17 @@ pub enum Player {
 impl Player {
     /// The command line used to play the SDP file at `sdp`.
     ///
-    /// With `buffer` unset the lowest latency flags are used, which is right on
-    /// a local network. Across a continent the path jitters and reorders packets,
-    /// and a receiver with no buffer drops them, corrupts pictures and loses A/V
-    /// sync; `buffer` then gives the player time to absorb that.
+    /// With `buffer` unset the lowest-latency flags are used (right on a local
+    /// network); across a continent the path jitters and reorders, so `buffer` gives
+    /// the player time to absorb that.
     ///
-    /// `path` overrides the player binary, for a player that is not on `PATH`.
+    /// `path` overrides the player binary, for a player not on `PATH`.
     ///
-    /// `volume` is the startup volume in percent (0-100) as the GUI set it. Every
-    /// player can be told where to start: mpv with `--volume=<0-100>`, and VLC with
-    /// the audio-output `--gain` multiplier (VLC 3 dropped its old `--volume`, which
-    /// now only prints "option --volume no longer exists"). ffplay takes
-    /// `-volume <0-100>` ("set startup volume 0=min 100=max") shifted 20 points down
-    /// by `FFPLAY_VOLUME_OFFSET`, because its scale is louder per point than the
-    /// other two. 100 is unity in all three, so the default is as loud as each gets.
+    /// `volume` is the startup volume in percent (0-100) as the GUI set it. mpv
+    /// takes `--volume=<0-100>`; VLC takes the audio-output `--gain` multiplier
+    /// (VLC 3 dropped `--volume`); ffplay takes `-volume <0-100>` shifted 20 points
+    /// down by `FFPLAY_VOLUME_OFFSET` (its scale is louder per point). 100 is unity
+    /// in all three.
     pub fn command(
         &self,
         sdp: &Path,
@@ -208,17 +198,15 @@ impl Player {
                     }
                 }
                 // The control script changes `speed` to drain the buffer. The
-                // low-latency profile sets `audio-buffer=0` (play as live as
-                // possible), which leaves the audio pipeline with no slack:
-                // every speed change resamples the audio (scaletempo2) and it
-                // drifts ~10% off the video (about 1s per 10s). Give the audio
-                // output real slack so the resampled audio tracks the speed
-                // changes instead of desyncing. Must come after
-                // `--profile=low-latency` so it overrides that profile's
+                // low-latency profile sets `audio-buffer=0`, leaving the audio
+                // pipeline no slack: every speed change resamples the audio
+                // (scaletempo2) and it drifts ~10% off the video. Give the audio
+                // output real slack so resampled audio tracks the speed changes.
+                // Must come after `--profile=low-latency` to override its
                 // `audio-buffer=0` (last occurrence of a scalar wins).
                 cmd.push("--audio-buffer=0.5".into());
-                // The buffer-drain control script, staged on disk by `launch()`.
-                // It goes before the SDP, which must stay the last argument.
+                // The buffer-drain control script, staged on disk by `launch()`;
+                // goes before the SDP, which must stay last.
                 if let Some(script) = script {
                     cmd.push(format!("--script={}", script.display()));
                 }
@@ -480,12 +468,12 @@ impl StreamReport {
 
     /// Print the periodic report and start a new interval.
     ///
-    /// Silence is reported too: a publisher that stopped sending is the one
-    /// thing a line full of zeroes says best.
+    /// Silence is reported too: a publisher that stopped sending is the one thing
+    /// a line full of zeroes says best.
     ///
-    /// `gui_mode` (set when a stats channel is wired up) sends the line through
-    /// `tracing`, whose writer is the non-blocking tee, instead of blocking a
-    /// media worker on synchronous `stderr`. The CLI keeps `eprintln!`.
+    /// `gui_mode` sends the line through `tracing` (whose writer is the
+    /// non-blocking tee) instead of blocking a media worker on synchronous
+    /// `stderr`. The CLI keeps `eprintln!`.
     fn log(&mut self, now: Instant, viewers: usize, gui_mode: bool) {
         let Some(started) = self.started else {
             return;
@@ -698,18 +686,18 @@ pub async fn listen_whip(endpoint: Endpoint, cfg: WhipConfig) -> Result<()> {
     let (req_tx, req_rx) = mpsc::channel::<WhipRequest>(16);
     let (viewer_tx, viewer_rx) = mpsc::channel::<ViewerEvent>(32);
 
-    // Fan the three concurrent parts out onto their own tasks, kept in a
-    // guarded set. Polling them on a single task (the old `select!` over bare
-    // futures) pinned the whole ingest pipeline to one OS thread at a time; on
-    // the multi-threaded `streampipe-engine` runtime this lets `host_loop` run
-    // on a worker of its own, so HTTP serving and viewer acceptance no longer
-    // share its scheduler slot and stall the media path during a keyframe burst.
+    // Fan the three concurrent parts onto their own tasks, kept in a guarded set.
+    // Polling them on one task (the old `select!` over bare futures) pinned the
+    // whole ingest pipeline to one OS thread at a time; on the multi-threaded
+    // runtime this lets `host_loop` run on a worker of its own, so HTTP serving
+    // and viewer acceptance no longer share its scheduler slot and stall the media
+    // path during a keyframe burst.
     //
-    // The guard is what makes teardown complete: a plainly spawned task is
-    // *detached*, so when the GUI aborts the session task driving `listen_whip`
-    // the three tasks would keep running forever, holding the WHIP TCP listener
-    // and the ICE UDP socket bound. In an `AbortOnDrop` set they die with this
-    // future, and the ports are handed back to the OS.
+    // The guard makes teardown complete: a plainly spawned task is *detached*, so
+    // when the GUI aborts the session task driving `listen_whip` the three tasks
+    // would keep running forever, holding the WHIP TCP listener and the ICE UDP
+    // socket bound. In an `AbortOnDrop` set they die with this future and the
+    // ports are handed back.
     let mut tasks = AbortOnDrop(JoinSet::new());
     tasks.spawn(whip::serve(cfg.listen, cfg.bearer_token.clone(), req_tx));
     tasks.spawn(accept_viewers(endpoint.clone(), viewer_tx));
@@ -1146,15 +1134,14 @@ impl Host {
                 self.send_cached_stats();
             }
             ViewerEvent::Keyframe { id } => {
-                // A viewer asks for a keyframe when it starts its player, when
-                // media stalls, or when it sees a gap. If the viewer is already
-                // streaming it has its SDP and parameter sets, so we must NOT
-                // close the gate: on a lossy path nearly every frame has a gap,
-                // and closing the gate on each one drops the whole stream until
-                // the next IDR, which the player reports as thousands of missed
-                // packets, jumping timestamps and a blackout between keyframes.
-                // Keep forwarding and just nudge the encoder to refresh; the
-                // player's jitter buffer and error concealment ride out the loss.
+                // A viewer asks for a keyframe when it starts its player, when media
+                // stalls, or when it sees a gap. If it is already streaming it has its
+                // SDP and parameter sets, so we must NOT close the gate: on a lossy
+                // path nearly every frame has a gap, and closing the gate on each one
+                // drops the whole stream until the next IDR — the player reports
+                // thousands of missed packets, jumping timestamps and a blackout. Keep
+                // forwarding and just nudge the encoder; the player's jitter buffer and
+                // error concealment ride out the loss.
                 let _ = id;
                 self.request_keyframe();
             }
@@ -1413,8 +1400,8 @@ impl Host {
     ///
     /// The WHIP handshake answers with an SDP before a single packet flows, so
     /// this is the first moment we can honestly say the stream works. The line
-    /// names the codec the publisher actually chose, which is the thing an
-    /// operator staring at a black player wants to see confirmed.
+    /// names the codec the publisher actually chose — the thing an operator
+    /// staring at a black player wants confirmed.
     ///
     /// Routed through `tracing` in GUI mode, `eprintln!` in the CLI.
     fn log_streaming(&mut self, kind: MediaKind, params: &sdp::Payload, keyframe: bool) {
@@ -1694,10 +1681,9 @@ async fn host_loop(
                 // Keep pulling packets off a hot socket so a keyframe burst (hundreds
                 // of packets at once) does not overflow the OS receive buffer while we
                 // sit in `select!`. str0m's single-mutation invariant forbids two
-                // back-to-back mutations, so we alternate: drain `poll_output` to
-                // `Timeout` (forwarding decrypted RTP + transmits), then feed the next
-                // packet. `try_recv_from` returns `WouldBlock` once the socket is empty,
-                // which ends the loop and hands control back to the outer `select!`.
+                // back-to-back mutations, so we alternate: drain `poll_output` (forward-
+                // ing decrypted RTP + transmits), then feed the next packet.
+                // `try_recv_from` returns `WouldBlock` once the socket is empty.
                 loop {
                     drain(&mut host).await?;
                     match ice.try_recv_from(&mut buf) {
@@ -1812,11 +1798,10 @@ struct PlayerHandle {
 
 /// A message from the viewer's QUIC read loop to its forwarding task.
 ///
-/// The read loop never blocks on the localhost UDP send: it pushes packets to
-/// a bounded channel and a dedicated task drains them to the player. A full
-/// channel drops the packet, which reads as ordinary RTP loss and triggers a
-/// throttled keyframe request, instead of the read loop parking on `send_to`
-/// and dumping the QUIC backlog at the player in one burst.
+/// The read loop never blocks on the localhost UDP send: it pushes to a bounded
+/// channel and a dedicated task drains it. A full channel drops the packet (reads
+/// as ordinary RTP loss, triggering a throttled keyframe request) instead of the
+/// read loop parking on `send_to` and dumping the QUIC backlog in one burst.
 enum ForwardMsg {
     /// A keyframe epoch: reset the gap-detection baseline in the forward task.
     Epoch,
@@ -1942,12 +1927,10 @@ pub async fn connect_whip(endpoint: Endpoint, cfg: ViewerConfig) -> Result<()> {
             let mut last_kf: Option<Instant> = None;
             // Pace local UDP writes: ffplay opens its RTP socket via an SDP file
             // where FFmpeg ignores -buffer_size, so it is bounded by the OS default
-            // SO_RCVBUF (~50-212 KB). When the reorder stage flushes a held burst it
-            // can dump >100 KB at once and overrun that socket, dropping packets.
-            // A token bucket caps a burst to 64 KB and refills at 16 KB/ms (16 MB/s,
-            // ~128 Mbps): zero latency in steady state (the bucket stays full far
-            // above the 6 Mbps stream), but a dense flush is spread over a few ms so
-            // the player can drain its buffer.
+            // SO_RCVBUF (~50-212 KB). A dense reorder flush can dump >100 KB at
+            // once and overrun that socket. A token bucket caps a burst to 64 KB and
+            // refills at 16 KB/ms: zero latency in steady state (bucket stays full
+            // far above a 6 Mbps stream), a dense flush spread over a few ms.
             const BURST_CAP: usize = 64 * 1024;
             const TOKEN_RATE: usize = 16 * 1024; // bytes per ms
             let mut tokens = BURST_CAP;
@@ -2342,15 +2325,14 @@ async fn wait_until_listening(port: u16) {
 
 /// Forward one RTP packet to the local player port.
 ///
-/// A gap in the video sequence nudges the viewer to ask the host for a
-/// keyframe, but `last_kf` is refreshed by every keyframe that arrives (the
-/// host tags each one with an epoch), so a gap right after an IDR asks for
-/// nothing. Only a sustained gap with no keyframe for [`KF_REQUEST_INTERVAL`]
-/// sends a PLI: on a lossy path nearly every frame has a gap, and a PLI per gap
-/// turns into a keyframe storm that amplifies the loss instead of recovering.
+/// A gap in the video sequence nudges the viewer to ask the host for a keyframe,
+/// but `last_kf` is refreshed by every keyframe (the host tags each with an
+/// epoch), so a gap right after an IDR asks for nothing. Only a sustained gap
+/// with no keyframe for [`KF_REQUEST_INTERVAL`] sends a PLI: on a lossy path
+/// nearly every frame has a gap, and a PLI per gap is a keyframe storm that
+/// amplifies the loss instead of recovering.
 // Pre-existing: this forwarder threads a handful of per-viewer state pointers
-// through the hot path. Left as-is to avoid churn in the media forwarding code;
-// the argument count is not worth a struct refactor.
+// through the hot path; left as-is to avoid churn in the media forwarding code.
 #[allow(clippy::too_many_arguments)]
 async fn forward(
     socket: &Arc<UdpSocket>,

@@ -2,8 +2,8 @@
 
 use std::{path::PathBuf, str::FromStr};
 
-use eframe::egui::{self, Context, Ui};
 use crate::EndpointTicket;
+use eframe::egui::{self, Context, Ui};
 
 use super::{
     config::{player_key, PLAYERS},
@@ -13,8 +13,8 @@ use super::{
     App, ACCENT, ERROR, WATCH_ACCENT,
 };
 
-/// Parse a buffer field (milliseconds) into an option; blank or invalid is
-/// `None` (lowest latency).
+/// Parse a buffer field (milliseconds) into an option; blank or invalid is `None`
+/// (lowest latency).
 pub fn parse_buffer_ms(text: &str) -> Option<u64> {
     text.trim().parse::<u64>().ok()
 }
@@ -33,10 +33,9 @@ fn watch_can_start(busy: bool, ticket: &str) -> bool {
     !busy && !ticket.trim().is_empty()
 }
 
-/// Whether Enter should start a watch session: the ticket box must own keyboard
-/// focus, Enter must be pressed, and the same idle-with-non-blank-ticket gate the
-/// button uses must hold. Extracted so the keyboard gate is testable without any
-/// focus plumbing.
+/// Whether Enter should start a watch session: the ticket box must own keyboard focus,
+/// Enter must be pressed, and the button's idle/non-blank gate must hold. Extracted so
+/// the keyboard gate is testable without focus plumbing.
 fn watch_enter_starts(focused: bool, enter: bool, busy: bool, ticket: &str) -> bool {
     focused && enter && watch_can_start(busy, ticket)
 }
@@ -51,22 +50,19 @@ impl App {
 
         section_tick(ui, "Stream ticket", WATCH_ACCENT);
 
-        // Read input BEFORE rendering the ticket box, so a key consumed by the
-        // widget later in this frame cannot defeat Enter-to-start.
+        // Read input BEFORE rendering the ticket box, so a key consumed by the widget
+        // later in this frame cannot defeat Enter-to-start.
         let ticket_id = egui::Id::new("watch_ticket_input");
         let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
         let window_focused = ui.input(|i| i.focused);
-        // Whether the ticket box owns keyboard focus (read from the previous
-        // frame), so the frame's stroke and a soft glow can mark it as the active
-        // input — a focus ring the box otherwise lacks (only a blinking caret would
-        // show it). A disabled (busy) box can never be focused, so the ring also
-        // recedes on its own while a session is up.
+        // Whether the ticket box owns keyboard focus (read from the previous frame), so
+        // the frame's stroke and a soft glow can mark it as the active input. A
+        // disabled (busy) box can never be focused, so the ring recedes on its own.
         let focused = ui.ctx().memory(|m| m.has_focus(ticket_id));
 
         // A framed surface via the TextEdit's OWN frame (not an outer group, which
         // would double the border and eat width). `return_key(None)` suppresses the
-        // stray newline Enter would otherwise insert into a multiline box. The
-        // stroke brightens while focused, so the active input reads as lit.
+        // stray newline Enter would otherwise insert into a multiline box.
         let textedit = egui::TextEdit::multiline(&mut self.watch_ticket)
             .id(ticket_id)
             .hint_text("Paste stream ticket here to start watching broadcasted stream...")
@@ -85,8 +81,8 @@ impl App {
                 ui.add_sized([ui.available_width(), 54.0], textedit)
             })
             .inner;
-        // A soft accent glow around the focused box (the same halo language as the
-        // copy box's hover), so the active input reads as lit by the accent.
+        // A soft accent glow around the focused box (the same halo language as the copy
+        // box's hover), so the active input reads as lit by the accent.
         if focused {
             soft_glow(
                 ui.painter(),
@@ -97,11 +93,11 @@ impl App {
         }
 
         // Autofocus the ticket only when it already holds a prefilled ticket, on a
-        // window that has keyboard focus, and once per switch. Autofocusing an empty
-        // box would only blink a caret that can never submit (Enter on a blank ticket
-        // is a no-op), and a focused multiline TextEdit schedules ~2Hz caret-blink
-        // repaints that would keep an idle Watch tab from ever falling asleep. A
-        // prefilled ticket is exactly the "press Enter to replay" case worth grabbing.
+        // window that has keyboard focus, and once per switch. Autofocusing an empty box
+        // would only blink a caret that can never submit (Enter on a blank ticket is a
+        // no-op), and a focused multiline TextEdit schedules ~2Hz caret-blink repaints
+        // that would keep an idle Watch tab from ever falling asleep. A prefilled ticket
+        // is exactly the "press Enter to replay" case worth grabbing.
         // (`RawInput::default().focused` is `true`, so a bare focus flag is not a
         // sufficient guard against the repaint-sleep regression.)
         if self.focus_primary && window_focused {
@@ -111,32 +107,30 @@ impl App {
             self.focus_primary = false;
         }
 
-        // Enter-to-start, gated on the box actually owning focus and the button's
-        // own idle/non-blank conditions. Focus is read off the same `resp`.
+        // Enter-to-start, gated on the box owning focus and the button's own
+        // idle/non-blank conditions.
         let focused = ui.ctx().memory(|m| m.has_focus(resp.id));
         if watch_enter_starts(focused, enter, busy, &self.watch_ticket) {
             self.start_watch(ui.ctx());
         }
 
-        // The ticket box itself remembers the last-used ticket (seeded from
-        // `config.last_ticket` at startup and updated on each watch), so no
-        // separate history picker is needed.
+        // The ticket box remembers the last-used ticket (seeded from
+        // `config.last_ticket` at startup, updated on each watch), so no separate
+        // history picker is needed.
 
-        // A friendly "where do I get a ticket?" hint below the box while it is
-        // empty, so a first-time viewer knows what to do. The box's own hint text
-        // only says "paste a ticket here", not where one comes from; this fills
-        // that gap. Weak and dim so it reads as a gentle nudge, not a competing
-        // instruction. It recedes on its own once a ticket is pasted (or a
-        // session is up, which always has a non-blank ticket).
+        // A "where do I get a ticket?" hint below the box while it is empty, so a
+        // first-time viewer knows what to do. The box's own hint text only says "paste
+        // a ticket here", not where one comes from. Weak and dim so it reads as a
+        // gentle nudge; recedes once a ticket is pasted.
         if self.watch_ticket.trim().is_empty() {
             ui.add_space(4.0);
             ui.weak("No ticket yet? Start a broadcast, or ask a friend to share theirs.");
         }
 
         ui.add_space(8.0);
-        // Match the Broadcast tab's "Advanced settings" sizing: a larger (1.3×)
-        // proportional font and matching input-box height, so the controls read as
-        // one consistent column across tabs.
+        // Match the Broadcast tab's "Advanced settings" sizing: larger (1.3×)
+        // proportional font and matching input-box height, so the controls read as one
+        // consistent column across tabs.
         let big = ui.style().text_styles[&egui::TextStyle::Body].size * 1.3;
         let prop = egui::FontId::proportional(big);
         let box_h = big * 1.3;
@@ -154,11 +148,10 @@ impl App {
                 });
             ui.add_space(12.0);
             ui.label(egui::RichText::new("Buffer (ms)").size(big));
-            // A stable id, so the buffer field's focus can be read (for the focus
-            // glow below) the same way the ticket box's is.
+            // A stable id, so the buffer field's focus can be read (for the focus glow).
             let buffer_id = egui::Id::new("watch_buffer_input");
             // Also live while a session is up: edit the buffer, press `Restart`, and the
-            // new session launches with it (the prompt under the buttons says so).
+            // new session launches with it.
             let buffer_resp = ui.add_sized(
                 [90.0, box_h],
                 egui::TextEdit::singleline(&mut self.watch_buffer)
@@ -167,9 +160,8 @@ impl App {
                     .font(prop.clone())
                     .vertical_align(egui::Align::Center),
             );
-            // A soft accent glow around the focused buffer field (the same halo
-            // language as the ticket box's focus ring), so the active input reads as
-            // lit by the accent.
+            // A soft accent glow around the focused buffer field (same halo language as
+            // the ticket box's focus ring).
             if ui.ctx().memory(|m| m.has_focus(buffer_id)) {
                 soft_glow(
                     ui.painter(),
@@ -180,24 +172,24 @@ impl App {
             }
         });
 
-        // The initial player volume, on its own full-width row under the
-        // Player/Buffer line: the label leads on the left and carries the number,
-        // the slider track fills the rest of the panel so the drag target is as
-        // wide as the tab. The label is formatted from the same `watch_volume` the
-        // slider writes, so the two can never disagree.
+        // The initial player volume, on its own full-width row under the Player/Buffer
+        // line: the label leads on the left and carries the number, the slider track
+        // fills the rest of the panel so the drag target is as wide as the tab. The
+        // label is formatted from the same `watch_volume` the slider writes, so the two
+        // can never disagree.
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             // Format first: the label must not borrow what the slider takes mutably.
             let label = format!("Player Initial Volume: {}%", self.watch_volume);
             ui.label(egui::RichText::new(label).size(big));
-            // `slider_width` is the track width, and a child `Ui`'s spacing is scoped
-            // to that child, so widening it here stretches this slider (and only this
-            // one) out to the panel edge. The 24 points left over are the widget's
-            // own margins, so the track ends flush with the content area.
+            // `slider_width` is the track width, and a child `Ui`'s spacing is scoped to
+            // that child, so widening it here stretches this slider (and only this one)
+            // out to the panel edge. The 24 points left over are the widget's own
+            // margins, so the track ends flush with the content area.
             let track = (ui.available_width() - 24.0).max(120.0);
             ui.spacing_mut().slider_width = track;
-            // `show_value(false)` drops the slider's own readout: the leading label
-            // already shows the same number, so the row reads as label, then bar.
+            // `show_value(false)` drops the slider's own readout: the label already
+            // shows the same number.
             let slider = egui::Slider::new(&mut self.watch_volume, 0..=100)
                 .step_by(1.0)
                 .show_value(false);
@@ -208,12 +200,12 @@ impl App {
                  point than the other two, so it starts 20 points lower and all three \
                  sound about the same for one setting.",
             );
-            // Persist the setting as soon as the gesture lands: `drag_stopped` is the
-            // release at the end of a drag, `changed && !dragged` is a click-jump on
-            // the track or an arrow key. So the app reopens at the last volume the
-            // user set, not merely the last one they pressed Watch with. Guarded to a
-            // real change: dragging back to the same number writes nothing, and the
-            // guard keeps the disk out of the per-frame path.
+            // Persist as soon as the gesture lands: `drag_stopped` is the release at the
+            // end of a drag, `changed && !dragged` is a click-jump on the track or an
+            // arrow key. So the app reopens at the last volume the user set, not merely
+            // the last one they pressed Watch with. Guarded to a real change: dragging
+            // back to the same number writes nothing, and the guard keeps the disk out of
+            // the per-frame path.
             if slider.drag_stopped() || (slider.changed() && !slider.dragged()) {
                 let volume = self.watch_volume.min(100);
                 if self.config.volume != volume {
@@ -232,9 +224,9 @@ impl App {
             // Two half-width actions side by side — `Restart` (left) and `■  Stop`
             // (right) — with the status text on its own row underneath.
             //
-            // `half` is computed BEFORE the child `Ui`: the panel's content width is
-            // the window width minus its 2×16 side margins, and `available_width()`
-            // here is exactly that. Each button is `add_sized` to `half` and the row's
+            // `half` is computed BEFORE the child `Ui`: the panel's content width is the
+            // window width minus its 2×16 side margins, and `available_width()` here is
+            // exactly that. Each button is `add_sized` to `half` and the row's
             // `item_spacing.x` is 12, so `2 * half + 12` fills the panel exactly.
             // (`add_space` is *in addition to* `item_spacing`, so it must not be used
             // between the two buttons, and the spacing is mutated on the child, which
@@ -243,8 +235,8 @@ impl App {
             let resp = ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 12.0;
                 // `Restart` brings a new session up with the player/buffer currently
-                // shown, tearing the previous one down first (`start_watch` hands the
-                // old handle to `spawn_watch`, which aborts and drains it).
+                // shown, tearing the previous one down first (`start_watch` hands the old
+                // handle to `spawn_watch`, which aborts and drains it).
                 let restart_rect =
                     egui::Rect::from_min_size(ui.cursor().min, egui::vec2(half, 36.0));
                 let hovered = pointer_over(ui, restart_rect);
@@ -272,11 +264,10 @@ impl App {
                         )),
                 );
 
-                // A subtle red halo behind the Stop button, matching the Broadcast
-                // tab, so the one control that stops a watch reads as a "stop" action.
-                // The halo also contracts on press, so the stop reads as pressed in.
-                // The halo rect is re-read from the cursor, which has advanced past the
-                // Restart button and its spacing.
+                // A subtle red halo behind the Stop button, matching the Broadcast tab, so
+                // the one control that stops a watch reads as a "stop" action. The halo
+                // also contracts on press. The halo rect is re-read from the cursor, which
+                // has advanced past the Restart button and its spacing.
                 let stop_rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(half, 36.0));
                 let hovered = pointer_over(ui, stop_rect);
                 let pressed = pointer_pressed_over(ui, stop_rect);
@@ -337,9 +328,9 @@ impl App {
             let resp = ui
                 .add_enabled_ui(can_start, |ui| {
                     // A soft accent halo behind the hero action, lit by the live green.
-                    // Only when the button is live: a disabled button should not glow.
-                    // The fixed `.fill()` suppresses egui's own hover feedback, so the
-                    // hover is read from the pointer and lifts both the halo and the fill.
+                    // Only when the button is live: a disabled button should not glow. The
+                    // fixed `.fill()` suppresses egui's own hover feedback, so the hover
+                    // is read from the pointer and lifts both the halo and the fill.
                     let start_rect = egui::Rect::from_min_size(
                         ui.cursor().min,
                         egui::vec2(ui.available_width(), 36.0),
@@ -401,23 +392,21 @@ impl App {
             .map(PathBuf::from);
         let play_addr = self.config.play_addr.clone();
         let buffer_ms = parse_buffer_ms(&self.watch_buffer);
-        // The slider's range is 0..=100, so no clamping is needed here; the
-        // `min` only guards a value restored from a hand-edited config.
+        // The slider's range is 0..=100; the `min` only guards a value restored from a
+        // hand-edited config.
         let volume = self.watch_volume.min(100);
 
-        // Persist the last-used buffer, volume and ticket. The default player is
-        // owned by Options (it is the value auto-selected on the Watch tab at
-        // open), so a quick-switch here only affects this session and must not
-        // overwrite it.
+        // Persist the last-used buffer, volume and ticket. The default player is owned by
+        // Options (it is the value auto-selected on the Watch tab at open), so a
+        // quick-switch here only affects this session and must not overwrite it.
         self.config.buffer_ms = buffer_ms;
         self.config.volume = volume;
         self.config.note_ticket(&ticket_text);
         self.config.save();
 
         // A `Restart` while a session is live hands the previous handle to
-        // `spawn_watch`, which aborts it and drains it (bounded) before bringing the
-        // new session up — so at most one watch session is ever live, and the new
-        // one launches with the player/buffer currently shown. Three sequential lock
+        // `spawn_watch`, which aborts and drains it (bounded) before bringing the new
+        // session up — so at most one watch session is ever live. Three sequential lock
         // acquisitions here (take, spawn's own, store); no `.await` between them.
         let previous = self.state.lock().unwrap().watch_session.take();
         let handle = state::spawn_watch(
@@ -437,8 +426,7 @@ impl App {
         self.state.lock().unwrap().watch_session = Some(handle);
     }
 
-    /// Keep the Watch tab's live fields in sync with the config after Options
-    /// edits them.
+    /// Keep the Watch tab's live fields in sync with the config after Options edits.
     pub fn sync_watch_from_config(&mut self) {
         self.watch_player = self.config.default_player();
         self.watch_buffer = self
@@ -457,15 +445,15 @@ mod tests {
     #[test]
     fn watch_action_label_distinguishes_connecting_waiting_from_playing() {
         assert_eq!(watch_action_label(Mode::Starting, false), "connecting…");
-        // Connecting, with a gate signal already in flight: still "connecting…" — the
-        // session is not up yet, so the live labels must not show.
+        // Connecting, with a gate signal in flight: still "connecting…" — the session
+        // is not up yet, so the live labels must not show.
         assert_eq!(watch_action_label(Mode::Starting, true), "connecting…");
         assert_eq!(
             watch_action_label(Mode::Watching, true),
             "Playing stream in player window"
         );
-        // Regression: `Watching` used to claim it was playing even while the
-        // broadcaster had sent nothing, so the tab lied about a blank window.
+        // Regression: `Watching` used to claim it was playing even while the broadcaster
+        // had sent nothing, so the tab lied about a blank window.
         assert_eq!(
             watch_action_label(Mode::Watching, false),
             "Waiting for streamer to begin broadcasting..."
@@ -482,17 +470,13 @@ mod tests {
 
     #[test]
     fn watch_enter_starts_needs_focus_enter_and_a_startable_ticket() {
-        // Enter starts only when the box owns focus, Enter is pressed, and the
-        // button's own idle/non-blank gate holds.
+        // Enter starts only when the box owns focus, Enter is pressed, and the button's
+        // own idle/non-blank gate holds.
         assert!(watch_enter_starts(true, true, false, "abc"));
-        // Not focused → never starts (Enter elsewhere must not fire a watch).
-        assert!(!watch_enter_starts(false, true, false, "abc"));
-        // No Enter → nothing to trigger.
-        assert!(!watch_enter_starts(true, false, false, "abc"));
-        // Blank ticket → mirrors the disabled button.
-        assert!(!watch_enter_starts(true, true, false, "  "));
+        assert!(!watch_enter_starts(false, true, false, "abc")); // not focused
+        assert!(!watch_enter_starts(true, false, false, "abc")); // no Enter
+        assert!(!watch_enter_starts(true, true, false, "  ")); // blank ticket
         assert!(!watch_enter_starts(true, true, false, ""));
-        // Busy (incl. Starting) → mirrors the disabled button.
-        assert!(!watch_enter_starts(true, true, true, "abc"));
+        assert!(!watch_enter_starts(true, true, true, "abc")); // busy
     }
 }

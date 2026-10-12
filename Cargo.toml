@@ -47,10 +47,9 @@ eframe = { version = "0.36", default-features = false, features = [
   "x11",
   "wayland",
   "default_fonts",
-  # Enables egui-winit's `webbrowser` backend, which is what actually turns
-  # egui's `OpenUrl` command into a real browser launch. Without it the
-  # clickable repo link in the Settings footer paints and reports clicks, but
-  # `open_url_in_browser` is an empty stub and the link goes nowhere.
+  # egui's `OpenUrl` command is only honoured with the `links` (webbrowser)
+  # backend; without it the clickable repo link in the Settings footer paints
+  # and reports clicks but goes nowhere.
   "links",
 ] }
 serde = { version = "1", features = ["derive"] }

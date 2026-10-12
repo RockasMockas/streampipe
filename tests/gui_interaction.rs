@@ -30,7 +30,10 @@ fn autofocus_grabs_a_prefilled_ticket_but_not_an_empty_one() {
     let ctx = egui::Context::default();
     frame(&ctx, &mut app, focused_raw(vec![]));
     frame(&ctx, &mut app, focused_raw(vec![]));
-    assert_eq!(app.watch_ticket, "", "the headless app opens with an empty ticket");
+    assert_eq!(
+        app.watch_ticket, "",
+        "the headless app opens with an empty ticket"
+    );
     assert!(
         ctx.memory(|m| m.focused()).is_none(),
         "an empty ticket must not autofocus (no blink repaints while idle)"
@@ -55,7 +58,10 @@ fn enter_on_the_focused_ticket_never_inserts_a_newline() {
         !app.watch_ticket.contains('\n'),
         "Enter must not drop a newline into the ticket box"
     );
-    assert_eq!(app.watch_ticket, "not-a-real-ticket", "ticket text untouched");
+    assert_eq!(
+        app.watch_ticket, "not-a-real-ticket",
+        "ticket text untouched"
+    );
     assert_eq!(
         app.state.lock().unwrap().watch,
         Mode::Idle,
@@ -121,7 +127,10 @@ fn hovering_a_tab_raises_the_pointing_hand_cursor() {
             _ => None,
         })
         .collect();
-    assert!(tab_rects.len() >= 2, "expected the two tab fill rects, got {tab_rects:?}");
+    assert!(
+        tab_rects.len() >= 2,
+        "expected the two tab fill rects, got {tab_rects:?}"
+    );
     // The Broadcast tab is the right-hand one.
     let bc = tab_rects
         .iter()
@@ -270,15 +279,34 @@ fn the_log_panel_close_button_closes_the_panel() {
             _ => None,
         })
         .collect();
-    assert_eq!(2, segs.len(), "the close button paints two crossing strokes");
-    let min_x = segs.iter().flat_map(|p| [p[0].x, p[1].x]).fold(f32::INFINITY, f32::min);
-    let max_x = segs.iter().flat_map(|p| [p[0].x, p[1].x]).fold(f32::NEG_INFINITY, f32::max);
-    let min_y = segs.iter().flat_map(|p| [p[0].y, p[1].y]).fold(f32::INFINITY, f32::min);
-    let max_y = segs.iter().flat_map(|p| [p[0].y, p[1].y]).fold(f32::NEG_INFINITY, f32::max);
+    assert_eq!(
+        2,
+        segs.len(),
+        "the close button paints two crossing strokes"
+    );
+    let min_x = segs
+        .iter()
+        .flat_map(|p| [p[0].x, p[1].x])
+        .fold(f32::INFINITY, f32::min);
+    let max_x = segs
+        .iter()
+        .flat_map(|p| [p[0].x, p[1].x])
+        .fold(f32::NEG_INFINITY, f32::max);
+    let min_y = segs
+        .iter()
+        .flat_map(|p| [p[0].y, p[1].y])
+        .fold(f32::INFINITY, f32::min);
+    let max_y = segs
+        .iter()
+        .flat_map(|p| [p[0].y, p[1].y])
+        .fold(f32::NEG_INFINITY, f32::max);
     let center = egui::pos2((min_x + max_x) / 2.0, (min_y + max_y) / 2.0);
 
     click_at(&mut app, &ctx, center, size);
-    assert!(!app.log_open, "clicking the close button must close the log panel");
+    assert!(
+        !app.log_open,
+        "clicking the close button must close the log panel"
+    );
 }
 
 /// Hovering a copy box paints a 2-layer accent glow (0.03 / 0.06) and brightens its
@@ -323,13 +351,16 @@ fn hovering_a_copy_box_paints_a_soft_glow_and_brightens_the_glyph() {
         .shapes
         .iter()
         .filter(|s| match &s.shape {
-            egui::epaint::Shape::Rect(r) => {
-                [0.03, 0.06].iter().any(|&a| r.fill == ACCENT.gamma_multiply(a))
-            }
+            egui::epaint::Shape::Rect(r) => [0.03, 0.06]
+                .iter()
+                .any(|&a| r.fill == ACCENT.gamma_multiply(a)),
             _ => false,
         })
         .count();
-    assert_eq!(glow_count, 2, "hovering the copy box should paint a 2-layer soft glow");
+    assert_eq!(
+        glow_count, 2,
+        "hovering the copy box should paint a 2-layer soft glow"
+    );
     // The copy glyph brightens: its two sheets are stroked brighter.
     let glyph_bright = ACCENT.gamma_multiply(0.8);
     let glyph_count = out
@@ -340,7 +371,10 @@ fn hovering_a_copy_box_paints_a_soft_glow_and_brightens_the_glyph() {
             _ => false,
         })
         .count();
-    assert!(glyph_count >= 2, "hovering the copy box should brighten its copy glyph");
+    assert!(
+        glyph_count >= 2,
+        "hovering the copy box should brighten its copy glyph"
+    );
 }
 
 /// The copy glyph becomes a checkmark while the copy toast is live.
@@ -371,8 +405,7 @@ fn the_copy_glyph_becomes_a_checkmark_on_copy() {
     let after = render_shapes(&mut app, size);
     let check = after.iter().filter(|s| is_check_stroke(s)).count();
     assert_eq!(
-        check,
-        2,
+        check, 2,
         "the copied box's glyph should be a checkmark (two strokes), got {check}"
     );
 }
@@ -388,7 +421,10 @@ fn the_focused_ticket_box_paints_a_focus_ring() {
     // Two frames for the autofocus to settle.
     frame(&ctx, &mut app, focused_raw(vec![]));
     frame(&ctx, &mut app, focused_raw(vec![]));
-    assert!(ctx.memory(|m| m.focused()).is_some(), "a prefilled ticket autofocuses");
+    assert!(
+        ctx.memory(|m| m.focused()).is_some(),
+        "a prefilled ticket autofocuses"
+    );
     // A focused frame paints the box's bright focus stroke.
     let out = ctx.run_ui(focused_raw(vec![]), |ui| app.draw(ui));
     let focus_stroke = ACCENT.gamma_multiply(0.75);
@@ -410,10 +446,12 @@ fn hovering_a_log_line_paints_a_faint_highlight() {
     log::push(&app.log, "a log line to hover");
     let size = egui::vec2(760.0, 560.0);
     let has_highlight = |shapes: &[egui::epaint::ClippedShape]| -> bool {
-        shapes.iter().any(|s| matches!(&s.shape,
-            egui::epaint::Shape::Rect(r)
-                if r.fill == egui::Color32::from_white_alpha(12)
-        ))
+        shapes.iter().any(|s| {
+            matches!(&s.shape,
+                egui::epaint::Shape::Rect(r)
+                    if r.fill == egui::Color32::from_white_alpha(12)
+            )
+        })
     };
     // Not hovered: no highlight.
     let ctx = egui::Context::default();
@@ -423,7 +461,10 @@ fn hovering_a_log_line_paints_a_faint_highlight() {
     };
     let mut out = ctx.run_ui(raw.clone(), |ui| app.draw(ui));
     out.textures_delta.clear();
-    assert!(!has_highlight(&out.shapes), "an un-hovered log line paints no highlight");
+    assert!(
+        !has_highlight(&out.shapes),
+        "an un-hovered log line paints no highlight"
+    );
 
     // Locate the log line's text so the pointer can be moved over it.
     let line_rect = out
@@ -447,5 +488,8 @@ fn hovering_a_log_line_paints_a_faint_highlight() {
     };
     frame(&ctx2, &mut app, raw_hover.clone());
     let out = ctx2.run_ui(raw_hover, |ui| app.draw(ui));
-    assert!(has_highlight(&out.shapes), "hovering a log line should paint a faint highlight");
+    assert!(
+        has_highlight(&out.shapes),
+        "hovering a log line should paint a faint highlight"
+    );
 }

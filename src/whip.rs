@@ -145,9 +145,8 @@ impl<T: 'static> std::ops::DerefMut for AbortOnDrop<T> {
 
 impl<T: 'static> Drop for AbortOnDrop<T> {
     fn drop(&mut self) {
-        // Abort every task that has not finished. `abort_all` is the
-        // synchronous counterpart of the async `shutdown`: no `.await`
-        // needed — the tasks are cancelled at their next suspension point
+        // `abort_all` is the synchronous counterpart of async `shutdown`: no
+        // `.await` needed — tasks are cancelled at their next suspension point
         // and their sockets are dropped with them.
         self.0.abort_all();
     }

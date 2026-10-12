@@ -18,8 +18,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use eframe::egui::{self, Ui};
 use crate::webrtc::{Player, StreamStats};
+use eframe::egui::{self, Ui};
 use tokio::{runtime::Handle, sync::mpsc};
 
 use self::{
@@ -1303,7 +1303,7 @@ fn icon_pixel(x: f32, y: f32, size: f32) -> (u8, u8, u8, u8) {
         return (0, 0, 0, 0); // outside the icon
     }
     let edge = (0.5 - d_bg).clamp(0.0, 1.0); // 1 px anti-aliasing
-    // Ground: a vertical gradient, lighter at the top.
+                                             // Ground: a vertical gradient, lighter at the top.
     let t = (py / size).clamp(0.0, 1.0);
     let (top, bot) = ((31.0, 34.0, 40.0), (19.0, 21.0, 25.0));
     let mut r = top.0 + (bot.0 - top.0) * t;
@@ -1468,4 +1468,3 @@ pub fn run() {
         std::process::exit(1);
     }
 }
-

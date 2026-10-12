@@ -191,18 +191,15 @@ impl Reassembler {
     }
 }
 
-/// The default how long a [`Reorder`] holds a packet waiting for a missing
-/// earlier one, used when the viewer runs with no player buffer.
+/// How long a [`Reorder`] holds a packet waiting for a missing earlier one,
+/// used when the viewer runs with no player buffer.
 ///
 /// QUIC datagrams are unordered, so the viewer must put RTP packets back in
 /// sequence order for the player. This is how long it waits for a hole to be
-/// filled by a late packet before flushing what it has and letting the player
-/// conceal the gap. Long enough to cover typical reordering, short enough that
-/// the stream never visibly stalls.
-///
-/// When the user asks for a player buffer (`--buffer`) the viewer derives a
-/// longer window from it instead, via [`Reorder::with_timeout`], so the two
-/// reorder stages move in tandem. See [`reorder_timeout_for`].
+/// filled before flushing and letting the player conceal the gap — long enough
+/// to cover typical reordering, short enough that the stream never stalls.
+/// With `--buffer` the window is derived from it instead; see
+/// [`reorder_timeout_for`].
 const REORDER_TIMEOUT: Duration = Duration::from_millis(80);
 
 /// Floor and ceiling for the reorder window derived from a player buffer.
@@ -217,11 +214,10 @@ const REORDER_TIMEOUT_MAX: Duration = Duration::from_millis(150);
 ///
 /// `--buffer` is the player's total jitter/reorder budget; our [`Reorder`] is
 /// the small, fast stage in front of it. We take a quarter of the buffer,
-/// clamped to [`REORDER_TIMEOUT_MIN`]..=[`REORDER_TIMEOUT_MAX`], so a bigger
-/// buffer nudges us toward catching worse long-distance reordering without
-/// turning the reorder stage into a latency trap (a hole unfilled after ~150 ms
-/// is a lost QUIC datagram, not a reordered one). `None` (no buffer, lowest
-/// latency) keeps the default [`REORDER_TIMEOUT`].
+/// clamped to [`REORDER_TIMEOUT_MIN`]..=[`REORDER_TIMEOUT_MAX`]: a bigger
+/// buffer catches worse long-distance reordering without becoming a latency
+/// trap (a hole unfilled after ~150 ms is a lost QUIC datagram). `None` keeps
+/// the default [`REORDER_TIMEOUT`].
 pub fn reorder_timeout_for(buffer: Option<Duration>) -> Duration {
     buffer
         .map(|b| (b / 4).clamp(REORDER_TIMEOUT_MIN, REORDER_TIMEOUT_MAX))
@@ -236,18 +232,15 @@ const REORDER_CAP: usize = 8192;
 /// The host forwards one RTP packet per QUIC datagram, and datagrams are
 /// unreliable *and unordered*, so packets reach the viewer scrambled even on a
 /// local network. Handing them to a player in arrival order makes it read the
-/// reordering as packet loss: `missed N packets`, a thrashing jitter buffer and
-/// corrupt pictures. The viewer runs one `Reorder` per media (video and audio
-/// have separate sequence spaces) and emits packets strictly in sequence order,
-/// so the player sees a clean, in-order stream.
+/// reordering as packet loss (`missed N packets`, a thrashing jitter buffer,
+/// corrupt pictures). The viewer runs one `Reorder` per media (video and audio
+/// have separate sequence spaces) and emits strictly in sequence order.
 ///
-/// A packet that arrives exactly when expected is emitted at once; a later one
-/// is held until the hole before it is filled. If a hole is not filled within
-/// the configured timeout ([`Reorder::default`]'s [`REORDER_TIMEOUT`], or a
-/// longer window from [`Reorder::with_timeout`]), everything held is flushed in
-/// sequence order and the hole is abandoned: the missing packet is genuine loss,
-/// which the player conceals. Packets older than the next expected (very late,
-/// or duplicates past a hole) are dropped.
+/// A packet that arrives when expected is emitted at once; a later one is held
+/// until the hole before it is filled. If a hole is not filled within the
+/// configured timeout, everything held is flushed in order and the hole is
+/// abandoned (genuine loss the player conceals). Packets older than the next
+/// expected (very late, or duplicates past a hole) are dropped.
 pub struct Reorder {
     /// The next sequence number to emit, `None` until the first packet.
     next: Option<u16>,

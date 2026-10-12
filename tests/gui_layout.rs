@@ -38,9 +38,7 @@ fn the_watch_tab_has_a_full_width_volume_slider() {
     let label_rect = shapes
         .iter()
         .find_map(|s| match &s.shape {
-            egui::epaint::Shape::Text(t)
-                if t.galley.text() == "Player Initial Volume: 40%" =>
-            {
+            egui::epaint::Shape::Text(t) if t.galley.text() == "Player Initial Volume: 40%" => {
                 Some(egui::Rect::from_min_size(t.pos, t.galley.rect.size()))
             }
             _ => None,
@@ -317,7 +315,10 @@ fn the_live_watch_tab_shows_restart_and_stop_side_by_side() {
         "each button should be half the panel (258), got {restart:?}"
     );
     // Both fully inside the window at the minimum size.
-    assert!(restart.min.x > 0.0, "Restart is off the left edge: {restart:?}");
+    assert!(
+        restart.min.x > 0.0,
+        "Restart is off the left edge: {restart:?}"
+    );
     assert!(stop.max.x < size.x, "Stop escapes the right edge: {stop:?}");
     assert!(
         stop.max.y < size.y,
@@ -588,8 +589,8 @@ fn the_settings_footer_is_a_matched_pair_and_save_raises_a_toast() {
         })
     };
     let save = rect_of(ACCENT.gamma_multiply(0.18)).expect("Save paints its resting fill");
-    let close = rect_of(CLOSE_GREY.gamma_multiply(0.12))
-        .expect("Close paints its resting grey fill");
+    let close =
+        rect_of(CLOSE_GREY.gamma_multiply(0.12)).expect("Close paints its resting grey fill");
 
     // Same box, side by side.
     assert_eq!(save.size(), close.size(), "Save and Close are the same box");
@@ -604,10 +605,7 @@ fn the_settings_footer_is_a_matched_pair_and_save_raises_a_toast() {
         "Save raises the confirmation toast"
     );
     assert!(
-        dir.path()
-            .join("streampipe")
-            .join("config.json")
-            .exists(),
+        dir.path().join("streampipe").join("config.json").exists(),
         "Save wrote the redirected config"
     );
     assert!(app.show_options, "Save leaves the panel open");

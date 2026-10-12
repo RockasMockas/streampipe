@@ -919,10 +919,9 @@ async fn listen_udp(args: ListenUdpArgs) -> Result<()> {
         let connection = accepting.await.std_context("error accepting connection")?;
         let remote_endpoint_id = &connection.remote_id();
         tracing::info!("got connection from {}", remote_endpoint_id);
-        // The udp flow belongs to this connection. The bidi stream opened by the
-        // connecting side is only used for the handshake, but is kept open for
-        // the lifetime of the tunnel as a liveness signal, while the datagrams
-        // ride along on the same connection.
+        // The bidi stream opened by the connecting side is only used for the
+        // handshake, but is kept open for the lifetime of the tunnel as a liveness
+        // signal while the datagrams ride along on the same connection.
         let (_send, mut recv) = connection
             .accept_bi()
             .await
@@ -1420,19 +1419,16 @@ async fn run_cli(args: Args) -> Result<()> {
 }
 
 fn main() -> Result<()> {
-    // Launched with no arguments at all: open the GUI. Any flag or subcommand
-    // (including `--help`, `--version` and an unknown subcommand) keeps the
-    // CLI behaviour byte-for-byte, and clap still exits non-zero on a parse
-    // error.
+    // No arguments at all: open the GUI. Any flag or subcommand keeps the CLI
+    // behaviour, and clap still exits non-zero on a parse error.
     if std::env::args_os().count() == 1 {
         gui::run();
         return Ok(());
     }
 
-    // From here on the binary acts as a CLI. On Windows it is built as a
-    // GUI-subsystem application (see the crate attribute above), so the OS
-    // gives it no console. Attach to the parent console to make stdout and
-    // stderr visible when it is run from `cmd.exe` / PowerShell.
+    // Acting as a CLI: on Windows this is a GUI-subsystem binary (see the crate
+    // attribute), so the OS gives it no console. Attach to the parent console to
+    // make stdout/stderr visible from `cmd.exe` / PowerShell.
     #[cfg(target_os = "windows")]
     unsafe {
         extern "system" {
@@ -1445,14 +1441,13 @@ fn main() -> Result<()> {
     let args = Args::parse();
     init_logging(args.command.common());
 
-    // A multi-threaded runtime, matching the old `#[tokio::main]`, so the CLI
-    // behaves exactly as before.
+    // Multi-threaded runtime, matching the old `#[tokio::main]`.
     let runtime = tokio::runtime::Runtime::new().std_context("unable to start runtime")?;
     match runtime.block_on(run_cli(args)) {
         Ok(()) => std::process::exit(0),
         Err(e) => {
-            // `Display` prints only the outer error.  Include its sources so
-            // connection failures report Iroh's actionable cause as well.
+            // `Display` prints only the outer error; include its sources so
+            // connection failures report Iroh's actionable cause too.
             eprintln!("error: {e:#}");
             std::process::exit(1);
         }
