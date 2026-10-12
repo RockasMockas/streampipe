@@ -190,7 +190,10 @@ mod tests {
         drop(w);
         drainer.join().unwrap();
         let texts: Vec<String> = snapshot(&ring).into_iter().map(|(s, _)| s).collect();
-        assert_eq!(texts, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+        assert_eq!(
+            texts,
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
     }
 
     #[test]
@@ -201,9 +204,6 @@ mod tests {
         }
         let snap = snapshot(&ring);
         assert_eq!(snap.len(), MAX_LINES);
-        assert_eq!(
-            snap.last().unwrap().0,
-            format!("line {}", MAX_LINES + 49)
-        );
+        assert_eq!(snap.last().unwrap().0, format!("line {}", MAX_LINES + 49));
     }
 }

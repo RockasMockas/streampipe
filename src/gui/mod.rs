@@ -19,8 +19,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use streampipe::webrtc::{Player, StreamStats};
 use eframe::egui::{self, Ui};
+use streampipe::webrtc::{Player, StreamStats};
 use tokio::{runtime::Handle, sync::mpsc};
 
 use self::{
@@ -281,9 +281,15 @@ impl App {
         // offsets, faking a blurred drop shadow behind the crisp text.
         let shadow = egui::Color32::from_black_alpha(70);
 
-        let stream = ui.painter().layout_no_wrap("Stream".into(), font_id.clone(), fg);
-        let pipe_galley = ui.painter().layout_no_wrap("pipe".into(), font_id.clone(), pipe);
-        let stream_shadow = ui.painter().layout_no_wrap("Stream".into(), font_id.clone(), shadow);
+        let stream = ui
+            .painter()
+            .layout_no_wrap("Stream".into(), font_id.clone(), fg);
+        let pipe_galley = ui
+            .painter()
+            .layout_no_wrap("pipe".into(), font_id.clone(), pipe);
+        let stream_shadow = ui
+            .painter()
+            .layout_no_wrap("Stream".into(), font_id.clone(), shadow);
         let pipe_shadow = ui.painter().layout_no_wrap("pipe".into(), font_id, shadow);
 
         // The two words sit side by side; the total width is the sum of the two
@@ -298,9 +304,17 @@ impl App {
         let pipe_x = egui::vec2(stream.size().x, 0.0);
 
         let painter = ui.painter();
-        for off in [egui::vec2(1.0, 1.0), egui::vec2(2.0, 2.0), egui::vec2(3.0, 3.0)] {
+        for off in [
+            egui::vec2(1.0, 1.0),
+            egui::vec2(2.0, 2.0),
+            egui::vec2(3.0, 3.0),
+        ] {
             painter.galley(pos + off, stream_shadow.clone(), egui::Color32::PLACEHOLDER);
-            painter.galley(pos + pipe_x + off, pipe_shadow.clone(), egui::Color32::PLACEHOLDER);
+            painter.galley(
+                pos + pipe_x + off,
+                pipe_shadow.clone(),
+                egui::Color32::PLACEHOLDER,
+            );
         }
         painter.galley(pos, stream, egui::Color32::PLACEHOLDER);
         painter.galley(pos + pipe_x, pipe_galley, egui::Color32::PLACEHOLDER);
@@ -393,9 +407,9 @@ impl App {
                     ui.painter()
                         .rect_stroke(rect, corner, stroke, egui::StrokeKind::Middle);
                     let font_id = ui.style().text_styles[&egui::TextStyle::Button].clone();
-                    let galley = ui
-                        .painter()
-                        .layout_no_wrap(label.to_string(), font_id, text_color);
+                    let galley =
+                        ui.painter()
+                            .layout_no_wrap(label.to_string(), font_id, text_color);
                     // The live dot (if any) sits just right of the label; the label
                     // and dot are centred together as one group, so adding the dot
                     // does not lurch the label off-centre. Read the label's width
@@ -405,19 +419,15 @@ impl App {
                     let gap = 6.0;
                     let total_w = label_w + if live { gap + dot_d } else { 0.0 };
                     let start_x = rect.center().x - total_w * 0.5;
-                    let text_pos = egui::pos2(
-                        start_x,
-                        rect.center().y - galley.rect.height() * 0.5,
-                    );
+                    let text_pos =
+                        egui::pos2(start_x, rect.center().y - galley.rect.height() * 0.5);
                     ui.painter().galley(text_pos, galley, text_color);
                     if live {
                         // A shallow breath (the same curve as the status dot) so the
                         // dot reads as a live signal rather than a static mark.
                         let dot = dot_color.gamma_multiply(pulse_factor(secs));
-                        let dot_c = egui::pos2(
-                            start_x + label_w + gap + dot_d * 0.5,
-                            rect.center().y,
-                        );
+                        let dot_c =
+                            egui::pos2(start_x + label_w + gap + dot_d * 0.5, rect.center().y);
                         ui.painter().circle_filled(dot_c, dot_d * 0.5, dot);
                     }
                     resp
@@ -429,13 +439,7 @@ impl App {
                     watch_live,
                     WATCH_ACCENT,
                 );
-                let b = make(
-                    ui,
-                    "Broadcast",
-                    self.tab == Tab::Broadcast,
-                    bc_live,
-                    ACCENT,
-                );
+                let b = make(ui, "Broadcast", self.tab == Tab::Broadcast, bc_live, ACCENT);
                 if w.clicked() {
                     self.switch_tab(Tab::Watch);
                 }
@@ -459,7 +463,8 @@ impl App {
             egui::pos2(x0 + 5.0, watch.rect.max.y - 2.0),
             egui::pos2(x1 - 5.0, watch.rect.max.y),
         );
-        ui.painter().rect_filled(underline, egui::CornerRadius::same(1), ACCENT);
+        ui.painter()
+            .rect_filled(underline, egui::CornerRadius::same(1), ACCENT);
         ui.separator();
     }
 
@@ -498,79 +503,76 @@ impl App {
         let any_fading = lines
             .iter()
             .any(|(_, at)| at.elapsed().as_secs_f32() < LOG_FADE_SECS);
-        egui::Panel::bottom("log")
-            .exact_size(h)
-            .show(ui, |ui| {
-                // A slim header: the panel's name and a close button, so the panel
-                // can be dismissed without knowing the Ctrl/Cmd+L shortcut. The
-                // close is the same toggle as the shortcut, so the height tween
-                // slides the panel shut either way.
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Log").weak());
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if close_button(ui) {
-                            self.log_open = false;
-                            ui.ctx().request_repaint();
-                        }
-                    });
+        egui::Panel::bottom("log").exact_size(h).show(ui, |ui| {
+            // A slim header: the panel's name and a close button, so the panel
+            // can be dismissed without knowing the Ctrl/Cmd+L shortcut. The
+            // close is the same toggle as the shortcut, so the height tween
+            // slides the panel shut either way.
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Log").weak());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if close_button(ui) {
+                        self.log_open = false;
+                        ui.ctx().request_repaint();
+                    }
                 });
-                ui.separator();
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .stick_to_bottom(true)
-                    .show(ui, |ui| {
-                        let default = ui.style().visuals.text_color();
-                        if lines.is_empty() {
-                            ui.weak("no log output yet");
-                        }
-                        for (line, added_at) in &lines {
-                            // A new line eases in over the fade window: an ease-out
-                            // cubic from its arrival instant, so the line appears
-                            // quickly then settles gently rather than popping in.
-                            // Older lines (and everything present when the panel
-                            // opened) are already fully opaque.
-                            let t = (added_at.elapsed().as_secs_f32() / LOG_FADE_SECS)
-                                .clamp(0.0, 1.0);
-                            let alpha = 1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t);
-                            let base = log_line_color(line, default);
-                            let color = egui::Color32::from_rgba_unmultiplied(
-                                base.r(),
-                                base.g(),
-                                base.b(),
-                                (base.a() as f32 * alpha) as u8,
-                            );
-                            // A faint hover highlight, so a line under the cursor is
-                            // easy to track in a dense log. The line's rect is
-                            // estimated from the current cursor and the text's natural
-                            // height; the highlight is painted before the content, so
-                            // the text and chip sit on top of it.
-                            let line_rect = egui::Rect::from_min_size(
-                                ui.cursor().min,
-                                egui::vec2(ui.available_width(), 16.0),
-                            );
-                            if pointer_over(ui, line_rect) {
-                                ui.painter().rect_filled(
-                                    line_rect,
-                                    egui::CornerRadius::same(3),
-                                    egui::Color32::from_white_alpha(12),
-                                );
-                            }
-                            // A level chip (ERR/WARN) leads the line when one applies,
-                            // so a problem pops out of the wall of grey log text. The
-                            // chip fades in with the line (the same `alpha`).
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 5.0;
-                                log_level_chip(ui, line, alpha);
-                                ui.label(
-                                    egui::RichText::new(line)
-                                        .monospace()
-                                        .size(12.0)
-                                        .color(color),
-                                );
-                            });
-                        }
-                    });
             });
+            ui.separator();
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    let default = ui.style().visuals.text_color();
+                    if lines.is_empty() {
+                        ui.weak("no log output yet");
+                    }
+                    for (line, added_at) in &lines {
+                        // A new line eases in over the fade window: an ease-out
+                        // cubic from its arrival instant, so the line appears
+                        // quickly then settles gently rather than popping in.
+                        // Older lines (and everything present when the panel
+                        // opened) are already fully opaque.
+                        let t = (added_at.elapsed().as_secs_f32() / LOG_FADE_SECS).clamp(0.0, 1.0);
+                        let alpha = 1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t);
+                        let base = log_line_color(line, default);
+                        let color = egui::Color32::from_rgba_unmultiplied(
+                            base.r(),
+                            base.g(),
+                            base.b(),
+                            (base.a() as f32 * alpha) as u8,
+                        );
+                        // A faint hover highlight, so a line under the cursor is
+                        // easy to track in a dense log. The line's rect is
+                        // estimated from the current cursor and the text's natural
+                        // height; the highlight is painted before the content, so
+                        // the text and chip sit on top of it.
+                        let line_rect = egui::Rect::from_min_size(
+                            ui.cursor().min,
+                            egui::vec2(ui.available_width(), 16.0),
+                        );
+                        if pointer_over(ui, line_rect) {
+                            ui.painter().rect_filled(
+                                line_rect,
+                                egui::CornerRadius::same(3),
+                                egui::Color32::from_white_alpha(12),
+                            );
+                        }
+                        // A level chip (ERR/WARN) leads the line when one applies,
+                        // so a problem pops out of the wall of grey log text. The
+                        // chip fades in with the line (the same `alpha`).
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 5.0;
+                            log_level_chip(ui, line, alpha);
+                            ui.label(
+                                egui::RichText::new(line)
+                                    .monospace()
+                                    .size(12.0)
+                                    .color(color),
+                            );
+                        });
+                    }
+                });
+        });
         // Repaint while expanded so streaming logs appear without a storm.
         ui.ctx().request_repaint_after(REPAINT);
         // The height slide and the line fade-in both want display-rate frames, not
@@ -676,10 +678,8 @@ impl App {
         // flight, so an idle window falls asleep the moment the fade settles (and the
         // overlay is a no-op at full alpha, so no painting lingers either).
         if self.tab_fade_active {
-            let (eased, settled) = tab_fade_step(
-                (now - self.tab_switched_at).as_secs_f32(),
-                TAB_FADE_SECS,
-            );
+            let (eased, settled) =
+                tab_fade_step((now - self.tab_switched_at).as_secs_f32(), TAB_FADE_SECS);
             self.tab_fade = eased;
             self.tab_fade_active = !settled;
         }
@@ -791,8 +791,10 @@ impl App {
         } else {
             None
         };
-        let bar_frame = egui::Frame::side_top_panel(ui.style())
-            .fill(status_bar_fill(egui::Color32::from_rgb(19, 21, 25), bar_tint));
+        let bar_frame = egui::Frame::side_top_panel(ui.style()).fill(status_bar_fill(
+            egui::Color32::from_rgb(19, 21, 25),
+            bar_tint,
+        ));
         // The frame's top inner margin, so the hairline can sit exactly on the
         // bar's top edge (the boundary with the content above).
         let bar_top_margin = bar_frame.inner_margin.topf();
@@ -951,10 +953,22 @@ fn spinner(ui: &mut Ui, secs: f32, color: egui::Color32) {
         let a1 = start + span * (i + 1) as f32 / n as f32;
         // Four corners of the i-th ring quad. `colored_vertex` pushes in order, so
         // this quad's vertices are at `4*i .. 4*i+4`.
-        mesh.colored_vertex(center + egui::vec2(a0.cos() * outer, a0.sin() * outer), color);
-        mesh.colored_vertex(center + egui::vec2(a1.cos() * outer, a1.sin() * outer), color);
-        mesh.colored_vertex(center + egui::vec2(a1.cos() * inner, a1.sin() * inner), color);
-        mesh.colored_vertex(center + egui::vec2(a0.cos() * inner, a0.sin() * inner), color);
+        mesh.colored_vertex(
+            center + egui::vec2(a0.cos() * outer, a0.sin() * outer),
+            color,
+        );
+        mesh.colored_vertex(
+            center + egui::vec2(a1.cos() * outer, a1.sin() * outer),
+            color,
+        );
+        mesh.colored_vertex(
+            center + egui::vec2(a1.cos() * inner, a1.sin() * inner),
+            color,
+        );
+        mesh.colored_vertex(
+            center + egui::vec2(a0.cos() * inner, a0.sin() * inner),
+            color,
+        );
         let v = 4 * i as u32;
         mesh.add_triangle(v, v + 1, v + 2);
         mesh.add_triangle(v, v + 2, v + 3);
@@ -1139,7 +1153,11 @@ fn status_bar_fill(base: egui::Color32, tint: Option<egui::Color32>) -> egui::Co
     };
     let a = 0.06;
     let mix = |b: u8, t: u8| -> u8 { (b as f32 * (1.0 - a) + t as f32 * a).round() as u8 };
-    egui::Color32::from_rgb(mix(base.r(), t.r()), mix(base.g(), t.g()), mix(base.b(), t.b()))
+    egui::Color32::from_rgb(
+        mix(base.r(), t.r()),
+        mix(base.g(), t.g()),
+        mix(base.b(), t.b()),
+    )
 }
 
 /// Whether the pointer is over `rect` this frame, for a hand-painted widget's hover
@@ -1160,10 +1178,7 @@ fn pointer_over(ui: &Ui, rect: egui::Rect) -> bool {
 fn pointer_pressed_over(ui: &Ui, rect: egui::Rect) -> bool {
     ui.ctx().input(|i| {
         i.pointer.button_pressed(egui::PointerButton::Primary)
-            && i
-                .pointer
-                .latest_pos()
-                .is_some_and(|p| rect.contains(p))
+            && i.pointer.latest_pos().is_some_and(|p| rect.contains(p))
     })
 }
 
@@ -1187,7 +1202,11 @@ fn sonar_pulse(
     if alpha <= 0.005 {
         return;
     }
-    painter.circle_stroke(center, radius, egui::Stroke::new(1.0, color.gamma_multiply(alpha)));
+    painter.circle_stroke(
+        center,
+        radius,
+        egui::Stroke::new(1.0, color.gamma_multiply(alpha)),
+    );
 }
 
 /// A compact "LIVE" badge for the status bar: a small outlined pill in the session's
@@ -1200,7 +1219,9 @@ fn sonar_pulse(
 /// never clicked.
 fn live_badge(ui: &mut Ui, color: egui::Color32, breath: f32) {
     let font_id = egui::FontId::proportional(10.0);
-    let galley = ui.painter().layout_no_wrap("LIVE".to_string(), font_id, egui::Color32::PLACEHOLDER);
+    let galley =
+        ui.painter()
+            .layout_no_wrap("LIVE".to_string(), font_id, egui::Color32::PLACEHOLDER);
     let tw = galley.rect.width();
     let th = galley.rect.height();
     let pad_x = 5.0;
@@ -1214,14 +1235,16 @@ fn live_badge(ui: &mut Ui, color: egui::Color32, breath: f32) {
     let corner = egui::CornerRadius::same(4);
     ui.painter()
         .rect_filled(rect, corner, color.gamma_multiply(0.10));
-    ui.painter()
-        .rect_stroke(rect, corner, egui::Stroke::new(1.0, color.gamma_multiply(breath)), egui::StrokeKind::Inside);
-    // Centre the text in the pill.
-    let text_pos = egui::pos2(
-        rect.center().x - tw * 0.5,
-        rect.center().y - th * 0.5,
+    ui.painter().rect_stroke(
+        rect,
+        corner,
+        egui::Stroke::new(1.0, color.gamma_multiply(breath)),
+        egui::StrokeKind::Inside,
     );
-    ui.painter().galley(text_pos, galley, color.gamma_multiply(breath.max(0.8)));
+    // Centre the text in the pill.
+    let text_pos = egui::pos2(rect.center().x - tw * 0.5, rect.center().y - th * 0.5);
+    ui.painter()
+        .galley(text_pos, galley, color.gamma_multiply(breath.max(0.8)));
 }
 
 /// A section heading: a small accent-coloured rounded bar to the left of a bold
@@ -1237,8 +1260,11 @@ fn section_tick(ui: &mut Ui, text: &str, color: egui::Color32) {
         // Nudge the bar down a couple of pixels so it centres on the label's text: the
         // row is top-aligned, so an un-nudged bar would sit a touch high relative to the
         // label. The nudge stays within the row's height, so it never overflows.
-        ui.painter()
-            .rect_filled(bar.translate(egui::vec2(0.0, 2.0)), egui::CornerRadius::same(1), color);
+        ui.painter().rect_filled(
+            bar.translate(egui::vec2(0.0, 2.0)),
+            egui::CornerRadius::same(1),
+            color,
+        );
         ui.label(egui::RichText::new(text).strong());
     });
 }
@@ -1308,9 +1334,24 @@ fn log_level_chip(ui: &mut Ui, line: &str, alpha: f32) -> bool {
     // in with its line. The text is laid out with its own (non-placeholder) colour,
     // so the galley carries the chip's hue.
     let corner = egui::CornerRadius::same(3);
-    let fill = egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), (26.0 * alpha) as u8);
-    let stroke = egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), (120.0 * alpha) as u8);
-    let text_color = egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), (230.0 * alpha) as u8);
+    let fill = egui::Color32::from_rgba_unmultiplied(
+        color.r(),
+        color.g(),
+        color.b(),
+        (26.0 * alpha) as u8,
+    );
+    let stroke = egui::Color32::from_rgba_unmultiplied(
+        color.r(),
+        color.g(),
+        color.b(),
+        (120.0 * alpha) as u8,
+    );
+    let text_color = egui::Color32::from_rgba_unmultiplied(
+        color.r(),
+        color.g(),
+        color.b(),
+        (230.0 * alpha) as u8,
+    );
     let font_id = egui::FontId::monospace(10.0);
     let galley = ui
         .painter()
@@ -1318,12 +1359,19 @@ fn log_level_chip(ui: &mut Ui, line: &str, alpha: f32) -> bool {
     let pad_x = 4.0;
     let pad_y = 1.5;
     let (rect, _resp) = ui.allocate_exact_size(
-        egui::vec2(galley.rect.width() + pad_x * 2.0, galley.rect.height() + pad_y * 2.0),
+        egui::vec2(
+            galley.rect.width() + pad_x * 2.0,
+            galley.rect.height() + pad_y * 2.0,
+        ),
         egui::Sense::hover(),
     );
     ui.painter().rect_filled(rect, corner, fill);
-    ui.painter()
-        .rect_stroke(rect, corner, egui::Stroke::new(1.0, stroke), egui::StrokeKind::Inside);
+    ui.painter().rect_stroke(
+        rect,
+        corner,
+        egui::Stroke::new(1.0, stroke),
+        egui::StrokeKind::Inside,
+    );
     let text_pos = egui::pos2(
         rect.center().x - galley.rect.width() * 0.5,
         rect.center().y - galley.rect.height() * 0.5,
@@ -1501,14 +1549,14 @@ fn app_icon() -> Arc<egui::IconData> {
 fn icon_pixel(x: f32, y: f32, size: f32) -> (u8, u8, u8, u8) {
     let (px, py) = (x + 0.5, y + 0.5); // centre the sample in the pixel
     let accent: (f32, f32, f32) = (80.0, 200.0, 120.0); // the live accent (ACCENT)
-    // The rounded-square ground.
+                                                        // The rounded-square ground.
     let radius = size * 0.22;
     let d_bg = rounded_box_sdf(px, py, size, radius);
     if d_bg > 0.5 {
         return (0, 0, 0, 0); // outside the icon
     }
     let edge = (0.5 - d_bg).clamp(0.0, 1.0); // 1 px anti-aliasing
-    // A subtle vertical gradient: lighter at the top (lit from above).
+                                             // A subtle vertical gradient: lighter at the top (lit from above).
     let t = (py / size).clamp(0.0, 1.0);
     let (top, bot) = ((31.0, 34.0, 40.0), (19.0, 21.0, 25.0));
     let mut r = top.0 + (bot.0 - top.0) * t;
@@ -1551,8 +1599,7 @@ fn rounded_box_sdf(px: f32, py: f32, size: f32, radius: f32) -> f32 {
         (px - size * 0.5).abs() - (size * 0.5 - radius),
         (py - size * 0.5).abs() - (size * 0.5 - radius),
     );
-    (qx.max(0.0) * qx.max(0.0) + qy.max(0.0) * qy.max(0.0)).sqrt()
-        + (qx.min(0.0).max(qy.min(0.0)))
+    (qx.max(0.0) * qx.max(0.0) + qy.max(0.0) * qy.max(0.0)).sqrt() + (qx.min(0.0).max(qy.min(0.0)))
         - radius
 }
 
@@ -1685,9 +1732,9 @@ pub fn run() {
 mod tests {
     use iroh::SecretKey;
 
-    use super::*;
     use super::config::DEFAULT_VOLUME;
     use super::options::CLOSE_GREY;
+    use super::*;
 
     /// An `App` wired to throwaway state, plus the runtime it borrows a handle
     /// from (kept alive by the caller).
@@ -1850,9 +1897,7 @@ mod tests {
         let label_rect = shapes
             .iter()
             .find_map(|s| match &s.shape {
-                egui::epaint::Shape::Text(t)
-                    if t.galley.text() == "Player Initial Volume: 40%" =>
-                {
+                egui::epaint::Shape::Text(t) if t.galley.text() == "Player Initial Volume: 40%" => {
                     // `pos` is where the text box is placed; the galley's size is
                     // local, so lift it to the placement.
                     Some(egui::Rect::from_min_size(t.pos, t.galley.rect.size()))
@@ -1867,7 +1912,6 @@ mod tests {
             .iter()
             .filter_map(|s| match &s.shape {
                 egui::epaint::Shape::Rect(r)
-
                     if r.rect.left() >= label_rect.right()
                         && r.rect.max.y > label_rect.min.y
                         && r.rect.min.y < label_rect.max.y =>
@@ -2119,7 +2163,10 @@ mod tests {
             pos = tab_slide_step(pos, 1.0, 1.0 / 60.0);
             frames += 1;
             assert!(pos <= 1.0, "no overshoot at frame {frames}, got {pos}");
-            assert!(frames < 60, "the slide must settle within 1 s, took {frames} frames");
+            assert!(
+                frames < 60,
+                "the slide must settle within 1 s, took {frames} frames"
+            );
         }
         assert!(
             frames < 45,
@@ -2289,7 +2336,10 @@ mod tests {
             !app.watch_ticket.contains('\n'),
             "Enter must not drop a newline into the ticket box"
         );
-        assert_eq!(app.watch_ticket, "not-a-real-ticket", "ticket text untouched");
+        assert_eq!(
+            app.watch_ticket, "not-a-real-ticket",
+            "ticket text untouched"
+        );
         assert_eq!(
             app.state.lock().unwrap().watch,
             Mode::Idle,
@@ -2357,7 +2407,11 @@ mod tests {
         assert_eq!(meshes.len(), 1, "the spinner paints exactly one mesh");
         let mesh = &meshes[0];
         assert_eq!(mesh.vertices.len(), 96, "24 quads × 4 vertices");
-        assert_eq!(mesh.indices.len(), 48 * 3, "24 quads × 2 triangles × 3 indices");
+        assert_eq!(
+            mesh.indices.len(),
+            48 * 3,
+            "24 quads × 2 triangles × 3 indices"
+        );
     }
 
     /// The spinner's arc rotates with `secs`: two different times paint two
@@ -2463,11 +2517,9 @@ mod tests {
         out.textures_delta.clear();
         let bar_fill = egui::Color32::from_rgb(19, 21, 25);
         assert!(
-            out.shapes
-                .iter()
-                .any(|s| matches!(&s.shape,
-                    egui::epaint::Shape::Rect(r) if r.fill == bar_fill
-                )),
+            out.shapes.iter().any(|s| matches!(&s.shape,
+                egui::epaint::Shape::Rect(r) if r.fill == bar_fill
+            )),
             "the status bar should paint its distinct darker fill"
         );
     }
@@ -2544,10 +2596,7 @@ mod tests {
             }
             _ => false,
         });
-        assert!(
-            bevel,
-            "the copy box should paint its top light-catch bevel"
-        );
+        assert!(bevel, "the copy box should paint its top light-catch bevel");
     }
 
     /// The idle Start button paints a soft 3-layer accent halo (the live green at
@@ -2591,16 +2640,13 @@ mod tests {
         let count = shapes
             .iter()
             .filter(|s| match &s.shape {
-                egui::epaint::Shape::Rect(r) => halo_alphas
-                    .iter()
-                    .any(|&a| r.fill == red.gamma_multiply(a)),
+                egui::epaint::Shape::Rect(r) => {
+                    halo_alphas.iter().any(|&a| r.fill == red.gamma_multiply(a))
+                }
                 _ => false,
             })
             .count();
-        assert_eq!(
-            count, 3,
-            "the stop button should paint a 3-layer red halo"
-        );
+        assert_eq!(count, 3, "the stop button should paint a 3-layer red halo");
     }
 
     /// The tab content's fade-in starts hidden, eases out monotonically, and settles
@@ -2616,7 +2662,10 @@ mod tests {
         assert!(!settled, "mid-fade is not settled");
         // Settles exactly on 1.0 at the duration, and stays settled past it.
         assert_eq!(tab_fade_step(TAB_FADE_SECS, TAB_FADE_SECS), (1.0, true));
-        assert_eq!(tab_fade_step(TAB_FADE_SECS * 5.0, TAB_FADE_SECS), (1.0, true));
+        assert_eq!(
+            tab_fade_step(TAB_FADE_SECS * 5.0, TAB_FADE_SECS),
+            (1.0, true)
+        );
         // Monotonic: the alpha never decreases as the fade advances.
         let mut prev = 0.0;
         let mut t = 0.0;
@@ -2663,10 +2712,7 @@ mod tests {
             late.radius
         );
         // Near the end of the pulse the ring has faded out: nothing is painted.
-        assert!(
-            ring(1.99).is_none(),
-            "a nearly-faded ring paints nothing"
-        );
+        assert!(ring(1.99).is_none(), "a nearly-faded ring paints nothing");
     }
 
     /// The button's own fill rect: full-width and 36 tall. The halo layers are
@@ -2713,8 +2759,7 @@ mod tests {
         let mut out3 = ctx2.run_ui(raw_hover, |ui| app.draw(ui));
         out3.textures_delta.clear();
         assert!(
-            out3
-                .shapes
+            out3.shapes
                 .iter()
                 .any(|s| matches!(&s.shape, egui::epaint::Shape::Rect(r) if r.fill == hover_fill)),
             "hovering the start button should lift its fill to the hover shade"
@@ -2739,7 +2784,10 @@ mod tests {
             pos = log_anim_step(pos, 1.0, 1.0 / 60.0);
             frames += 1;
             assert!(pos <= 1.0, "no overshoot at frame {frames}, got {pos}");
-            assert!(frames < 60, "the slide must settle within 1 s, took {frames} frames");
+            assert!(
+                frames < 60,
+                "the slide must settle within 1 s, took {frames} frames"
+            );
         }
         assert!(
             frames < 45,
@@ -2766,7 +2814,10 @@ mod tests {
     fn stat_ease_settles_on_the_target_without_overshooting() {
         // A single 60 fps step moves partway but never past the target.
         let step = stat_ease(0.0, 5000.0, 1.0 / 60.0);
-        assert!(step > 0.0 && step < 5000.0, "one frame is partway, got {step}");
+        assert!(
+            step > 0.0 && step < 5000.0,
+            "one frame is partway, got {step}"
+        );
 
         // Stepping at 60 fps settles exactly on the target; the settle should take
         // well under two seconds of frames, never overshoot, and never stall.
@@ -2776,7 +2827,10 @@ mod tests {
             pos = stat_ease(pos, 5000.0, 1.0 / 60.0);
             frames += 1;
             assert!(pos <= 5000.0, "no overshoot at frame {frames}, got {pos}");
-            assert!(frames < 120, "the settle must finish within 2 s, took {frames}");
+            assert!(
+                frames < 120,
+                "the settle must finish within 2 s, took {frames}"
+            );
         }
 
         // Settled stays settled: the repaint guard can disarm.
@@ -2908,16 +2962,17 @@ mod tests {
         });
         out.textures_delta.clear();
         // The accent bar: a small filled rect in the full accent colour.
-        let bar = out.shapes.iter().any(|s| matches!(&s.shape,
-            egui::epaint::Shape::Rect(r)
-                if r.fill == ACCENT && r.rect.width() < 6.0 && r.rect.height() < 16.0
-        ));
+        let bar = out.shapes.iter().any(|s| {
+            matches!(&s.shape,
+                egui::epaint::Shape::Rect(r)
+                    if r.fill == ACCENT && r.rect.width() < 6.0 && r.rect.height() < 16.0
+            )
+        });
         assert!(bar, "section_tick should paint its accent bar");
         // The label: a text galley holding the section text.
-        let label = out
-            .shapes
-            .iter()
-            .any(|s| matches!(&s.shape, egui::epaint::Shape::Text(t) if t.galley.text() == "Statistics"));
+        let label = out.shapes.iter().any(
+            |s| matches!(&s.shape, egui::epaint::Shape::Text(t) if t.galley.text() == "Statistics"),
+        );
         assert!(label, "section_tick should paint its label");
     }
 
@@ -3071,8 +3126,8 @@ mod tests {
             })
         };
         let save = rect_of(ACCENT.gamma_multiply(0.18)).expect("Save paints its resting fill");
-        let close = rect_of(CLOSE_GREY.gamma_multiply(0.12))
-            .expect("Close paints its resting grey fill");
+        let close =
+            rect_of(CLOSE_GREY.gamma_multiply(0.12)).expect("Close paints its resting grey fill");
         // Same box, side by side: the pair matches, the grey one is the secondary.
         assert_eq!(save.size(), close.size(), "Save and Close are the same box");
         assert_eq!((save.width(), save.height()), (90.0, 30.0));
@@ -3119,10 +3174,7 @@ mod tests {
             "Save raises the confirmation toast"
         );
         assert!(
-            dir.path()
-                .join("streampipe")
-                .join("config.json")
-                .exists(),
+            dir.path().join("streampipe").join("config.json").exists(),
             "Save wrote the redirected config"
         );
         assert!(app.show_options, "Save leaves the panel open");
@@ -3199,21 +3251,22 @@ mod tests {
             "the callout should paint its muted red-tinted surface"
         );
         // The left bar: a small filled rect in the full error red.
-        let bar = out
-            .shapes
-            .iter()
-            .any(|s| matches!(&s.shape,
+        let bar = out.shapes.iter().any(|s| {
+            matches!(&s.shape,
                 egui::epaint::Shape::Rect(r)
                     if r.fill == ERROR && r.rect.width() < 6.0 && r.rect.height() < 16.0
-            ));
+            )
+        });
         assert!(bar, "the callout should paint its red left bar");
         // The message, laid out in the error red.
         let msg = out
             .shapes
             .iter()
-            .find(|s| matches!(&s.shape,
-                egui::epaint::Shape::Text(t) if t.galley.text() == "invalid ticket: bad base64"
-            ))
+            .find(|s| {
+                matches!(&s.shape,
+                    egui::epaint::Shape::Text(t) if t.galley.text() == "invalid ticket: bad base64"
+                )
+            })
             .expect("the callout should paint its message");
         let color = match &msg.shape {
             egui::epaint::Shape::Text(t) => {
@@ -3237,10 +3290,7 @@ mod tests {
         let size = egui::vec2(760.0, 560.0);
         let ctx = egui::Context::default();
         let raw = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                size,
-            )),
+            screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), size)),
             ..Default::default()
         };
         // Render once to locate the close button: on an idle app the only 1.5 px
@@ -3261,7 +3311,11 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(2, segs.len(), "the close button paints two crossing strokes");
+        assert_eq!(
+            2,
+            segs.len(),
+            "the close button paints two crossing strokes"
+        );
         let min_x = segs
             .iter()
             .flat_map(|p| [p[0].x, p[1].x])
@@ -3282,10 +3336,7 @@ mod tests {
 
         // Press over the button, then release: a click.
         let press = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                size,
-            )),
+            screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), size)),
             events: vec![
                 egui::Event::PointerMoved(center),
                 egui::Event::PointerButton {
@@ -3300,10 +3351,7 @@ mod tests {
         let mut out = ctx.run_ui(press, |ui| app.draw(ui));
         out.textures_delta.clear();
         let release = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                size,
-            )),
+            screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), size)),
             events: vec![egui::Event::PointerButton {
                 button: egui::PointerButton::Primary,
                 pos: center,
@@ -3372,10 +3420,7 @@ mod tests {
         let resting_fill = ACCENT.gamma_multiply(0.18);
         let press_fill = ACCENT.gamma_multiply(0.20);
         let raw = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                size,
-            )),
+            screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), size)),
             ..Default::default()
         };
         // Idle: locate the button by its resting fill.
@@ -3397,10 +3442,7 @@ mod tests {
         // previous pass).
         let ctx2 = egui::Context::default();
         let raw_press = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                size,
-            )),
+            screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), size)),
             events: vec![
                 egui::Event::PointerMoved(center),
                 egui::Event::PointerButton {
@@ -3417,8 +3459,7 @@ mod tests {
         let mut out3 = ctx2.run_ui(raw_press, |ui| app.draw(ui));
         out3.textures_delta.clear();
         assert!(
-            out3
-                .shapes
+            out3.shapes
                 .iter()
                 .any(|s| matches!(&s.shape, egui::epaint::Shape::Rect(r) if r.fill == press_fill)),
             "pressing the start button should push its fill in to the press shade"
@@ -3435,10 +3476,7 @@ mod tests {
         app.state.lock().unwrap().broadcast = Mode::Broadcasting;
         let size = egui::vec2(760.0, 560.0);
         let raw = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                size,
-            )),
+            screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), size)),
             ..Default::default()
         };
         // Locate the WHIP copy box by its accent-tinted fill (alpha 14 at rest).
@@ -3459,10 +3497,7 @@ mod tests {
         // Hover the copy box: two passes make the hover live.
         let ctx2 = egui::Context::default();
         let raw_hover = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                size,
-            )),
+            screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), size)),
             events: vec![egui::Event::PointerMoved(center)],
             ..Default::default()
         };
@@ -3542,7 +3577,10 @@ mod tests {
         app.state.lock().unwrap().broadcast = Mode::Broadcasting;
         let f = bar_fill(&render_shapes(&mut app, size)).expect("the bar paints its fill");
         assert_ne!(f, idle_fill, "a live session tints the bar");
-        assert!(f.g() > idle_fill.g(), "the broadcast tint is greener, got {f:?}");
+        assert!(
+            f.g() > idle_fill.g(),
+            "the broadcast tint is greener, got {f:?}"
+        );
 
         // Watching: a blue cast.
         let (mut app, _rt) = test_app();
@@ -3640,9 +3678,9 @@ mod tests {
     fn the_status_bar_paints_a_live_badge_when_live() {
         let size = egui::vec2(760.0, 560.0);
         let has_live_badge = |shapes: &[egui::epaint::ClippedShape]| -> bool {
-            shapes
-                .iter()
-                .any(|s| matches!(&s.shape, egui::epaint::Shape::Text(t) if t.galley.text() == "LIVE"))
+            shapes.iter().any(
+                |s| matches!(&s.shape, egui::epaint::Shape::Text(t) if t.galley.text() == "LIVE"),
+            )
         };
 
         // Live (broadcasting): the badge is painted.
@@ -3727,9 +3765,14 @@ mod tests {
                 _ => None,
             })
         };
-        let err_expected = egui::Color32::from_rgba_unmultiplied(ERROR.r(), ERROR.g(), ERROR.b(), 230);
-        let warn_expected =
-            egui::Color32::from_rgba_unmultiplied(WARN_AMBER.r(), WARN_AMBER.g(), WARN_AMBER.b(), 230);
+        let err_expected =
+            egui::Color32::from_rgba_unmultiplied(ERROR.r(), ERROR.g(), ERROR.b(), 230);
+        let warn_expected = egui::Color32::from_rgba_unmultiplied(
+            WARN_AMBER.r(),
+            WARN_AMBER.g(),
+            WARN_AMBER.b(),
+            230,
+        );
         assert_eq!(
             chip_color("ERR"),
             Some(err_expected),
@@ -3759,11 +3802,12 @@ mod tests {
         log::push(&app.log, "a log line to hover");
         let size = egui::vec2(760.0, 560.0);
         // The faint highlight: a filled rect in a faint white (alpha 12).
-        let has_highlight = |shapes: &[egui::epaint::ClippedShape]| -> bool {
-            shapes.iter().any(|s| matches!(&s.shape,
+        let has_highlight =
+            |shapes: &[egui::epaint::ClippedShape]| -> bool {
+                shapes.iter().any(|s| matches!(&s.shape,
                 egui::epaint::Shape::Rect(r) if r.fill == egui::Color32::from_white_alpha(12)
             ))
-        };
+            };
         // Not hovered: no highlight.
         let ctx = egui::Context::default();
         let raw = egui::RawInput {
@@ -3862,17 +3906,13 @@ mod tests {
         let mut content_idx = None;
         for (i, s) in shapes.iter().enumerate() {
             match &s.shape {
-                egui::epaint::Shape::Mesh(m)
-                    if m.vertices.len() == 4 && m.indices.len() == 6 =>
-                {
+                egui::epaint::Shape::Mesh(m) if m.vertices.len() == 4 && m.indices.len() == 6 => {
                     gradient_idx = Some(i);
                 }
                 // Central panel content lives in the upper area; the status bar is
                 // at the very bottom (y ~ 541). Track the first such shape: the
                 // gradient must precede even that one to be behind all the content.
-                egui::epaint::Shape::Text(t)
-                    if t.pos.y < 500.0 && content_idx.is_none() =>
-                {
+                egui::epaint::Shape::Text(t) if t.pos.y < 500.0 && content_idx.is_none() => {
                     content_idx = Some(i);
                 }
                 _ => {}
@@ -3905,8 +3945,7 @@ mod tests {
             let mut g = app.state.lock().unwrap();
             g.broadcast = Mode::Broadcasting;
             // A peak in the middle (not the newest sample), so the peak marker is drawn.
-            g.video_kbps_history =
-                std::collections::VecDeque::from(vec![100.0, 400.0, 150.0]);
+            g.video_kbps_history = std::collections::VecDeque::from(vec![100.0, 400.0, 150.0]);
             g.stats = Some(StreamStats {
                 video_kbps: 150.0,
                 ..Default::default()
@@ -3945,8 +3984,7 @@ mod tests {
             let mut g = app.state.lock().unwrap();
             g.broadcast = Mode::Broadcasting;
             // The newest sample is the peak, so the peak marker is skipped.
-            g.video_kbps_history =
-                std::collections::VecDeque::from(vec![100.0, 150.0, 400.0]);
+            g.video_kbps_history = std::collections::VecDeque::from(vec![100.0, 150.0, 400.0]);
             g.stats = Some(StreamStats {
                 video_kbps: 400.0,
                 ..Default::default()
@@ -3980,9 +4018,7 @@ mod tests {
         let count = shapes
             .iter()
             .filter(|s| match &s.shape {
-                egui::epaint::Shape::Circle(c) => {
-                    c.fill == glow_color && c.stroke.width == 0.0
-                }
+                egui::epaint::Shape::Circle(c) => c.fill == glow_color && c.stroke.width == 0.0,
                 _ => false,
             })
             .count();
@@ -4056,7 +4092,11 @@ mod tests {
         );
         // A corner is outside the rounded square: fully transparent.
         assert_eq!(px(0, 0).3, 0, "the top-left corner is transparent");
-        assert_eq!(px(size - 1, size - 1).3, 0, "the bottom-right corner is transparent");
+        assert_eq!(
+            px(size - 1, size - 1).3,
+            0,
+            "the bottom-right corner is transparent"
+        );
         // The top edge-centre is inside the rounded square: opaque (not clipped).
         assert!(
             px(size / 2, 1).3 > 0,
@@ -4168,13 +4208,10 @@ mod tests {
         let shapes = render_shapes(&mut app, size);
         let hint = "Ctrl+L log · Ctrl+, settings";
         assert!(
-            shapes
-                .iter()
-                .any(|s| matches!(&s.shape,
-                    egui::epaint::Shape::Text(t) if t.galley.text() == hint
-                )),
+            shapes.iter().any(|s| matches!(&s.shape,
+                egui::epaint::Shape::Text(t) if t.galley.text() == hint
+            )),
             "the status bar should show a keyboard shortcut hint"
         );
     }
 }
-

@@ -1960,8 +1960,7 @@ pub async fn connect_whip(endpoint: Endpoint, cfg: ViewerConfig) -> Result<()> {
                             // loss this pacing exists to prevent.
                             let missing = required - tokens;
                             // Tokens refill at TOKEN_RATE per millisecond.
-                            let wait_micros =
-                                (missing as u64 * 1000).div_ceil(TOKEN_RATE as u64);
+                            let wait_micros = (missing as u64 * 1000).div_ceil(TOKEN_RATE as u64);
                             // At least 1 ms: a sub-millisecond timer would wake on
                             // the next tick anyway, so this is the cheapest real yield.
                             let wait_micros = wait_micros.max(1000);

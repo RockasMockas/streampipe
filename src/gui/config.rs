@@ -14,9 +14,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use streampipe::webrtc::Player;
 use iroh::SecretKey;
 use serde::{Deserialize, Serialize};
+use streampipe::webrtc::Player;
 
 /// The application name used for the config directory.
 const APP_DIR: &str = "streampipe";

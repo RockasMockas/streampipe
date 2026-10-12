@@ -24,12 +24,12 @@ use std::{
     time::Duration,
 };
 
+use eframe::egui;
+use iroh::{Endpoint, EndpointAddr, SecretKey};
 use streampipe::{
     webrtc::{self, Player, StreamStats, ViewerConfig, WhipConfig},
     EndpointTicket, WEBRTC_ALPN,
 };
-use eframe::egui;
-use iroh::{Endpoint, EndpointAddr, SecretKey};
 use tokio::{runtime::Handle, sync::mpsc, task::JoinHandle, time::timeout};
 
 use crate::{udp, CommonArgs, ONLINE_TIMEOUT};
@@ -830,7 +830,10 @@ mod tests {
             watch_error: None,
         };
         assert_eq!(snap(Mode::Idle, Mode::Idle).status(), "Idle");
-        assert_eq!(snap(Mode::Broadcasting, Mode::Idle).status(), "Broadcasting");
+        assert_eq!(
+            snap(Mode::Broadcasting, Mode::Idle).status(),
+            "Broadcasting"
+        );
         assert_eq!(snap(Mode::Idle, Mode::Watching).status(), "Watching");
         let both = snap(Mode::Broadcasting, Mode::Watching);
         assert_eq!(both.status(), "Broadcasting + Watching");
@@ -874,7 +877,11 @@ mod tests {
             (total - MAX_KBPS_SAMPLES) as f64,
             "the oldest samples were evicted, oldest first"
         );
-        assert_eq!(h[h.len() - 1], (total - 1) as f64, "the newest sample is last");
+        assert_eq!(
+            h[h.len() - 1],
+            (total - 1) as f64,
+            "the newest sample is last"
+        );
     }
 
     /// Stopping the broadcast track must leave a live watch track (and vice versa)
@@ -899,8 +906,15 @@ mod tests {
         {
             let g = state.lock().unwrap();
             assert_eq!(g.broadcast, Mode::Idle, "broadcast stopped");
-            assert_eq!(g.watch, Mode::Watching, "watch untouched by a broadcast stop");
-            assert!(g.stats.is_none(), "broadcast stats cleared with the broadcast");
+            assert_eq!(
+                g.watch,
+                Mode::Watching,
+                "watch untouched by a broadcast stop"
+            );
+            assert!(
+                g.stats.is_none(),
+                "broadcast stats cleared with the broadcast"
+            );
         }
         stop(&state, &egui::Context::default(), Track::Watch);
         assert_eq!(

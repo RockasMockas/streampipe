@@ -2,15 +2,15 @@
 
 use std::{path::PathBuf, str::FromStr};
 
-use streampipe::EndpointTicket;
 use eframe::egui::{self, Context, Ui};
+use streampipe::EndpointTicket;
 
 use super::{
     config::{player_key, PLAYERS},
+    error_callout, pointer_over, pointer_pressed_over, primary_button_glow, section_tick,
+    soft_glow, spinner,
     state::{self, Mode, WatchParams},
-    App, ACCENT, ERROR, WATCH_ACCENT, error_callout, pointer_over, pointer_pressed_over,
-    primary_button_glow,
-    section_tick, soft_glow, spinner,
+    App, ACCENT, ERROR, WATCH_ACCENT,
 };
 
 /// Parse a buffer field (milliseconds) into an option; blank or invalid is
@@ -235,8 +235,7 @@ impl App {
                 // A subtle red halo behind the Stop button, matching the Broadcast
                 // tab, so the one control that stops a watch reads as a "stop" action.
                 // The halo also contracts on press, so the stop reads as pressed in.
-                let stop_rect =
-                    egui::Rect::from_min_size(ui.cursor().min, egui::vec2(140.0, 30.0));
+                let stop_rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(140.0, 30.0));
                 let hovered = pointer_over(ui, stop_rect);
                 let pressed = pointer_pressed_over(ui, stop_rect);
                 primary_button_glow(ui.painter(), stop_rect, ERROR, hovered, pressed);

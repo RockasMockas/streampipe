@@ -11,11 +11,10 @@ use iroh::SecretKey;
 
 use super::{
     config::Config,
-    flash_alpha,
+    error_callout, flash_alpha, pointer_over, pointer_pressed_over, primary_button_glow,
+    pulse_factor, section_tick, soft_glow, sonar_pulse, spinner, stat_ease,
     state::{self, BindAddrs, BroadcastParams, Mode},
-    App, ACCENT, ERROR, FLASH, error_callout, pointer_over, pointer_pressed_over,
-    primary_button_glow, pulse_factor, section_tick,
-    sonar_pulse, soft_glow, spinner, stat_ease, top_bevel,
+    top_bevel, App, ACCENT, ERROR, FLASH,
 };
 
 /// Horizontal room kept clear at the right edge of a copy box for the copy glyph,
@@ -53,19 +52,17 @@ impl App {
                     let prop = egui::FontId::proportional(big);
                     let box_h = big * 1.3;
                     // Full-width editable field with its label on the line above.
-                    let field = |ui: &mut Ui,
-                                     label: &str,
-                                     hint: Option<&str>,
-                                     text: &mut String| {
-                        ui.label(egui::RichText::new(label).size(big));
-                        let mut te = egui::TextEdit::singleline(text)
-                            .font(prop.clone())
-                            .vertical_align(egui::Align::Center);
-                        if let Some(h) = hint {
-                            te = te.hint_text(egui::RichText::new(h).size(big));
-                        }
-                        ui.add_sized([ui.available_width(), box_h], te);
-                    };
+                    let field =
+                        |ui: &mut Ui, label: &str, hint: Option<&str>, text: &mut String| {
+                            ui.label(egui::RichText::new(label).size(big));
+                            let mut te = egui::TextEdit::singleline(text)
+                                .font(prop.clone())
+                                .vertical_align(egui::Align::Center);
+                            if let Some(h) = hint {
+                                te = te.hint_text(egui::RichText::new(h).size(big));
+                            }
+                            ui.add_sized([ui.available_width(), box_h], te);
+                        };
 
                     field(ui, "WHIP host", None, &mut self.config.broadcast_host);
 
@@ -120,40 +117,16 @@ impl App {
                     // streamer with a static public IP can pin `ip:port` here so
                     // the ticket stays byte stable across sessions.
                     ui.add_space(8.0);
-                    let mut v4 = self
-                        .config
-                        .broadcast_bind_ipv4
-                        .clone()
-                        .unwrap_or_default();
-                    field(
-                        ui,
-                        "Bind IPv4:",
-                        Some("e.g. 203.0.113.7:45678"),
-                        &mut v4,
-                    );
-                    self.config.broadcast_bind_ipv4 = if v4.trim().is_empty() {
-                        None
-                    } else {
-                        Some(v4)
-                    };
+                    let mut v4 = self.config.broadcast_bind_ipv4.clone().unwrap_or_default();
+                    field(ui, "Bind IPv4:", Some("e.g. 203.0.113.7:45678"), &mut v4);
+                    self.config.broadcast_bind_ipv4 =
+                        if v4.trim().is_empty() { None } else { Some(v4) };
 
                     ui.add_space(8.0);
-                    let mut v6 = self
-                        .config
-                        .broadcast_bind_ipv6
-                        .clone()
-                        .unwrap_or_default();
-                    field(
-                        ui,
-                        "Bind IPv6:",
-                        Some("e.g. [2001:db8::1]:45678"),
-                        &mut v6,
-                    );
-                    self.config.broadcast_bind_ipv6 = if v6.trim().is_empty() {
-                        None
-                    } else {
-                        Some(v6)
-                    };
+                    let mut v6 = self.config.broadcast_bind_ipv6.clone().unwrap_or_default();
+                    field(ui, "Bind IPv6:", Some("e.g. [2001:db8::1]:45678"), &mut v6);
+                    self.config.broadcast_bind_ipv6 =
+                        if v6.trim().is_empty() { None } else { Some(v6) };
                 });
             });
 
@@ -198,8 +171,14 @@ impl App {
                 .clone()
                 .or_else(|| self.config.broadcast_ticket.clone())
                 .unwrap_or_else(|| "no ticket yet — press Refresh Relay".into());
-            let requested =
-                self.ticket_row(ui, "ticket", &ticket, !active, "Refresh Relay", "Refreshing…");
+            let requested = self.ticket_row(
+                ui,
+                "ticket",
+                &ticket,
+                !active,
+                "Refresh Relay",
+                "Refreshing…",
+            );
             if requested {
                 self.refresh_relay(ui.ctx());
             }
@@ -267,8 +246,7 @@ impl App {
             // down a live stream reads as a "stop" action at a glance (the same muted
             // red the tab uses for errors). The halo also contracts on press, so the
             // teardown reads as physically pressed in.
-            let stop_rect =
-                egui::Rect::from_min_size(ui.cursor().min, egui::vec2(bw, BUTTON_H));
+            let stop_rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(bw, BUTTON_H));
             let hovered = pointer_over(ui, stop_rect);
             let pressed = pointer_pressed_over(ui, stop_rect);
             primary_button_glow(ui.painter(), stop_rect, ERROR, hovered, pressed);
@@ -287,8 +265,7 @@ impl App {
             // read from the pointer and lifts both the halo and the fill. The press
             // is read the same way and pushes the button in (fill darkens, halo
             // contracts), so the hero action feels tactile rather than flat.
-            let start_rect =
-                egui::Rect::from_min_size(ui.cursor().min, egui::vec2(bw, BUTTON_H));
+            let start_rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(bw, BUTTON_H));
             let hovered = pointer_over(ui, start_rect);
             let pressed = pointer_pressed_over(ui, start_rect);
             primary_button_glow(ui.painter(), start_rect, ACCENT, hovered, pressed);
@@ -427,7 +404,6 @@ impl App {
         );
     }
 
-
     /// A read-only, selectable box that copies its text on click.
     ///
     /// `width` is the box's laid-out width; callers pass `ui.available_width()` for
@@ -551,7 +527,9 @@ impl App {
             // counter is shown exactly (it is a clock, not a measurement), so only the
             // measured stats are eased. `self.last_frame` was set at the top of the
             // frame in `draw`, so this is the current frame's wall-clock delta.
-            let dt = (Instant::now() - self.last_frame).as_secs_f32().clamp(0.0, 0.1);
+            let dt = (Instant::now() - self.last_frame)
+                .as_secs_f32()
+                .clamp(0.0, 0.1);
             let (viewers, video_kbps, video_fps, audio_kbps) = (
                 stat_ease(self.disp_viewers, stats.viewers as f32, dt),
                 stat_ease(self.disp_video_kbps, stats.video_kbps as f32, dt),
@@ -599,9 +577,7 @@ impl App {
                     ui.end_row();
 
                     ui.label("Audio");
-                    ui.strong(
-                        egui::RichText::new(format!("{:.0} kbit/s", audio_kbps)).monospace(),
-                    );
+                    ui.strong(egui::RichText::new(format!("{:.0} kbit/s", audio_kbps)).monospace());
                     ui.end_row();
 
                     ui.label("Elapsed");
@@ -613,7 +589,11 @@ impl App {
             // exist (the first 5-second tick alone is not enough to form a line).
             if snap.video_kbps_history.len() >= 2 {
                 ui.add_space(6.0);
-                bitrate_sparkline(ui, &snap.video_kbps_history, self.pulse.elapsed().as_secs_f32());
+                bitrate_sparkline(
+                    ui,
+                    &snap.video_kbps_history,
+                    self.pulse.elapsed().as_secs_f32(),
+                );
             }
         });
         // A faint light catch along the panel's top edge, matching the copy boxes,
@@ -675,15 +655,17 @@ impl App {
 /// matching `SocketAddrV6`'s expected syntax).
 fn parse_bind(config: &Config) -> Result<BindAddrs, String> {
     let ipv4 = match config.broadcast_bind_ipv4.as_deref().map(str::trim) {
-        Some(s) if !s.is_empty() => Some(s.parse::<SocketAddrV4>().map_err(|e| {
-            format!("invalid Bind IPv4 {s:?}: {e} (expected ip:port)")
-        })?),
+        Some(s) if !s.is_empty() => Some(
+            s.parse::<SocketAddrV4>()
+                .map_err(|e| format!("invalid Bind IPv4 {s:?}: {e} (expected ip:port)"))?,
+        ),
         _ => None,
     };
     let ipv6 = match config.broadcast_bind_ipv6.as_deref().map(str::trim) {
-        Some(s) if !s.is_empty() => Some(s.parse::<SocketAddrV6>().map_err(|e| {
-            format!("invalid Bind IPv6 {s:?}: {e} (expected [ip]:port)")
-        })?),
+        Some(s) if !s.is_empty() => Some(
+            s.parse::<SocketAddrV6>()
+                .map_err(|e| format!("invalid Bind IPv6 {s:?}: {e} (expected [ip]:port)"))?,
+        ),
         _ => None,
     };
     Ok(BindAddrs { ipv4, ipv6 })
@@ -892,13 +874,16 @@ fn bitrate_sparkline(ui: &mut Ui, samples: &[f64], secs: f32) {
     let mut x = rect.left();
     while x < rect.right() {
         let x2 = (x + dash).min(rect.right());
-        ui.painter()
-            .line_segment([egui::pos2(x, avg_y), egui::pos2(x2, avg_y)], egui::Stroke::new(1.0, avg_color));
+        ui.painter().line_segment(
+            [egui::pos2(x, avg_y), egui::pos2(x2, avg_y)],
+            egui::Stroke::new(1.0, avg_color),
+        );
         x += dash + gap;
     }
     // The line itself, one segment at a time.
     for w in points.windows(2) {
-        ui.painter().line_segment([w[0], w[1]], egui::Stroke::new(1.5, ACCENT));
+        ui.painter()
+            .line_segment([w[0], w[1]], egui::Stroke::new(1.5, ACCENT));
     }
     // A subtle peak marker: a faint vertical line from the recent peak down to the
     // baseline, with a small dot at the peak, so a wobbly stream's headroom is
@@ -918,7 +903,8 @@ fn bitrate_sparkline(ui: &mut Ui, samples: &[f64], secs: f32) {
                 peak.y..=rect.bottom(),
                 egui::Stroke::new(1.0, ACCENT.gamma_multiply(0.18)),
             );
-            ui.painter().circle_filled(peak, 1.8, ACCENT.gamma_multiply(0.55));
+            ui.painter()
+                .circle_filled(peak, 1.8, ACCENT.gamma_multiply(0.55));
         }
     }
     // A small dot on the newest sample, so "where the stream is right now" has a
@@ -1001,10 +987,7 @@ fn checkmark_segments(rect: egui::Rect) -> [[egui::Pos2; 2]; 2] {
     let a = egui::pos2(cx - 4.0, cy);
     let b = egui::pos2(cx - 1.0, cy + 3.0);
     let c = egui::pos2(cx + 4.5, cy - 3.5);
-    [
-        [a, b],
-        [b, c],
-    ]
+    [[a, b], [b, c]]
 }
 
 /// Format a number of seconds as `42s`, `7m13s` or `1h02m03s`.
@@ -1168,7 +1151,10 @@ mod tests {
         assert_eq!(pts.len(), samples.len());
         assert_eq!(pts[0].x, rect.left(), "oldest sample at the left edge");
         assert_eq!(pts[2].x, rect.right(), "newest sample at the right edge");
-        assert!(pts[1].y < pts[0].y, "the peak sample sits above the troughs");
+        assert!(
+            pts[1].y < pts[0].y,
+            "the peak sample sits above the troughs"
+        );
         for p in &pts {
             assert!(rect.contains(*p), "point {p:?} escapes the rect");
         }
@@ -1213,7 +1199,11 @@ mod tests {
             })
             .expect("the sparkline paints its area mesh");
         let bottom = &mesh.vertices[0];
-        assert_eq!(bottom.color.a(), 0, "the fill fades to nothing at the bottom edge");
+        assert_eq!(
+            bottom.color.a(),
+            0,
+            "the fill fades to nothing at the bottom edge"
+        );
         let line_vertex = &mesh.vertices[2];
         assert!(
             line_vertex.color.a() > bottom.color.a(),
@@ -1226,13 +1216,12 @@ mod tests {
         );
 
         // The "now" dot: a small filled circle (a stroked ring would have a width).
-        let dot = out
-            .shapes
-            .iter()
-            .any(|s| matches!(&s.shape,
+        let dot = out.shapes.iter().any(|s| {
+            matches!(&s.shape,
                 egui::epaint::Shape::Circle(c)
                     if c.stroke.width == 0.0 && (2.0..3.0).contains(&c.radius) && c.fill.a() > 0
-            ));
+            )
+        });
         assert!(dot, "the newest sample should carry a filled 'now' dot");
     }
 
@@ -1260,9 +1249,7 @@ mod tests {
             out.shapes
                 .iter()
                 .filter_map(|s| match &s.shape {
-                    egui::epaint::Shape::Circle(c) if c.stroke.width > 0.0 => {
-                        Some(c.radius)
-                    }
+                    egui::epaint::Shape::Circle(c) if c.stroke.width > 0.0 => Some(c.radius),
                     _ => None,
                 })
                 .next()
@@ -1277,10 +1264,7 @@ mod tests {
             late
         );
         // Near the end of the pulse the ring has faded out: nothing is painted.
-        assert!(
-            ring(1.99).is_none(),
-            "a nearly-faded ring paints nothing"
-        );
+        assert!(ring(1.99).is_none(), "a nearly-faded ring paints nothing");
     }
 
     /// `bitrate_trend` classifies the recent direction: a clear rise reads Rising, a
@@ -1319,8 +1303,14 @@ mod tests {
                 .iter()
                 .any(|s| matches!(&s.shape, egui::epaint::Shape::Mesh(_)))
         };
-        assert!(has_mesh(Trend::Rising), "a rising trend paints a triangle mesh");
-        assert!(has_mesh(Trend::Falling), "a falling trend paints a triangle mesh");
+        assert!(
+            has_mesh(Trend::Rising),
+            "a rising trend paints a triangle mesh"
+        );
+        assert!(
+            has_mesh(Trend::Falling),
+            "a falling trend paints a triangle mesh"
+        );
         // Flat: a dash (a line segment), and no triangle mesh.
         let ctx = egui::Context::default();
         let mut out = ctx.run_ui(raw, |ui| trend_arrow(ui, Trend::Flat));
@@ -1332,8 +1322,7 @@ mod tests {
             "a flat trend paints a dash"
         );
         assert!(
-            !out
-                .shapes
+            !out.shapes
                 .iter()
                 .any(|s| matches!(&s.shape, egui::epaint::Shape::Mesh(_))),
             "a flat trend paints no triangle"
@@ -1362,11 +1351,13 @@ mod tests {
         let avg_segs = out
             .shapes
             .iter()
-            .filter(|s| matches!(&s.shape,
-                egui::epaint::Shape::LineSegment { points, stroke }
-                    if (points[0].y - points[1].y).abs() < 0.01
-                        && stroke.color == avg_color
-            ))
+            .filter(|s| {
+                matches!(&s.shape,
+                    egui::epaint::Shape::LineSegment { points, stroke }
+                        if (points[0].y - points[1].y).abs() < 0.01
+                            && stroke.color == avg_color
+                )
+            })
             .count();
         assert!(
             avg_segs >= 2,
@@ -1387,14 +1378,16 @@ mod tests {
             ..Default::default()
         };
         let open: Vec<_> = {
-            let mut out =
-                ctx.run_ui(raw.clone(), |ui| { eye_toggle(ui, true, egui::vec2(34.0, 34.0)); });
+            let mut out = ctx.run_ui(raw.clone(), |ui| {
+                eye_toggle(ui, true, egui::vec2(34.0, 34.0));
+            });
             out.textures_delta.clear();
             out.shapes
         };
         let closed: Vec<_> = {
-            let mut out =
-                ctx.run_ui(raw, |ui| { eye_toggle(ui, false, egui::vec2(34.0, 34.0)); });
+            let mut out = ctx.run_ui(raw, |ui| {
+                eye_toggle(ui, false, egui::vec2(34.0, 34.0));
+            });
             out.textures_delta.clear();
             out.shapes
         };

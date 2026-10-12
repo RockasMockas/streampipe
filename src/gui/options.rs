@@ -12,7 +12,7 @@ use eframe::egui::{self, Context, Ui};
 
 use super::{
     config::{player_key, PLAYERS},
-    App, ACCENT, pointer_over, pointer_pressed_over, primary_button_glow,
+    pointer_over, pointer_pressed_over, primary_button_glow, App, ACCENT,
 };
 
 /// The neutral grey the Close button is painted in: the same halo/fill/stroke
@@ -99,7 +99,10 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.label("Log Verbosity");
                     for level in 1..=3u8 {
-                        if ui.radio(self.config.verbosity == level, format!("Level {level}")).clicked() {
+                        if ui
+                            .radio(self.config.verbosity == level, format!("Level {level}"))
+                            .clicked()
+                        {
                             self.config.verbosity = level;
                             self.config.save();
                         }
