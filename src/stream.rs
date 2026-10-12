@@ -3,13 +3,13 @@
 //! The only WebRTC on this path is the ingest leg: OBS speaks WHIP (the
 //! WebRTC-HTTP ingestion protocol) to a small HTTP server, str0m terminates that
 //! one peer connection (ICE, DTLS, SRTP) on the host, and everything downstream
-//! is plain RTP. 
+//! is plain RTP.
 //!
 //! The host is the *media authority*. It knows what the publisher offered and
 //! which payload types it actually sends, so it can tell a viewer everything it
 //! needs to write a playable SDP ([`crate::sdp::SessionHeader`]), and it gates
 //! the media it forwards per viewer so that a viewer that joins in the middle of
-//! a GOP starts at a keyframe. 
+//! a GOP starts at a keyframe.
 //!
 //! The media path is unbuffered: every RTP packet is forwarded as one QUIC
 //! datagram as soon as it arrives, so there is no head-of-line blocking. A
