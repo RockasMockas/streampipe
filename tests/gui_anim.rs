@@ -56,21 +56,17 @@ fn flash_alpha_fades_linearly() {
 
 #[test]
 fn tab_slide_settles_on_the_target_without_overshooting() {
-    // A single 60 fps step moves partway but never past the target.
+    // One frame moves partway, never past.
     let step = tab_slide_step(0.0, 1.0, 1.0 / 60.0);
     assert!(step > 0.0 && step < 1.0, "one frame is partway, got {step}");
 
-    // Settles on the target within a second of 60 fps frames, never overshooting.
     let mut pos = 0.0;
     let mut frames = 0;
     while pos != 1.0 {
         pos = tab_slide_step(pos, 1.0, 1.0 / 60.0);
         frames += 1;
         assert!(pos <= 1.0, "no overshoot at frame {frames}, got {pos}");
-        assert!(
-            frames < 60,
-            "the slide must settle within 1 s, took {frames} frames"
-        );
+        assert!(frames < 60, "must settle within 1 s, took {frames} frames");
     }
     assert!(
         frames < 45,
@@ -78,9 +74,8 @@ fn tab_slide_settles_on_the_target_without_overshooting() {
         frames * 1000 / 60
     );
 
-    // Settled stays settled.
+    // Settled stays settled; reverse settles the same way.
     assert_eq!(tab_slide_step(1.0, 1.0, 1.0 / 60.0), 1.0);
-    // The reverse direction settles the same way.
     let mut pos = 1.0;
     while pos != 0.0 {
         pos = tab_slide_step(pos, 0.0, 1.0 / 60.0);
@@ -90,21 +85,17 @@ fn tab_slide_settles_on_the_target_without_overshooting() {
 
 #[test]
 fn log_anim_settles_on_the_target_without_overshooting() {
-    // A single 60 fps step moves partway but never past the target.
+    // One frame moves partway, never past.
     let step = log_anim_step(0.0, 1.0, 1.0 / 60.0);
     assert!(step > 0.0 && step < 1.0, "one frame is partway, got {step}");
 
-    // Settles on the target within a second of 60 fps frames, never overshooting.
     let mut pos = 0.0;
     let mut frames = 0;
     while pos != 1.0 {
         pos = log_anim_step(pos, 1.0, 1.0 / 60.0);
         frames += 1;
         assert!(pos <= 1.0, "no overshoot at frame {frames}, got {pos}");
-        assert!(
-            frames < 60,
-            "the slide must settle within 1 s, took {frames} frames"
-        );
+        assert!(frames < 60, "must settle within 1 s, took {frames} frames");
     }
     assert!(
         frames < 45,
@@ -112,9 +103,8 @@ fn log_anim_settles_on_the_target_without_overshooting() {
         frames * 1000 / 60
     );
 
-    // Settled stays settled.
+    // Settled stays settled; reverse settles the same way.
     assert_eq!(log_anim_step(1.0, 1.0, 1.0 / 60.0), 1.0);
-    // The reverse direction (open -> closed) settles the same way.
     let mut pos = 1.0;
     while pos != 0.0 {
         pos = log_anim_step(pos, 0.0, 1.0 / 60.0);
@@ -124,26 +114,21 @@ fn log_anim_settles_on_the_target_without_overshooting() {
 
 #[test]
 fn stat_ease_settles_on_the_target_without_overshooting() {
-    // A single 60 fps step moves partway but never past the target.
+    // One frame moves partway, never past.
     let step = stat_ease(0.0, 5000.0, 1.0 / 60.0);
     assert!(step > 0.0 && step < 5000.0, "one frame is partway, got {step}");
 
-    // Settles on the target within two seconds of 60 fps frames, never overshooting.
     let mut pos = 0.0;
     let mut frames = 0;
     while pos != 5000.0 {
         pos = stat_ease(pos, 5000.0, 1.0 / 60.0);
         frames += 1;
         assert!(pos <= 5000.0, "no overshoot at frame {frames}, got {pos}");
-        assert!(
-            frames < 120,
-            "the settle must finish within 2 s, took {frames}"
-        );
+        assert!(frames < 120, "must settle within 2 s, took {frames}");
     }
 
-    // Settled stays settled.
+    // Settled stays settled; reverse settles without undershooting.
     assert_eq!(stat_ease(5000.0, 5000.0, 1.0 / 60.0), 5000.0);
-    // The reverse direction settles too, never undershooting.
     let mut pos = 5000.0;
     while pos != 0.0 {
         pos = stat_ease(pos, 0.0, 1.0 / 60.0);
@@ -152,20 +137,19 @@ fn stat_ease_settles_on_the_target_without_overshooting() {
     assert_eq!(pos, 0.0);
 }
 
-/// The tab content's fade-in is monotonic and settles exactly on fully visible at
-/// the duration, so the repaint guard can disarm and an idle window falls asleep.
+/// The tab content's fade is monotonic and settles exactly on visible at the
+/// duration, so the repaint guard can disarm.
 #[test]
 fn tab_fade_settles_on_fully_visible_without_overshooting() {
-    // Not settled at t=0.
     assert_eq!(tab_fade_step(0.0, TAB_FADE_SECS), (0.0, false));
-    // Mid-fade: partway, not settled.
+
     let (mid, settled) = tab_fade_step(TAB_FADE_SECS * 0.5, TAB_FADE_SECS);
     assert!((0.0..1.0).contains(&mid), "mid-fade is partway, got {mid}");
     assert!(!settled, "mid-fade is not settled");
-    // Settles exactly on 1.0 at the duration, and stays settled.
+
     assert_eq!(tab_fade_step(TAB_FADE_SECS, TAB_FADE_SECS), (1.0, true));
     assert_eq!(tab_fade_step(TAB_FADE_SECS * 5.0, TAB_FADE_SECS), (1.0, true));
-    // Monotonic.
+
     let mut prev = 0.0;
     let mut t = 0.0;
     while t <= TAB_FADE_SECS {
@@ -176,8 +160,7 @@ fn tab_fade_settles_on_fully_visible_without_overshooting() {
     }
 }
 
-/// The log fade behaves like the tab fade: new lines fade in, and the window is
-/// never woken past the fade window.
+/// The log fade behaves like the tab fade.
 #[test]
 fn log_fade_settles_on_fully_visible() {
     assert_eq!(tab_fade_step(0.0, LOG_FADE_SECS), (0.0, false));

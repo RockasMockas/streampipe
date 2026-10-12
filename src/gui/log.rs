@@ -1,19 +1,16 @@
-//! A tee log writer for the GUI.
+//! A tee log writer for the GUI: every formatted line goes to stderr (what the
+//! CLI shows) *and* into a bounded ring the log panel renders.
 //!
-//! The CLI installs a plain stderr subscriber. The GUI installs this instead:
-//! every formatted log line goes to stderr (exactly what the CLI shows) *and*
-//! into a bounded ring buffer the log panel renders. This is a `MakeWriter`,
-//! not a `registry` `Layer`, because `tracing-subscriber` is compiled without
-//! the `registry` feature.
+//! This is a `MakeWriter`, not a registry `Layer`, because `tracing-subscriber`
+//! is compiled without the `registry` feature.
 //!
-//! The writers handed out here are **wait-free**: they only push to an
-//! unbounded channel. They never touch `stderr` and never lock the ring,
-//! because the callers are the tokio workers of the engine runtime, and a
-//! stall there is a media outage: the WHIP host polls the ICE socket from one
-//! of those threads, so a worker parked on a Windows GUI `stderr`, or behind
-//! a mutex the UI thread re-acquires at 60 fps, overruns the OS UDP receive
-//! buffer during a keyframe burst and the viewer sees decode errors. One
-//! background thread drains the channel to `stderr` and the ring.
+//! The writers handed out here are **wait-free**: they only push to a channel.
+//! The callers are the engine's tokio workers, and a stall there is a media
+//! outage — the WHIP host polls the ICE socket from one of those threads, so a
+//! worker parked on GUI `stderr` (or behind a mutex the UI thread re-acquires at
+//! 60 fps) overruns the OS UDP receive buffer during a keyframe burst and the
+//! viewer sees decode errors. One background thread drains the channel to
+//! `stderr` and the ring.
 
 use std::{
     collections::VecDeque,
@@ -25,12 +22,11 @@ use std::{
 
 use tracing_subscriber::{fmt::MakeWriter, EnvFilter};
 
-/// The most log lines kept in the ring for the GUI log panel.
+/// The most log lines kept in the ring.
 const MAX_LINES: usize = 2000;
 
 /// A bounded, thread-safe ring of log lines, each tagged with the instant it was
-/// added so the log panel can fade a new line in over the first ~200 ms instead of
-/// popping it in.
+/// added so the panel can fade a new line in over the first ~200 ms.
 pub type LogRing = Arc<Mutex<VecDeque<(String, Instant)>>>;
 
 /// Create an empty ring.
@@ -38,16 +34,15 @@ pub fn new_ring() -> LogRing {
     Arc::new(Mutex::new(VecDeque::new()))
 }
 
-/// A snapshot of the ring for rendering (cloned so the lock is never held by
-/// the UI), with each line's arrival instant so the panel can fade new lines in.
+/// A snapshot of the ring for rendering (cloned so the lock is never held by the UI).
 pub fn snapshot(ring: &LogRing) -> Vec<(String, Instant)> {
     ring.lock()
         .map(|ring| ring.iter().cloned().collect())
         .unwrap_or_default()
 }
 
-/// Push a manual line into the ring (used for GUI-originated messages that are
-/// not produced by `tracing`), tagged with the current instant for the fade-in.
+/// Push a manual line into the ring (for GUI-originated messages that `tracing`
+/// doesn't produce), tagged with the current instant for the fade-in.
 pub fn push(ring: &LogRing, line: impl Into<String>) {
     if let Ok(mut ring) = ring.lock() {
         ring.push_back((line.into(), Instant::now()));
@@ -75,8 +70,8 @@ impl TeeWriter {
             let text = String::from_utf8_lossy(&line)
                 .trim_end_matches('\n')
                 .to_string();
-            // A closed channel means the process is shutting down; ignoring the
-            // error keeps logging cheap and infallible on the media hot path.
+            // A closed channel means shutdown; ignoring the error keeps logging
+            // cheap and infallible on the media hot path.
             let _ = self.tx.send(text);
         }
     }
@@ -90,7 +85,7 @@ impl Write for TeeWriter {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        // Surface any trailing partial line without a newline.
+        // Surface any trailing partial line.
         if !self.buf.is_empty() {
             let text = String::from_utf8_lossy(&self.buf).trim_end().to_string();
             let _ = self.tx.send(text);
@@ -118,13 +113,10 @@ impl<'a> MakeWriter<'a> for TeeMakeWriter {
 
 /// Install the GUI logging: stderr plus the ring, at the given verbosity.
 ///
-/// `RUST_LOG` wins if set, matching the CLI. ANSI is disabled so the ring
-/// holds plain text for the log panel.
-///
-/// The formatted lines go through an unbounded channel to one background
-/// thread, which is the only place that writes to `stderr` or locks the ring.
-/// The thread ends when the subscriber (and with it the last `Sender`) is
-/// dropped, so no explicit teardown is needed.
+/// `RUST_LOG` wins if set, matching the CLI. ANSI is disabled so the ring holds
+/// plain text. Lines go through an unbounded channel to one background thread —
+/// the only place that writes to `stderr` or locks the ring. The thread ends when
+/// the last `Sender` drops, so no explicit teardown is needed.
 pub fn install(ring: LogRing, verbosity: u8) {
     let filter = EnvFilter::builder()
         .with_default_directive(crate::common::log_level(verbosity).into())
@@ -133,15 +125,15 @@ pub fn install(ring: LogRing, verbosity: u8) {
     let drain_ring = ring.clone();
     std::thread::spawn(move || {
         while let Ok(line) = rx.recv() {
-            // Mirror to stderr so the GUI process shows the same output as the
-            // CLI, from a thread whose blocking we do not care about.
+            // Mirror to stderr so the GUI shows the same output as the CLI, from a
+            // thread whose blocking we don't care about.
             eprintln!("{line}");
             push(&drain_ring, line);
         }
     });
     let tee = TeeMakeWriter { tx };
-    // Ignore the "already installed" error: the GUI installs once, but a second
-    // call (e.g. a stray re-init) must not panic.
+    // Ignore "already installed": the GUI installs once, but a stray re-init must
+    // not panic.
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(tee)
@@ -162,8 +154,7 @@ mod tests {
         };
         w.write_all(b"first\nsecond").unwrap();
         w.flush().unwrap();
-        // The writer only hands lines to the drain thread; dropping every
-        // sender closes the channel so collecting terminates.
+        // Drop every sender to close the channel so collecting terminates.
         drop(tx);
         drop(w);
         let texts: Vec<String> = rx.iter().collect();
