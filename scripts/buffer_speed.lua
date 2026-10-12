@@ -1,83 +1,210 @@
--- buffer_speed.lua — nudge playback toward the live edge, and show the speed.
+-- buffer_speed.lua — catch up on the live edge of buffer on one smooth curve.
 --
--- Streampipe forwards this with `--script=<path>` on every mpv launch (see
--- `launch()` in src/webrtc.rs). mpv loads it alongside `--no-config`: files
--- explicitly requested on the command line are still loaded.
+-- Streampipe stages this file to the temp dir and forwards it as
+-- `--script=<path>` on every mpv launch.
 --
--- The control law is three bands, driven by `demuxer-cache-duration`:
---
---   cache > 1.0s            -> speed 1.05  (drain the buffer)
---   0.5s < cache <= 1.0s   -> speed 1.01  (ease off near the live edge)
---   cache <= 0.5s, or nil  -> speed 1.0   (at the edge / nothing to do)
---
--- So playback runs at most 5% fast, eases to 1% as it approaches the live
--- edge, and never slows down. mpv's default pitch correction keeps audio
--- pitch the same at these rates.
---
--- Polling starts at 1.0s and self-scales: every 1000 polls the interval is
--- multiplied by 1.1, unbounded (1.0, 1.1, 1.21, ...), so a stream of any
--- length costs ever fewer wakeups. Exactly one poll timer is pending at a
--- time — a one-shot chain, re-armed at the end of each tick.
---
--- An OSD pill showing the current speed is kept on screen the whole time,
--- top-left (mpv's default `osd-align-x/-y`). OSD messages expire, so a
--- separate 0.9s periodic timer re-raises the text with a 1.0s lifetime: the
--- refresh always lands before the old message dies, so it never blanks. The
--- refresh rate is fixed (it must not slow down with the polls, or gaps
--- appear); it is the one extra wakeup per second the display costs.
---
--- `demuxer-cache-duration` is documented as very unreliable, and can be nil,
--- so this loop is best-effort: nil maps to 1.0 and nothing crashes. Measured on
--- mpv v0.41.0: with `--cache=yes` it tracks the cache, so the bands above play
--- out as written (1.05 while the cache builds, easing to 1.01 then 1.0 as the
--- buffer drains toward the live edge). On the lowest-latency path
--- (`--no-cache --profile=low-latency`, the default) a live stream keeps only a
--- fraction of a second in the pipeline, so it reads ~0 and speed stays 1.0.
+-- Set STREAMPIPE_SPEED_DEBUG=1 in the environment of the player process to get
+-- a one-line trace of every evaluation (t, reason, paused, raw reading,
+-- smoothed reading, interval, speed).
 
-local mp = require 'mp'
+local mp = require("mp")
+local msg = require("mp.msg")
 
-local BASE = 1.0      -- base poll interval, in seconds
-local FACTOR = 1.1    -- interval multiplier ...
-local EVERY = 1000    -- ... applied every N polls, unbounded
+---------------------------------------------------------------------
 
-local FAST = 1.05     -- over the high band
-local MID = 1.01      -- between the bands
-local NORM = 1.0      -- at the live edge, or no reading
+local LOW, HIGH = 0.5, 1.0 -- the law's operating range, in seconds
+local FLOOR, CEIL = 1.0, 1.10 -- the speed is clamped to this, always
+local MAX = CEIL - FLOOR -- the most speed-up there is
+local ALPHA = 0.35 -- low-pass weight of a new reading
+local SLEW_UP, SLEW_DOWN = 0.02, 0.20 -- speed units per second, asymmetric
+local SLEW_DT_MAX = 1.0 -- the slew rate is per wall-clock second, so a
+-- long idle gap must not hand it a big step
+local WRITE_EPS = 0.005 -- only write a speed the player can notice
+local BASE, SPREAD, CAP = 1.0, 120.0, 60.0 -- watchdog interval policy
+local PAUSE_DT = 60.0 -- the interval while paused
+local MIN_DT = 0.25 -- never arm shorter than this
+local OSD_LIFE = 4.0 -- seconds the label stays up
+local B_EPS = 0.05 -- a bhat move bigger than this is a change
+local ABSURD = 3600.0 -- past an hour of buffer it is not a reading
 
-local HIGH = 1.0      -- upper band edge, seconds of cache
-local LOW = 0.5       -- lower band edge, seconds of cache
+local DEBUG = (os.getenv("STREAMPIPE_SPEED_DEBUG") == "1")
 
-local OSD_REFRESH = 0.9  -- re-raise the OSD faster than its lifetime ...
-local OSD_LIFE = 1.0     -- ... so a new message lands before the old dies
+---------------------------------------------------------------------
 
-local polls = 0
-local speed = NORM  -- what the OSD shows; the poll tick is the only writer
+local bhat = nil -- smoothed reading; nil = nothing to go on
+local s = FLOOR -- the speed `evaluate` last computed
+local s_written = FLOOR -- the speed last written to the player
+local paused = false
+local cache_state = nil -- idle | buffering | buffering-full | empty | full
+local quiet_since = mp.get_time()
+local t_prev = quiet_since -- feeds the slew limiter
+local last_osd = nil
 
-local function tick()
-  polls = polls + 1
-  -- Nil when mpv cannot estimate it (nothing playing yet, an unmeasurable
-  -- pipeline); a number is the seconds of media buffered up ahead of us.
-  local buf = mp.get_property_number("demuxer-cache-duration")
-  if buf == nil then
-    speed = NORM
-  elseif buf > HIGH then
-    speed = FAST
-  elseif buf > LOW then
-    speed = MID
-  else
-    speed = NORM
-  end
-  mp.set_property_number("speed", speed)
-  -- Re-arm the next one-shot poll, lengthening it every `EVERY` polls.
-  mp.add_timeout(BASE * (FACTOR ^ math.floor(polls / EVERY)), tick)
+---------------------------------------------------------------------
+
+local function clamp(v, lo, hi)
+	if type(v) ~= "number" or v ~= v then
+		return lo
+	end
+	if v < lo then
+		return lo
+	end
+	if v > hi then
+		return hi
+	end
+	return v
 end
 
-mp.add_timeout(BASE, tick)
+-- Rejects nil, NaN, +-inf, negative (a negative cache makes no sense) and anything absurd.
+local function usable(b)
+	return type(b) == "number" and b == b and b > 0.0 and b <= ABSURD
+end
 
--- Keep "Speed: N.NNx" in the top-left corner for the whole session: show it
--- now, then re-raise it just before each message expires. `speed` is read at
--- fire time, so the OSD always shows the latest value set by `tick`.
-mp.osd_message(("Speed: %.2fx"):format(speed), OSD_LIFE)
-mp.add_periodic_timer(OSD_REFRESH, function()
-  mp.osd_message(("Speed: %.2fx"):format(speed), OSD_LIFE)
+local function trace(fmt, ...)
+	if DEBUG then
+		msg.info(fmt:format(...))
+	end
+end
+
+---------------------------------------------------------------------
+
+--- One evaluation: read, filter, target, slew, write if visible.
+--- Idempotent — same inputs in, same speed out, no extra writes.
+--- `reason` is only there for the trace.
+local function evaluate(reason)
+	local now = mp.get_time()
+	if type(now) ~= "number" then
+		return
+	end
+	local elapsed = now - t_prev
+	-- A clock jump (suspend, NTP) is not elapsed time for the slew limiter:
+	-- treat a missing, negative, zero, NaN or huge dt as one short tick, and
+	-- cap the rest, so the slew rate is a rate per wall-clock second.
+	local dt = elapsed
+	if not (dt > 0.0) then
+		dt = MIN_DT
+	end
+	if dt > SLEW_DT_MAX then
+		dt = SLEW_DT_MAX
+	end
+
+	-- 1. read and condition the state we act on. `evaluate` pulls, so it is
+	-- self-contained and idempotent whatever triggered it. A reading of nil,
+	-- NaN, +-inf, negative or absurd means "no reading at all".
+	local b = mp.get_property_number("demuxer-cache-duration")
+	local is_paused = (mp.get_property_bool("pause") == true)
+	if is_paused ~= paused then
+		-- Readings taken across a pause are stale: the cache keeps filling (up to
+		-- cache-secs / readahead) while nothing is consumed.
+		bhat = nil
+		last_osd = nil
+		paused = is_paused
+	end
+	if usable(b) then
+		if bhat == nil then
+			bhat = b
+		else
+			bhat = bhat + ALPHA * (b - bhat)
+		end
+	else
+		bhat = nil
+	end
+
+	-- 2. The target. Paused, starved ("empty"), no cache ("idle") or no
+	-- reading => exactly 1.00.
+	local target
+	if paused or bhat == nil or cache_state == "empty" or cache_state == "idle" then
+		target = FLOOR
+	else
+		target = FLOOR + MAX * clamp((bhat - LOW) / (HIGH - LOW), 0.0, 1.0)
+	end
+
+	-- 3. slew limit: rise slow, fall fast. Every safety case asks for FLOOR,
+	-- so the fast fall covers them all: the speed is back at 1.00 within half
+	-- a second of the estimate going optimistic.
+	local step
+	if target >= s then
+		step = math.min(target - s, SLEW_UP * dt)
+	else
+		step = -math.min(s - target, SLEW_DOWN * dt)
+	end
+	local new_s = clamp(s + step, FLOOR, CEIL)
+
+	-- 4. act: write the speed and raise the label together, only on a change
+	-- big enough to be visible. One write, one label, then silence.
+	local visible = math.abs(new_s - s_written) >= WRITE_EPS
+	local safe = new_s <= FLOOR -- clamped, so this means == FLOOR
+	if visible or (safe and s_written > FLOOR) then
+		mp.set_property_number("speed", new_s)
+		s_written = new_s
+		local osd = ("Speed: %.2fx"):format(new_s)
+		if osd ~= last_osd then
+			mp.osd_message(osd, OSD_LIFE)
+			last_osd = osd
+		end
+		-- A change is what makes the next interval short. This is the invariant:
+		-- long intervals only happen while everything is flat.
+		quiet_since = now
+	end
+
+	-- One line per evaluation, so the trace shows the whole
+	-- curve, not just the writes. `gap` is the real time since the last one.
+	-- Silent unless STREAMPIPE_SPEED_DEBUG=1.
+	trace(
+		"t=%.1f %-7s paused=%-5s b=%-8s bhat=%-8s gap=%.1f s=%.3f osd=%s",
+		now,
+		reason,
+		tostring(paused),
+		tostring(b),
+		tostring(bhat),
+		elapsed,
+		new_s,
+		last_osd and last_osd:gsub("Speed: ", "") or "-"
+	)
+
+	s = new_s
+	t_prev = now
+end
+
+---------------------------------------------------------------------
+
+mp.observe_property("demuxer-cache-duration", "number", function(_, _)
+	evaluate("cache")
 end)
+
+mp.observe_property("cache-state", "string", function(_, state)
+	cache_state = state
+	evaluate("state")
+end)
+
+mp.observe_property("pause", "bool", function(_, is_paused)
+	evaluate(is_paused and "pause" or "unpause")
+end)
+
+-- The watchdog: the one timer. Evaluate, then arm the next one-shot, longer
+-- the longer everything has been quiet, bounded by CAP (PAUSE_DT when paused)
+-- and never shorter than MIN_DT. It re-reads the property itself, so a missed
+-- notification is picked up again at the next tick.
+local function watchdog()
+	evaluate("watch")
+	local now = mp.get_time()
+	local quiet = 0.0
+	if type(now) == "number" then
+		quiet = now - quiet_since
+		if not (quiet > 0.0) then
+			quiet = 0.0
+		end
+	end
+	local dt
+	if paused then
+		dt = PAUSE_DT
+	else
+		dt = math.min(CAP, BASE + quiet / SPREAD)
+	end
+	if not (dt >= MIN_DT) or dt > CAP then
+		dt = BASE
+	end
+	mp.add_timeout(dt, watchdog)
+end
+
+mp.add_timeout(BASE, watchdog)

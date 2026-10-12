@@ -154,16 +154,6 @@ impl Player {
     /// `-volume <0-100>` ("set startup volume 0=min 100=max") shifted 20 points down
     /// by `FFPLAY_VOLUME_OFFSET`, because its scale is louder per point than the
     /// other two. 100 is unity in all three, so the default is as loud as each gets.
-    ///
-    /// Every player is also told where and how big to open: a [`WINDOW_WIDTH`] x
-    /// [`WINDOW_HEIGHT`] (720p) window in the top-left corner, which is the largest
-    /// window that still fits a small laptop screen whole.
-    ///
-    /// `script` is a staged mpv Lua script, forwarded as `--script=<path>` on the
-    /// mpv launch only. It is loaded alongside `--no-config` (files explicitly
-    /// requested on the command line are still loaded), and it must come before the
-    /// SDP so the description stays the last argument. VLC, ffplay and `None`
-    /// ignore it.
     pub fn command(
         &self,
         sdp: &Path,
@@ -201,17 +191,22 @@ impl Player {
                     Some(ms) => {
                         cmd.push("--cache=yes".into());
                         cmd.push(format!("--demuxer-readahead-secs={}", ms.as_secs_f64()));
-                        // `max_delay` is the RTP demuxer's reorder window in us.
-                        cmd.push(format!("--demuxer-lavf-o=max_delay={}", ms.as_micros()));
+                        // `max_delay` is the RTP demuxer's reorder window in us,
+                        // `buffer_size` the UDP receive socket it opens. They must
+                        // go in ONE `--demuxer-lavf-o`: it is a key/value list
+                        cmd.push(format!(
+                            "--demuxer-lavf-o=max_delay={},buffer_size=4194304",
+                            ms.as_micros()
+                        ));
                     }
                     None => {
                         cmd.push("--no-cache".into());
                         cmd.push("--profile=low-latency".into());
+                        // Enlarge the RTP/UDP receive socket buffer that lavf opens
+                        // for the SDP. mpv's default is the OS default (~200 KB).
+                        cmd.push("--demuxer-lavf-o=buffer_size=4194304".into());
                     }
                 }
-                // Enlarge the RTP/UDP receive socket buffer that lavf opens for
-                // the SDP. mpv's default is the OS default (~200 KB)
-                cmd.push("--demuxer-lavf-o=buffer_size=4194304".into());
                 // The buffer-drain control script, staged on disk by `launch()`.
                 // It goes before the SDP, which must stay the last argument.
                 if let Some(script) = script {
@@ -2202,14 +2197,6 @@ async fn write_sdp(path: &std::path::Path, sdp: &str) -> Result<()> {
 }
 
 /// Stage the mpv buffer-drain control script on disk for `--script=`.
-///
-/// mpv takes a script *path*, never inline source, so the Lua (embedded at
-/// compile time, so it works from any install layout) is written out to a fixed
-/// file in the system temp dir. `launch()` runs again when the media
-/// renegotiates, which rewrites the same bytes to the same path: idempotent,
-/// and the previous player has been stopped by then, so nothing accumulates.
-/// Only mpv runs Lua, so no other player stages anything. If the write fails
-/// the player is still launched, just without the control script.
 async fn stage_mpv_script(player: Player) -> Option<std::path::PathBuf> {
     if player != Player::Mpv {
         return None;
