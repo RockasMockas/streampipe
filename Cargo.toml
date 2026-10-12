@@ -1,8 +1,8 @@
 [package]
 name = "streampipe"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
-authors = ["https://github.com/RockasMockas/streampipe"]
+authors = ["RockasMockas"]
 keywords = ["streaming", "video", "screenshare", "p2p", "obs"]
 categories = ["network-programming"]
 license = "MIT OR Apache-2.0"
@@ -47,6 +47,11 @@ eframe = { version = "0.36", default-features = false, features = [
   "x11",
   "wayland",
   "default_fonts",
+  # Enables egui-winit's `webbrowser` backend, which is what actually turns
+  # egui's `OpenUrl` command into a real browser launch. Without it the
+  # clickable repo link in the Settings footer paints and reports clicks, but
+  # `open_url_in_browser` is an empty stub and the link goes nowhere.
+  "links",
 ] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -1,6 +1,6 @@
-# StreamPipe
+# Streampipe
 
-StreamPipe uses [iroh](https://crates.io/crates/iroh) to broadcast video and
+Streampipe uses [iroh](https://crates.io/crates/iroh) to broadcast video and
 audio directly, peer-to-peer, to friends using streaming software like OBS.
 
 Think of it like Discord screen-sharing, but with much higher bitrate/quality

@@ -23,6 +23,13 @@ pub(crate) const CLOSE_GREY: egui::Color32 = egui::Color32::from_rgb(150, 155, 1
 /// the same box.
 const BUTTON: egui::Vec2 = egui::vec2(90.0, 30.0);
 
+/// The project's public repository, shown as a clickable link at the bottom of the
+/// Settings panel.
+pub(crate) const REPO_URL: &str = "https://github.com/RockasMockas/streampipe/releases";
+/// The link's visible text: the URL without its scheme, so the footer reads as a
+/// quiet signature line rather than a raw address.
+pub(crate) const REPO_LABEL: &str = "github.com/RockasMockas/streampipe";
+
 impl App {
     /// Show the Options window, closing it when its close button is pressed or
     /// the Escape key is hit.
@@ -244,5 +251,30 @@ impl App {
                 self.show_options = false;
             }
         });
+
+        // ─── Signature ───────────────────────────────────────────────────────
+        // A quiet block under the actions, set off by a hairline so it reads as
+        // the panel's footer rather than as one more control. Both lines take the
+        // theme's faint `weak` ink at the same 11.5pt size, so they sit as one
+        // matched pair and stay cleanly legible without competing with the controls
+        // above them.
+        //
+        // The second line is the repository, shown as its own text and clickable:
+        // egui's `Hyperlink` paints in the theme's link blue (which sits next to
+        // the app's own blue accent, so it belongs), underlines on hover, shows the
+        // URL in a tooltip, and emits `OpenUrl` on click. That command is only
+        // honoured when eframe's `links` feature is on — enabled in Cargo.toml,
+        // since without it `open_url_in_browser` is an empty stub and the link
+        // would report clicks but go nowhere.
+        ui.add_space(12.0);
+        ui.separator();
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new("Streampipe Created By: RockasMockas")
+                .weak()
+                .size(11.5),
+        );
+        // Same 11.5pt as the line above it, so the two read as one block.
+        ui.hyperlink_to(egui::RichText::new(REPO_LABEL).size(11.5), REPO_URL);
     }
 }

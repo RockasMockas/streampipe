@@ -684,15 +684,22 @@ pub async fn listen_whip(endpoint: Endpoint, cfg: WhipConfig) -> Result<()> {
     let (req_tx, req_rx) = mpsc::channel::<WhipRequest>(16);
     let (viewer_tx, viewer_rx) = mpsc::channel::<ViewerEvent>(32);
 
-    // Fan the three concurrent parts out onto their own tasks. Polling them on a
-    // single task (the old `select!` over bare futures) pinned the whole ingest
-    // pipeline to one OS thread at a time; on the multi-threaded
-    // `streampipe-engine` runtime this lets `host_loop` run on a worker of its
-    // own, so HTTP serving and viewer acceptance no longer share its scheduler
-    // slot and stall the media path during a keyframe burst.
-    let mut http = tokio::spawn(whip::serve(cfg.listen, cfg.bearer_token.clone(), req_tx));
-    let mut accept = tokio::spawn(accept_viewers(endpoint.clone(), viewer_tx));
-    let mut host = tokio::spawn(host_loop(
+    // Fan the three concurrent parts out onto their own tasks, kept in a
+    // guarded set. Polling them on a single task (the old `select!` over bare
+    // futures) pinned the whole ingest pipeline to one OS thread at a time; on
+    // the multi-threaded `streampipe-engine` runtime this lets `host_loop` run
+    // on a worker of its own, so HTTP serving and viewer acceptance no longer
+    // share its scheduler slot and stall the media path during a keyframe burst.
+    //
+    // The guard is what makes teardown complete: a plainly spawned task is
+    // *detached*, so when the GUI aborts the session task driving `listen_whip`
+    // the three tasks would keep running forever, holding the WHIP TCP listener
+    // and the ICE UDP socket bound. In an `AbortOnDrop` set they die with this
+    // future, and the ports are handed back to the OS.
+    let mut tasks = AbortOnDrop(JoinSet::new());
+    tasks.spawn(whip::serve(cfg.listen, cfg.bearer_token.clone(), req_tx));
+    tasks.spawn(accept_viewers(endpoint.clone(), viewer_tx));
+    tasks.spawn(host_loop(
         ice,
         ice_addr,
         req_rx,
@@ -702,21 +709,26 @@ pub async fn listen_whip(endpoint: Endpoint, cfg: WhipConfig) -> Result<()> {
     ));
 
     let result = tokio::select! {
-        res = &mut http => res.unwrap_or_else(|e| Err(anyerr!("http task panicked: {e}"))),
-        res = &mut accept => res.unwrap_or_else(|e| Err(anyerr!("accept task panicked: {e}"))),
-        res = &mut host => res.unwrap_or_else(|e| Err(anyerr!("host task panicked: {e}"))),
+        // `join_next` is cancel-safe and never completes instantly here: the set
+        // is never empty while this select is live, so the branch blocks until a
+        // part actually finishes.
+        res = tasks.join_next() => {
+            match res {
+                Some(Ok(res)) => res,
+                Some(Err(e)) => Err(anyerr!("task panicked: {e}")),
+                None => Ok(()),
+            }
+        }
         _ = tokio::signal::ctrl_c() => {
             eprintln!("got ctrl-c, exiting");
             Ok(())
         }
     };
     tracing::info!("stopping whip input");
-    // Aborting the handles tears the components down exactly like dropping the
-    // old inline futures: each owns an `AbortOnDrop` set (serve, accept), so
+    // Aborting the set tears the components down exactly like dropping the old
+    // inline futures: each owns an `AbortOnDrop` set (serve, accept), so
     // aborting its task also kills every connection/viewer it spawned.
-    http.abort();
-    accept.abort();
-    host.abort();
+    tasks.abort_all();
     endpoint.close().await;
     result
 }
