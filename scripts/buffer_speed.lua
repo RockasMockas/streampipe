@@ -12,7 +12,7 @@ local msg = require("mp.msg")
 
 ---------------------------------------------------------------------
 
-local LOW, HIGH = 0.5, 1.0 -- the law's operating range, in seconds
+local LOW, HIGH = 0.2, 1.0 -- the law's operating range, in seconds
 local FLOOR, CEIL = 1.0, 1.10 -- the speed is clamped to this, always
 local MAX = CEIL - FLOOR -- the most speed-up there is
 local ALPHA = 0.35 -- low-pass weight of a new reading
@@ -22,7 +22,6 @@ local WRITE_EPS = 0.02 -- only write a speed the player can notice; keep speed
 local BASE, SPREAD, CAP = 1.0, 120.0, 60.0 -- watchdog interval policy
 local PAUSE_DT = 60.0 -- the interval while paused
 local MIN_DT = 0.25 -- never arm shorter than this
-local OSD_LIFE = 65.0 -- the label is re-raised on every evaluation; its
 local B_EPS = 0.05 -- a bhat move bigger than this is a change
 local ABSURD = 3600.0 -- past an hour of buffer it is not a reading
 
@@ -37,7 +36,6 @@ local paused = false
 local cache_state = nil -- idle | buffering | buffering-full | empty | full
 local quiet_since = mp.get_time()
 local t_prev = quiet_since -- feeds the slew limiter
-local last_osd = nil
 
 ---------------------------------------------------------------------
 
@@ -96,7 +94,6 @@ local function evaluate(reason)
 		-- Readings taken across a pause are stale: the cache keeps filling (up to
 		-- cache-secs / readahead) while nothing is consumed.
 		bhat = nil
-		last_osd = nil
 		paused = is_paused
 	end
 	if usable(b) then
@@ -141,24 +138,18 @@ local function evaluate(reason)
 		quiet_since = now
 	end
 
-	local osd = ("Speed: %.2fx"):format(new_s)
-	-- Refresh the label on every evaluation.
-	mp.osd_message(osd, OSD_LIFE)
-	last_osd = osd
-
 	-- One line per evaluation, so the trace shows the whole
 	-- curve, not just the writes. `gap` is the real time since the last one.
 	-- Silent unless STREAMPIPE_SPEED_DEBUG=1.
 	trace(
-		"t=%.1f %-7s paused=%-5s b=%-8s bhat=%-8s gap=%.1f s=%.3f osd=%s",
+		"t=%.1f %-7s paused=%-5s b=%-8s bhat=%-8s gap=%.1f s=%.3f",
 		now,
 		reason,
 		tostring(paused),
 		tostring(b),
 		tostring(bhat),
 		elapsed,
-		new_s,
-		last_osd and last_osd:gsub("Speed: ", "") or "-"
+		new_s
 	)
 
 	s = new_s
@@ -206,5 +197,4 @@ local function watchdog()
 	mp.add_timeout(dt, watchdog)
 end
 
-mp.osd_message(("Speed: %.2fx"):format(s), OSD_LIFE)
 mp.add_timeout(BASE, watchdog)
