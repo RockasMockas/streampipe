@@ -1,11 +1,10 @@
-//! The GUI front-end.
+//! The GUI front-end, opened by `streampipe` with no arguments.
 //!
-//! `streampipe` with no arguments opens this. It owns the eframe event loop on
-//! the main thread and drives the async iroh engine over channels on two
-//! separate tokio runtimes: the primary one runs the UI's async work (the
-//! stats consumer that requests repaints), and a dedicated `streampipe-engine`
-//! runtime runs every media session, so nothing in the WebRTC hot path shares a
-//! thread with rendering. See [`state`] for the threading contract.
+//! The eframe event loop runs on the main thread; async work runs on two tokio
+//! runtimes. The primary one hosts the UI's async work (the stats consumer that
+//! requests repaints); a dedicated `streampipe-engine` runtime runs every media
+//! session, so nothing in the WebRTC hot path shares a thread with rendering.
+//! See [`state`] for the threading contract.
 
 mod broadcast;
 mod config;
@@ -28,45 +27,35 @@ use self::{
     state::{Mode, SharedState},
 };
 
-/// The repaint interval used while a session is live, so logs and stats refresh
-/// without a per-event repaint storm. Too coarse for an animation: a fading toast
-/// gets its own, much shorter cadence ([`TOAST_FRAME`]).
+/// Session cadence: enough for logs/stats to refresh without a repaint storm.
 const REPAINT: Duration = Duration::from_millis(250);
-/// How long a "Copied" toast stays visible.
+/// How long a toast stays visible.
 const TOAST: Duration = Duration::from_millis(1500);
-/// The repaint interval while a toast is on screen: ~60 fps, i.e. display rate.
-///
-/// The fade is an animation, and on [`REPAINT`] a [`TOAST`]-long one only gets six
-/// frames — the pill visibly steps down through six greys instead of dissolving.
+/// Toast fades need ~60 fps; at [`REPAINT`] a 1.5 s fade only gets six visible steps.
 const TOAST_FRAME: Duration = Duration::from_millis(16);
-/// How long a copy box's click flash brightens its fill and glyph. Shorter than
-/// [`TOAST`] so the repaint guard stays armed through the whole flash.
+/// How long a copy box's click flash lasts.
 const FLASH: Duration = Duration::from_millis(450);
-/// The "live/success" accent: broadcasting status, the copy toast, and viewers.
+/// The "live/success" accent: broadcasting status, copy toast, viewers.
 const ACCENT: egui::Color32 = egui::Color32::from_rgb(80, 200, 120);
 /// The "watching" accent: the watch status dot and the connecting spinner.
 const WATCH_ACCENT: egui::Color32 = egui::Color32::from_rgb(90, 160, 255);
-/// The "error" red: failed sessions, the stop halo, and the error callout.
+/// The "error" red: failed sessions, the stop halo, the error callout.
 const ERROR: egui::Color32 = egui::Color32::from_rgb(220, 90, 90);
-/// How long the tab content's fade-in takes, so a tab switch fades the new content
-/// in rather than hard-cutting. Short enough to feel instant, long enough to read.
+/// How long a tab's content takes to fade in after a tab switch.
 const TAB_FADE_SECS: f32 = 0.16;
-/// How long a new log line fades in (seconds), so a line eases in rather than
-/// popping in. Short enough to feel instant, long enough to read as a gentle reveal.
+/// How long a new log line takes to fade in.
 const LOG_FADE_SECS: f32 = 0.2;
 
 /// The two main tabs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
-    /// Watch a stream from a ticket.
     Watch,
-    /// Start broadcasting to OBS over WHIP.
     Broadcast,
 }
 
 /// The application.
 pub struct App {
-    /// Handle to the background tokio runtime that runs the engine.
+    /// Handle to the `streampipe-engine` runtime that runs media sessions.
     handle: Handle,
     /// Cross-thread shared state.
     state: Arc<Mutex<SharedState>>,
@@ -82,9 +71,8 @@ pub struct App {
     show_options: bool,
     /// Whether the bottom log panel is expanded.
     log_open: bool,
-    /// Whether the WHIP bearer token is shown in cleartext on the Broadcast tab's
-    /// Advanced settings. Masked (password dots) by default so a shared secret is not
-    /// left legible on screen; the eye toggle by the field flips it.
+    /// Whether the WHIP bearer token is shown in cleartext. Masked by default so a
+    /// shared secret is not left legible on screen.
     show_bearer: bool,
     /// The ticket text on the Watch tab.
     watch_ticket: String,
@@ -96,44 +84,32 @@ pub struct App {
     watch_volume: u8,
     /// The last copied box and when, for the transient toast.
     copied: Option<(&'static str, Instant)>,
-    /// A transient action-complete toast (e.g. "Relay refreshed ✓") and when it was
-    /// raised, shown by [`App::toast_overlay`] in the same pill as a copy toast.
+    /// A transient action-complete toast (e.g. "Relay refreshed ✓") and when raised.
     toast: Option<(String, Instant)>,
-    /// Clock origin for the viewers pulse, so it animates smoothly while live.
+    /// Clock origin for the pulse animations, so they advance between repaints.
     pulse: Instant,
-    /// Whether the next window-focused frame should autofocus the active tab's
-    /// primary control (the ticket box on Watch, the start button on Broadcast).
-    /// Set on open and on every tab switch; cleared the first time a window that
-    /// that actually has keyboard focus consumes it, so it never steals focus from a
-    /// widget the user has already chosen.
+    /// Whether the next window-focused frame should autofocus the active tab's primary
+    /// control. Set on open and on tab switch, cleared once consumed, so it never
+    /// steals focus from a widget the user already chose.
     focus_primary: bool,
     /// The tab underline's slide position: 0.0 = Watch, 1.0 = Broadcast.
-    /// Tweened in [`App::draw`] so a tab switch slides the underline across the
-    /// strip instead of jumping between the two tabs.
     tab_slide: f32,
-    /// The previous frame's wall clock, for the tab underline tween's frame delta.
+    /// The previous frame's clock, for the underline tween's frame delta.
     last_frame: Instant,
-    /// The tab content's fade-in alpha: 0.0 = hidden, 1.0 = fully shown. Reset to
-    /// 0.0 by [`App::switch_tab`] and eased up over ~160 ms in [`App::draw`], so a
-    /// tab switch fades the new content in instead of hard-cutting to it.
+    /// The tab content's fade-in alpha (0.0 = hidden), reset on tab switch.
     tab_fade: f32,
-    /// Whether the tab fade-in is in flight; arms the repaint guard in [`App::draw`]
-    /// so frames keep coming until the fade settles, then an idle window sleeps.
+    /// Whether the tab fade is in flight; arms the repaint guard while true.
     tab_fade_active: bool,
     /// The instant of the last tab switch, the fade-in's clock origin.
     tab_switched_at: Instant,
-    /// The log panel's open fraction: 0.0 = fully closed, 1.0 = fully open. Tweened
-    /// in [`App::log_panel`] so toggling the panel slides its height instead of
-    /// hard-cutting between 0 and half the window.
+    /// The log panel's open fraction (0.0 = closed), tweened so it slides.
     log_anim: f32,
-    /// The previous frame's wall clock, for the log panel tween's frame delta.
+    /// The previous frame's clock, for the log panel tween's frame delta.
     log_last_frame: Instant,
     /// The eased *display* of the live broadcast stats, tweened toward the latest
-    /// [`StreamStats`] each frame in the stats panel so the numbers settle smoothly
-    /// instead of jumping on each 5-second tick. Only the broadcast track drives the
-    /// stats panel, so these are reset to zero in [`App::draw`] the moment a broadcast
-    /// goes idle: a new broadcast then starts from a clean zero rather than counting
-    /// down from the previous session's values.
+    /// [`StreamStats`] each frame so the numbers settle instead of jumping on each
+    /// 5-second tick. Reset to zero when the broadcast goes idle, so a new broadcast
+    /// starts from a clean zero.
     disp_viewers: f32,
     disp_video_kbps: f32,
     disp_video_fps: f32,
@@ -143,9 +119,9 @@ pub struct App {
 impl App {
     /// Build the app from the engine runtime handle, config and channels.
     ///
-    /// `handle` is the handle of the dedicated `streampipe-engine` runtime, so
-    /// every media session the UI starts runs on threads the renderer never
-    /// shares. The tests pass the handle of a runtime they keep alive.
+    /// `handle` is the `streampipe-engine` runtime, so every media session the UI
+    /// starts runs on threads the renderer never shares. Tests pass a handle of a
+    /// runtime they keep alive.
     fn new(
         handle: Handle,
         config: Config,
@@ -158,8 +134,8 @@ impl App {
             .buffer_ms
             .map(|ms| ms.to_string())
             .unwrap_or_default();
-        // The slider's range is 0..=100; the `min` only guards a value restored
-        // from a hand-edited config that names a louder setting than we can show.
+        // The slider's range is 0..=100; the `min` only guards a value restored from
+        // a hand-edited config.
         let watch_volume = config.volume.min(100);
         App {
             handle,
@@ -196,8 +172,7 @@ impl App {
     /// The bottom status bar with the Settings entry and the session status.
     fn menu_bar(&mut self, ui: &mut Ui) {
         let snap = state::snapshot(&self.state);
-        // Computed before the closure: the closure mutably borrows `self` for the
-        // Options toggle, so the pulse clock is read here.
+        // Read before the closure: it mutably borrows `self` for the pulse clock.
         let secs = self.pulse.elapsed().as_secs_f32();
         egui::menu::MenuBar::new().ui(ui, |ui| {
             // Open the settings panel directly — no intermediate dropdown.
@@ -215,8 +190,8 @@ impl App {
             } else {
                 egui::Color32::GRAY
             };
-            // The dot breathes only while live; a `Starting` track stays calm yellow
-            // and `Idle` flat gray, so a steady dot never reads as a running session.
+            // Only a live session breathes; `Starting` stays calm yellow and `Idle`
+            // flat gray, so a steady dot never reads as a running session.
             let pulsing = snap.broadcast == Mode::Broadcasting || snap.watch == Mode::Watching;
             let dot = if pulsing {
                 base.gamma_multiply(pulse_factor(secs))
@@ -225,18 +200,14 @@ impl App {
             };
             ui.spacing_mut().item_spacing.x = 4.0;
             let dot_resp = ui.colored_label(dot, "●");
-            // A soft sonar pulse around the live dot, so "live" reads as an active
-            // signal rather than a static glyph. Sized small enough to stay within
-            // the menu bar's bounds.
+            // A sonar ring around the live dot, sized to stay within the menu bar.
             if pulsing {
                 sonar_pulse(ui.painter(), dot_resp.rect.center(), 4.0, secs, 2.0, base);
             }
             ui.colored_label(base, snap.status());
-            // A compact "LIVE" badge next to the status label while a session is
-            // live, so the live state reads at a glance rather than only as a small
-            // breathing dot. The badge breathes in the same curve as the dot, so the
-            // two read as one signal. A stroked pill (not a line segment), so it
-            // never disturbs the line-segment-based tests.
+            // A "LIVE" badge breathing in the same curve as the dot, so the live state
+            // reads at a glance. Stroked pill, so it never disturbs the
+            // line-segment-based tests.
             if pulsing {
                 ui.add_space(2.0);
                 live_badge(ui, base, pulse_factor(secs));
@@ -245,10 +216,8 @@ impl App {
             if let Some(err) = err {
                 ui.colored_label(ERROR, truncate(err, 60));
             }
-            // A subtle keyboard-shortcut hint after the status, so the (otherwise
-            // hidden) shortcuts are discoverable without a manual. Weak and dim so it
-            // reads as a gentle nudge, not a competing label. Only shown when it fits
-            // in the remaining space, so it never overflows at narrow window widths.
+            // A dim shortcut hint so the (otherwise hidden) shortcuts are discoverable.
+            // Only shown when it fits, so it never overflows a narrow window.
             let hint = "Ctrl+L log · Ctrl+, settings";
             let hint_w = ui
                 .painter()
@@ -266,19 +235,16 @@ impl App {
         });
     }
 
-    /// The app wordmark: a large, crisp, two-tone title with a soft drop shadow.
-    /// "Stream" is near-white and "pipe" a soft accent green, so the wordmark
-    /// carries a small brand mark and echoes the live accent used across the app.
-    /// Each word is a single anti-aliased glyph (no faux-bold offset copies, which
-    /// render jaggy); weight comes from size and the shadow gives it depth.
+    /// The app wordmark: a large two-tone title ("Stream" near-white, "pipe" accent
+    /// green) with a soft drop shadow. Each word is a single anti-aliased galley;
+    /// faux-bold offset copies render jaggy, so weight comes from size alone.
     fn brand_title(&mut self, ui: &mut Ui) {
         let font_id = egui::FontId::proportional(30.0);
         let fg = egui::Color32::from_rgb(242, 242, 246);
-        // A soft, slightly lightened accent green for "pipe": clearly green, but
-        // muted enough to read as a brand tint rather than a status colour.
+        // Green, but muted enough to read as a brand tint rather than a status colour.
         let pipe = egui::Color32::from_rgb(110, 205, 150);
-        // A soft shadow: the same glyphs in dark, low-alpha layers at a few
-        // offsets, faking a blurred drop shadow behind the crisp text.
+        // The shadow is the same glyphs in dark low-alpha layers at a few offsets,
+        // faking a blurred drop shadow behind the crisp text.
         let shadow = egui::Color32::from_black_alpha(70);
 
         let stream = ui
@@ -292,9 +258,8 @@ impl App {
             .layout_no_wrap("Stream".into(), font_id.clone(), shadow);
         let pipe_shadow = ui.painter().layout_no_wrap("pipe".into(), font_id, shadow);
 
-        // The two words sit side by side; the total width is the sum of the two
-        // galleys. Room for the glyph plus the shadow's furthest offset so it is
-        // not clipped.
+        // Side by side; the total width is the sum of the galleys, plus room for the
+        // shadow's furthest offset so it is not clipped.
         let size = egui::vec2(
             stream.size().x + pipe_galley.size().x,
             stream.size().y.max(pipe_galley.size().y),
@@ -321,10 +286,9 @@ impl App {
     }
 
     /// Switch to `tab`, re-arming the content fade-in and the primary-control
-    /// autofocus. A no-op (no fade) when already on `tab`, so clicking the active
-    /// tab does not replay the transition. The fade is reset here — not in the
-    /// tween — so the new tab's content is hidden on the very frame the switch is
-    /// detected, then fades in over the following frames.
+    /// autofocus. A no-op when already on `tab`, so clicking the active tab does not
+    /// replay the transition. The fade is reset here (not in the tween) so the new
+    /// tab's content is hidden on the very frame the switch is detected.
     fn switch_tab(&mut self, tab: Tab) {
         if self.tab == tab {
             return;
@@ -340,41 +304,30 @@ impl App {
     fn tab_bar(&mut self, ui: &mut Ui) {
         self.brand_title(ui);
         ui.add_space(6.0);
-        // Which tracks are live, so the active tab can carry a small breathing dot
-        // (green for a broadcast, blue for a watch) — a live session is then visible
-        // at a glance right on the strip, not only in the status bar below.
+        // Which tracks are live, so the active tab carries a small breathing dot
+        // (green for a broadcast, blue for a watch).
         let snap = state::snapshot(&self.state);
         let watch_live = snap.watch == Mode::Watching;
         let bc_live = snap.broadcast == Mode::Broadcasting;
-        // The dot's breath clock; it only advances while a repaint is running, which
-        // is exactly while a session is live, so the dot breathes only when it should.
+        // The dot's breath clock, which only advances while repaints are running —
+        // exactly while a session is live.
         let secs = self.pulse.elapsed().as_secs_f32();
-        // Two equal-width tabs that fill the whole strip; the selectable label is
-        // sized to its half so the entire tab box (not just the text) is the click
-        // target.
+        // Two equal-width tabs filling the strip, so the whole tab box (not just the
+        // text) is the click target.
         let half = ui.available_width() / 2.0;
         let tab_h = 32.0;
         let (watch, bc) = ui
             .horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
-                // Style both states explicitly (rather than relying on `.selected()`,
-                // which only themes the active tab): the selected tab is a lighter
-                // surface with full-strength text (plus the accent underline below),
-                // while unselected tabs recede to a darker surface and dimmed text,
-                // keeping focus on the primary Start Broadcasting action.
-                //
-                // Each tab is painted by hand (rather than an `egui::Button` with a
-                // fixed fill) so a hover can lift the surface: an explicit `.fill()`
-                // would otherwise suppress egui's hover feedback and the strip would
-                // feel dead under the mouse. Hovering lifts either tab toward the
-                // selected look, so the whole box reads as a live control.
+                // Painted by hand rather than via `egui::Button`: a fixed `.fill()`
+                // suppresses egui's hover feedback, so the strip would feel dead under
+                // the mouse. Both states are styled explicitly — the selected tab gets a
+                // lighter surface and full-strength text, unselected tabs recede.
                 let make = |ui: &mut Ui,
                             label: &str,
                             selected: bool,
                             live: bool,
                             dot_color: egui::Color32| {
-                    // The whole box is the click target; the hover is read from the
-                    // same response before the surface is painted.
                     let (rect, resp) =
                         ui.allocate_exact_size(egui::vec2(half, tab_h), egui::Sense::click());
                     let hovered = resp.hovered();
@@ -402,7 +355,6 @@ impl App {
                     } else {
                         egui::Color32::GRAY
                     };
-                    // Paint the surface, the outline, then the centred label.
                     ui.painter().rect_filled(rect, corner, fill);
                     ui.painter()
                         .rect_stroke(rect, corner, stroke, egui::StrokeKind::Middle);
@@ -410,10 +362,9 @@ impl App {
                     let galley =
                         ui.painter()
                             .layout_no_wrap(label.to_string(), font_id, text_color);
-                    // The live dot (if any) sits just right of the label; the label
-                    // and dot are centred together as one group, so adding the dot
-                    // does not lurch the label off-centre. Read the label's width
-                    // before painting it (the paint consumes the galley).
+                    // Label and live dot are centred together as one group, so adding the
+                    // dot doesn't lurch the label off-centre. Read the width before
+                    // painting (the paint consumes the galley).
                     let label_w = galley.rect.width();
                     let dot_d = 5.0;
                     let gap = 6.0;
@@ -423,8 +374,7 @@ impl App {
                         egui::pos2(start_x, rect.center().y - galley.rect.height() * 0.5);
                     ui.painter().galley(text_pos, galley, text_color);
                     if live {
-                        // A shallow breath (the same curve as the status dot) so the
-                        // dot reads as a live signal rather than a static mark.
+                        // Same shallow breath curve as the status dot.
                         let dot = dot_color.gamma_multiply(pulse_factor(secs));
                         let dot_c =
                             egui::pos2(start_x + label_w + gap + dot_d * 0.5, rect.center().y);
@@ -449,13 +399,9 @@ impl App {
                 (w, b)
             })
             .inner;
-        // A persistent accent underline marks the active tab, so selection is
-        // legible even when the selectable_label background is subtle. A slim,
-        // rounded bar inset from each tab edge reads as deliberate rather than a
-        // heavy full-width block.
-        // The underline's position is tweened by [`App::draw`] (`tab_slide`), so a
-        // tab switch slides it across the strip instead of jumping between tabs.
-        // Both tabs are equal width, so only the x range interpolates.
+        // A slim accent underline marks the active tab, inset from each edge so it
+        // reads as deliberate rather than a heavy full-width block. Its position is
+        // tweened via `tab_slide`, so a switch slides it across the strip.
         let t = self.tab_slide;
         let x0 = watch.rect.min.x + (bc.rect.min.x - watch.rect.min.x) * t;
         let x1 = watch.rect.max.x + (bc.rect.max.x - watch.rect.max.x) * t;
@@ -468,17 +414,13 @@ impl App {
         ui.separator();
     }
 
-    /// The log panel along the bottom.
+    /// The log panel along the bottom, collapsed by default and toggled by
+    /// Ctrl/Cmd+L to half the window height.
     ///
-    /// Fully collapsed (height 0) by default. Toggled by Ctrl/Cmd+L to occupy
-    /// half the window height. The height is tweened (see [`log_anim_step`]) so
-    /// the panel slides open and closed instead of hard-cutting between the two
-    /// extremes; the tween runs on the wall clock and stops requesting frames the
-    /// moment it settles, so an idle (closed) window still falls asleep.
+    /// The height is tweened (see [`log_anim_step`]) so it slides rather than
+    /// hard-cutting. The tween runs on the wall clock and stops requesting frames the
+    /// moment it settles, so an idle window still falls asleep.
     fn log_panel(&mut self, ui: &mut Ui) {
-        // Tween the open fraction toward 1.0 (open) or 0.0 (closed). Only a toggle
-        // (which repaints) ever changes the target, so the tween only moves right
-        // after one and then settles.
         let target = if self.log_open { 1.0 } else { 0.0 };
         let now = Instant::now();
         let dt = (now - self.log_last_frame).as_secs_f32().clamp(0.0, 0.1);
@@ -493,21 +435,17 @@ impl App {
         }
         let half = ui.ctx().content_rect().height() * 0.5;
         let h = (half * self.log_anim).max(1.0);
-        // Snapshot the lines (with their arrival instants) before the panel, so the
-        // fade-in repaint guard below can be armed from the same data the panel draws.
+        // Snapshot the lines (with arrival instants) up front, so the fade repaint
+        // guard below is armed from the same data the panel draws.
         let lines = log::snapshot(&self.log);
-        // Whether any line is still fading in (younger than the fade window). While
-        // true, the panel wants display-rate frames so the fade is smooth; the moment
-        // every line is fully opaque the guard disarms and the panel falls back to the
-        // 250 ms session cadence (so an idle, settled log still lets the window sleep).
+        // While any line is still fading the panel wants display-rate frames; once all
+        // are opaque it falls back to the session cadence.
         let any_fading = lines
             .iter()
             .any(|(_, at)| at.elapsed().as_secs_f32() < LOG_FADE_SECS);
         egui::Panel::bottom("log").exact_size(h).show(ui, |ui| {
-            // A slim header: the panel's name and a close button, so the panel
-            // can be dismissed without knowing the Ctrl/Cmd+L shortcut. The
-            // close is the same toggle as the shortcut, so the height tween
-            // slides the panel shut either way.
+            // A slim header with a close button, so the panel can be dismissed without
+            // knowing the shortcut. Same toggle, so the tween slides it shut either way.
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("Log").weak());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -527,11 +465,9 @@ impl App {
                         ui.weak("no log output yet");
                     }
                     for (line, added_at) in &lines {
-                        // A new line eases in over the fade window: an ease-out
-                        // cubic from its arrival instant, so the line appears
-                        // quickly then settles gently rather than popping in.
-                        // Older lines (and everything present when the panel
-                        // opened) are already fully opaque.
+                        // Ease-out cubic from the line's arrival, so it appears quickly
+                        // then settles gently rather than popping in. Older lines are
+                        // already fully opaque.
                         let t = (added_at.elapsed().as_secs_f32() / LOG_FADE_SECS).clamp(0.0, 1.0);
                         let alpha = 1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t);
                         let base = log_line_color(line, default);
@@ -541,11 +477,8 @@ impl App {
                             base.b(),
                             (base.a() as f32 * alpha) as u8,
                         );
-                        // A faint hover highlight, so a line under the cursor is
-                        // easy to track in a dense log. The line's rect is
-                        // estimated from the current cursor and the text's natural
-                        // height; the highlight is painted before the content, so
-                        // the text and chip sit on top of it.
+                        // A faint hover highlight so a line is easy to track in a dense
+                        // log. Painted before the content, so text and chip sit on top.
                         let line_rect = egui::Rect::from_min_size(
                             ui.cursor().min,
                             egui::vec2(ui.available_width(), 16.0),
@@ -557,9 +490,7 @@ impl App {
                                 egui::Color32::from_white_alpha(12),
                             );
                         }
-                        // A level chip (ERR/WARN) leads the line when one applies,
-                        // so a problem pops out of the wall of grey log text. The
-                        // chip fades in with the line (the same `alpha`).
+                        // A level chip (ERR/WARN) leads the line, fading in with it.
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 5.0;
                             log_level_chip(ui, line, alpha);
@@ -575,36 +506,29 @@ impl App {
         });
         // Repaint while expanded so streaming logs appear without a storm.
         ui.ctx().request_repaint_after(REPAINT);
-        // The height slide and the line fade-in both want display-rate frames, not
-        // the 250 ms session cadence, so either in flight gets its own
-        // as-soon-as-possible repaint.
+        // The height slide and the line fade both want display-rate frames.
         if log_moving || any_fading {
             ui.ctx().request_repaint();
         }
     }
 
     /// The floating status pill ("Copied ✓", "Relay refreshed ✓", …), anchored
-    /// bottom-centre.
+    /// bottom-centre in its own foreground [`egui::Area`] so confirming an action never
+    /// nudges the WHIP URL box, ticket box or stats panel.
     ///
-    /// Drawn in its own foreground [`egui::Area`] rather than inline, so confirming a
-    /// copy or a relay/ticket action never nudges the WHIP URL box, the ticket box or
-    /// the stats panel. A copy toast (`copied`) takes precedence over an action toast
-    /// (`toast`) when both are momentarily live. The repaint guard in [`App::draw`]
-    /// keeps frames coming while either is up and expires them, so the fade completes
-    /// exactly as repaints stop and no half-faded pill is left on screen.
+    /// A copy toast takes precedence over an action toast when both are live. The
+    /// repaint guard in [`App::draw`] keeps frames coming while either is up, so the
+    /// fade completes exactly as repaints stop.
     fn toast_overlay(&self, ui: &Ui) {
-        // `App::draw` already expired both for this frame, so if either is still set
-        // it is live; the expiry threshold lives in one place there.
+        // `App::draw` already expired both, so anything still set here is live.
         let (text, at) = match (&self.copied, &self.toast) {
             (Some((_, at)), _) => ("Copied ✓", *at),
             (None, Some((msg, at))) => (msg.as_str(), *at),
             (None, None) => return,
         };
         let elapsed = at.elapsed();
-        // Fade the whole pill out over its remaining lifetime.
+        // Fade out over the remaining lifetime, rising 8 px over the first 200 ms.
         let alpha = (1.0 - elapsed.as_secs_f32() / TOAST.as_secs_f32()).clamp(0.0, 1.0);
-        // The pill also rises 8 px as it appears: an ease-out over the first 200 ms,
-        // so the confirmation feels placed rather than stamped in place.
         let enter = (elapsed.as_secs_f32() / 0.2).clamp(0.0, 1.0);
         let rise = (1.0 - enter * enter) * 8.0;
         let frame = egui::Frame::popup(ui.style())
@@ -630,12 +554,11 @@ impl App {
 impl App {
     /// Lay out the whole window.
     ///
-    /// Split out of [`eframe::App::ui`], which only forwards here, so the real
-    /// frame can be driven headlessly by tests without a window or GL context.
+    /// Split out of [`eframe::App::ui`] (which only forwards here) so the real frame
+    /// can be driven headlessly by tests without a window or GL context.
     fn draw(&mut self, ui: &mut Ui) {
-        // Expire the copy toast before deciding on the next frame. A click later in
-        // this same frame re-arms `copied` with a fresh `Instant`, so expiring here
-        // never races a click.
+        // Expire toasts before deciding on the next frame. A click later in this same
+        // frame re-arms them with a fresh `Instant`, so this never races a click.
         self.copied = expire_copied(self.copied, TOAST);
         self.toast = self.toast.take().filter(|(_, at)| at.elapsed() < TOAST);
 
@@ -644,26 +567,21 @@ impl App {
             (g.broadcast, g.watch, g.refreshing)
         };
         let any_active = broadcast.active() || watch.active();
-        // Reset the eased stats display the moment a broadcast goes idle, so the next
-        // broadcast starts from a clean zero instead of counting down from the
-        // previous session's values. Only the broadcast track feeds the stats panel.
+        // Reset the eased stats when a broadcast goes idle, so the next one starts from
+        // zero instead of counting down from the previous session's values.
         if !broadcast.active() {
             self.disp_viewers = 0.0;
             self.disp_video_kbps = 0.0;
             self.disp_video_fps = 0.0;
             self.disp_audio_kbps = 0.0;
         }
-        // Pick up any completion notice a background task left (relay refresh or
-        // ticket reset) and raise it as a toast. Taken under the same brief lock that
-        // reads the modes/refreshing.
+        // Pick up any completion notice a background task left (relay refresh, ticket
+        // reset) and raise it as a toast.
         let notice = self.state.lock().unwrap().notice.take();
         if let Some(msg) = notice {
             self.toast = Some((msg, Instant::now()));
         }
-        // Slide the tab underline toward the selected tab. The tween runs on wall
-        // clock so it advances at the display's frame rate, and it only ever moves
-        // right after a tab switch (which itself repaints). It stops requesting
-        // frames the moment it settles, so an idle window still falls asleep.
+        // Slide the tab underline toward the selected tab, on the wall clock.
         let now = Instant::now();
         let dt = (now - self.last_frame).as_secs_f32().clamp(0.0, 0.1);
         self.last_frame = now;
@@ -672,21 +590,16 @@ impl App {
         if tab_moving {
             self.tab_slide = tab_slide_step(self.tab_slide, target, dt);
         }
-        // Fade the tab content in after a switch: an ease-out over ~160 ms from the
-        // switch instant. [`App::switch_tab`] reset `tab_fade` to 0.0 and armed this;
-        // the tween advances it toward 1.0 and requests frames only while it is in
-        // flight, so an idle window falls asleep the moment the fade settles (and the
-        // overlay is a no-op at full alpha, so no painting lingers either).
+        // Fade the tab content in after a switch (ease-out over ~160 ms).
         if self.tab_fade_active {
             let (eased, settled) =
                 tab_fade_step((now - self.tab_switched_at).as_secs_f32(), TAB_FADE_SECS);
             self.tab_fade = eased;
             self.tab_fade_active = !settled;
         }
-        // Persist a ticket minted while idle (via Refresh Relay / Reset Ticket) so the
-        // saved "current ticket" survives restarts. Guarded to a real change so we
-        // never rewrite config.json every frame. The live broadcast path persists its
-        // own ticket in the broadcast tab, so this only runs when not broadcasting.
+        // Persist a ticket minted while idle (Refresh Relay / Reset Ticket) so the
+        // "current ticket" survives restarts. Guarded to a real change so we never
+        // rewrite config.json every frame; the broadcasting path persists its own.
         if !broadcast.active() {
             let g = self.state.lock().unwrap();
             if let Some(t) = g.ticket.as_ref() {
@@ -697,35 +610,27 @@ impl App {
                 }
             }
         }
-        // Repaint while either track is live, or while a refresh is in flight, so
-        // controls re-enable and the new ticket appears without input.
+        // Repaint while a track is live or a refresh is in flight, so controls
+        // re-enable and the new ticket appears without input.
         if any_active || refreshing {
             ui.ctx().request_repaint_after(REPAINT);
         }
-        // A fading toast is an animation, not a status poll: on the 250 ms session
-        // cadence a 1.5 s fade only gets six frames, so the pill visibly steps down
-        // through six greys instead of dissolving. While either is up, ask for the
-        // next frame at ~60 fps instead — `request_repaint_after` keeps the shortest
-        // duration asked for, so this wins over the session request just above. The
-        // expiry at the top of `draw` disarms the guard as soon as the fade is over,
-        // so an idle window still falls asleep (see the regression test for that).
+        // A fading toast is an animation, not a status poll: the session cadence would
+        // give a 1.5 s fade only six frames. `request_repaint_after` keeps the shortest
+        // duration asked for, so this wins over the request above.
         if self.copied.is_some() || self.toast.is_some() {
             ui.ctx().request_repaint_after(TOAST_FRAME);
         }
-        // The underline slide wants frames at the display rate, not the 250 ms
-        // session cadence, so it gets its own as-soon-as-possible repaint.
+        // The underline slide, tab fade and spinner all want display-rate frames while
+        // in flight, and nothing at all once settled.
         if tab_moving {
             ui.ctx().request_repaint();
         }
-        // The tab content fade-in wants display-rate frames too, but only while it is
-        // in flight; the moment it settles the guard disarms and an idle window sleeps.
         if self.tab_fade_active {
             ui.ctx().request_repaint();
         }
-        // The connecting/starting spinner rotates on the wall clock, so while it is
-        // on screen (the active tab's track is `Starting`) it wants frames at the
-        // display rate too. Only the visible tab's spinner matters: the other tab's
-        // `Starting` track is not drawn, so it must not keep the window awake.
+        // Only the visible tab's spinner matters — the other tab's `Starting` track is
+        // not drawn, so it must not keep the window awake.
         let spinner_visible = match self.tab {
             Tab::Broadcast => broadcast == Mode::Starting,
             Tab::Watch => watch == Mode::Starting,
@@ -734,19 +639,15 @@ impl App {
             ui.ctx().request_repaint();
         }
 
-        // On close, abort any live session (frees the WHIP port, kills the
-        // player) and persist config. The endpoint and runtime are dropped in
-        // `run` after `run_native` returns.
+        // On close, abort any live session (frees the WHIP port, kills the player) and
+        // persist config. The endpoint and runtime are dropped in `run`.
         if ui.ctx().input(|i| i.viewport().close_requested()) {
             state::stop_all(&self.state, ui.ctx());
             self.config.save();
         }
 
-        // Global keyboard shortcuts, consumed here so egui's default focus
-        // traversal doesn't also fire on the same press. Ctrl/Cmd+, toggles the
-        // Settings overlay; Ctrl/Cmd+L toggles the log panel between closed (height
-        // 0) and half the window; while Settings is closed, Tab cycles the
-        // Watch/Broadcast tabs.
+        // Global keyboard shortcuts, consumed here so egui's default focus traversal
+        // doesn't also fire on the same press.
         let ctx = ui.ctx();
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Comma)) {
             self.show_options = !self.show_options;
@@ -755,8 +656,6 @@ impl App {
             i.consume_key(egui::Modifiers::CTRL, egui::Key::L)
                 || i.consume_key(egui::Modifiers::COMMAND, egui::Key::L)
         }) {
-            // Toggle the log panel between fully closed (height 0) and half the
-            // window height.
             self.log_open = !self.log_open;
             ctx.request_repaint();
         } else if !self.show_options
@@ -766,22 +665,15 @@ impl App {
                 Tab::Watch => Tab::Broadcast,
                 Tab::Broadcast => Tab::Watch,
             });
-            // egui armed a focus traversal (`focus_direction = Next`) from this Tab
-            // press before `draw` ran, so cancelling it here stops the first widget
-            // (the menu-bar Settings button) from stealing keyboard focus and showing
-            // its focus ring. Tab now only switches tabs.
+            // egui armed a focus traversal from this Tab press before `draw` ran; cancel
+            // it so the menu-bar Settings button doesn't also grab focus.
             ctx.memory_mut(|m| m.move_focus(egui::FocusDirection::None));
             ctx.request_repaint();
         }
 
-        // The status/settings bar lives at the very bottom edge. Registered
-        // before the `log` bottom panel, so the log stacks above it. A slightly
-        // darker fill and a faint top hairline make it read as a deliberate status
-        // bar rather than a strip of the same background as the content above.
-        // The bar's fill is tinted by the live session's accent (green while
-        // broadcasting, blue while watching, warm while a session is coming up),
-        // mirroring the status dot's colour, so the whole bar carries the session's
-        // state at a glance. Idle keeps the plain dark ground.
+        // The status bar sits at the very bottom, registered before the `log` panel so
+        // the log stacks above it. Its fill is tinted by the live session's accent,
+        // mirroring the status dot, so the bar carries the session state at a glance.
         let bar_tint = if broadcast == Mode::Broadcasting {
             Some(ACCENT)
         } else if watch == Mode::Watching {
@@ -795,16 +687,12 @@ impl App {
             egui::Color32::from_rgb(19, 21, 25),
             bar_tint,
         ));
-        // The frame's top inner margin, so the hairline can sit exactly on the
-        // bar's top edge (the boundary with the content above).
         let bar_top_margin = bar_frame.inner_margin.topf();
         egui::Panel::bottom("menu_bar")
             .frame(bar_frame)
             .show(ui, |ui| {
-                // A faint hairline across the top of the bar, at the boundary with
-                // the content above. Painted on its own full-width layer so it is
-                // not clipped to the bar's content rect (which is inset by the
-                // frame's inner margin).
+                // Hairline on the bar's top edge, painted on its own full-width layer so
+                // it isn't clipped to the frame's inset content rect.
                 let boundary = ui.max_rect().min.y - bar_top_margin;
                 let window = ui.ctx().viewport_rect();
                 let painter = ui.ctx().layer_painter(egui::LayerId::new(
@@ -822,10 +710,8 @@ impl App {
             self.options_window(ui.ctx());
         }
         self.log_panel(ui);
-        // A subtle vertical gradient is the central panel's ground: the panel's own
-        // fill is cleared, and the gradient is what the eye reads as the window.
-        // Slightly lighter at the top, slightly darker at the bottom, so the surface
-        // reads as lit from above rather than a flat fill.
+        // A subtle vertical gradient is the central panel's ground, so the surface reads
+        // as lit from above rather than a flat fill.
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::central_panel(ui.style())
@@ -833,41 +719,26 @@ impl App {
                     .inner_margin(egui::Margin::symmetric(16, 12)),
             )
             .show(ui, |ui| {
-                // The ground gradient is painted on the *same* layer as the panel
-                // content (via `ui.painter()`) and *before* any content is added, so
-                // it is always behind the content: shapes in one paint list draw in
-                // the order they are added. It must not be painted on a separate
-                // background layer — in egui 0.36 the panel content itself already
-                // lives on the background order (the root UI's layer), so a second
-                // background layer has no guaranteed order relative to the content
-                // and can land on top of it, painting the whole panel blank.
-                // `ui.clip_rect()` is the panel's full visible rect (the frame's
-                // inner margin only insets the layout, not the clip), so the ground
-                // covers the whole panel, margin included.
+                // The ground gradient, glow and vignette are painted on the *same* layer
+                // as the panel content and *before* it, so paint order puts them behind.
+                // They must not go on a separate background layer: in egui 0.36 the panel
+                // content already lives on the background order, so a second background
+                // layer has no guaranteed order and can land on top, painting the panel
+                // blank. `ui.clip_rect()` is the panel's full visible rect (the frame's
+                // inner margin insets the layout, not the clip).
                 central_gradient(ui.painter(), ui.clip_rect(), 1.0);
-                // A soft ambient "light from above" glow at the top centre, behind the
-                // brand title and tab strip (the same lit-from-above cue as the ground
-                // gradient and the top bevels). Painted before any content, so it sits
-                // behind it on the same paint list.
                 ambient_glow(ui.painter(), ui.clip_rect());
-                // A subtle radial vignette behind the content, so the eye is gently
-                // drawn to the centre of the panel (the same depth cue as the ground
-                // gradient and the ambient glow). Painted before any content, so it
-                // sits behind it on the same paint list.
                 vignette(ui.painter(), ui.clip_rect());
                 self.tab_bar(ui);
                 ui.add_space(8.0);
-                // The top of the tab content, so the fade-in overlay covers only the
-                // content (below the tab strip), not the brand title and tabs.
+                // Only the content below the tab strip gets the fade overlay.
                 let content_top = ui.cursor().min.y;
                 match self.tab {
                     Tab::Watch => self.watch_tab(ui),
                     Tab::Broadcast => self.broadcast_tab(ui),
                 }
-                // Fade the new tab's content in after a switch: an overlay matching
-                // the ground, fading out over ~160 ms. Painted after the content (on
-                // the same layer) so it covers it while fading. A no-op at full
-                // alpha, so an idle window paints nothing extra.
+                // Fade-in overlay: the ground colour painted *after* the content, fading
+                // out over ~160 ms. A no-op at full alpha.
                 if self.tab_fade < 1.0 {
                     let overlay = egui::Rect::from_min_max(
                         egui::pos2(ui.max_rect().min.x, content_top),
@@ -876,8 +747,7 @@ impl App {
                     central_gradient(ui.painter(), overlay, 1.0 - self.tab_fade);
                 }
             });
-        // Drawn last, on its own foreground layer, so it floats over the panels
-        // without taking part in their layout.
+        // Drawn last, on its own foreground layer, so it floats over the panels.
         self.toast_overlay(ui);
     }
 }
@@ -890,11 +760,8 @@ impl eframe::App for App {
 
 /// Drop the copy toast once its window has closed.
 ///
-/// `copied` is what arms the repaint guard in [`App::draw`] after a session has
-/// gone idle, so it has to expire: before the fix it was set on the first copy
-/// and never cleared, and the app asked for a repaint every tick forever.
-/// Extracted (with the window length injected) so that regression is testable
-/// without a live window.
+/// Extracted with the window length injected so the "idle window must fall asleep"
+/// regression is testable without a live window.
 fn expire_copied(
     copied: Option<(&'static str, Instant)>,
     toast: Duration,
@@ -912,15 +779,13 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-/// The status-dot breath: a shallow ~2-second pulse, brightness bounded to
-/// `0.6..=1.0` of the base colour so "live" reads at a glance without blinking
-/// out. Mirrors the viewers cell in the broadcast tab.
+/// The status-dot breath: a shallow ~2 s pulse bounded to `0.6..=1.0` of the base
+/// colour, so "live" reads at a glance without blinking out.
 fn pulse_factor(secs: f32) -> f32 {
     0.6 + 0.4 * (0.5 + 0.5 * (secs * std::f32::consts::TAU * 0.5).cos())
 }
 
-/// The copy-box click flash: a linear fade from `1.0` to `0.0` over `window`,
-/// clamped outside it. Drives a brief brighten of the box fill and glyph.
+/// The copy-box click flash: a linear fade from `1.0` to `0.0` over `window`.
 fn flash_alpha(elapsed: Duration, window: Duration) -> f32 {
     if window.is_zero() {
         return 0.0;
@@ -928,15 +793,9 @@ fn flash_alpha(elapsed: Duration, window: Duration) -> f32 {
     (1.0 - elapsed.as_secs_f32() / window.as_secs_f32()).clamp(0.0, 1.0)
 }
 
-/// A small rotating arc spinner, shown beside "connecting…" / "starting…" while a
-/// session is being brought up, so the waiting moment has visible progress instead
-/// of a static label.
-///
-/// The arc is a 270° ring segment drawn as a mesh of small quads (a crisp,
-/// controlled look that does not depend on line-cap styling) and rotated with
-/// `secs` (one revolution every ~1.2 s). Purely decorative: it takes a hover-sense
-/// slot but is never clicked. `color` is the track's accent (green for a broadcast
-/// coming up, blue for a watch connecting).
+/// A rotating 270° arc, shown beside "connecting…" / "starting…" so the wait has
+/// visible progress. Drawn as a mesh of quads (crisper than a stroked arc, and it
+/// avoids the layer-ordering pitfalls of a separate background layer).
 fn spinner(ui: &mut Ui, secs: f32, color: egui::Color32) {
     let size = 14.0;
     let (rect, _resp) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
@@ -951,8 +810,7 @@ fn spinner(ui: &mut Ui, secs: f32, color: egui::Color32) {
     for i in 0..n {
         let a0 = start + span * i as f32 / n as f32;
         let a1 = start + span * (i + 1) as f32 / n as f32;
-        // Four corners of the i-th ring quad. `colored_vertex` pushes in order, so
-        // this quad's vertices are at `4*i .. 4*i+4`.
+        // Four corners of the i-th ring quad (vertices at `4*i .. 4*i+4`).
         mesh.colored_vertex(
             center + egui::vec2(a0.cos() * outer, a0.sin() * outer),
             color,
@@ -976,11 +834,8 @@ fn spinner(ui: &mut Ui, secs: f32, color: egui::Color32) {
     ui.painter().add(egui::Shape::mesh(mesh));
 }
 
-/// A faint 1 px "light catch" along the top edge of a card surface: a bright
-/// line just inside the top, so the surface reads as catching light from above
-/// rather than a flat tint. Inset by `corner_radius` at each end so it never
-/// clips the rounded corners. Purely decorative: it takes no layout space and is
-/// painted behind whatever the caller draws next (the copy glyph, a hover stroke).
+/// A faint 1 px "light catch" along the top edge of a card surface, inset at each
+/// end by `corner_radius` so it never clips the rounded corners.
 fn top_bevel(painter: &egui::Painter, rect: egui::Rect, corner_radius: u8) {
     let inset = f32::from(corner_radius);
     let left = rect.min.x + inset;
@@ -995,21 +850,16 @@ fn top_bevel(painter: &egui::Painter, rect: egui::Rect, corner_radius: u8) {
     );
 }
 
-/// A very subtle vertical gradient for the central panel's background: slightly
-/// lighter at the top, slightly darker at the bottom, so the window reads as a
-/// surface lit from above rather than a flat fill. The two endpoints average to
-/// the panel fill, so it is a depth cue, not a recolor.
+/// A very subtle vertical gradient for the central panel's ground: lighter at the top,
+/// darker at the bottom, so the window reads as a surface lit from above. The endpoints
+/// average to the panel fill, so it is a depth cue, not a recolor.
 ///
-/// The ground gradient is painted with the panel content's own painter, *before*
-/// any content is added, so it sits behind the content on the same paint list. It
-/// must not be painted on a separate background layer: in egui 0.36 the panel
-/// content already lives on the background order (the root UI's layer), so a
-/// second background layer has no guaranteed order relative to the content and
-/// can land on top of it, painting the whole panel blank.
+/// Must be painted on the panel content's own painter (not a separate background layer):
+/// in egui 0.36 the panel content already lives on the background order, so a second
+/// background layer has no guaranteed order and can land on top, blanking the panel.
 ///
-/// `alpha` scales the whole gradient's opacity: at 1.0 it is the ground itself; at
-/// a lower value it is the tab fade-in's reveal overlay (painted after the content,
-/// so it covers it while fading), which matches the ground so the fade is seamless.
+/// `alpha` of 1.0 is the ground itself; a lower value is the tab fade-in's reveal
+/// overlay, which matches the ground so the fade is seamless.
 fn central_gradient(painter: &egui::Painter, rect: egui::Rect, alpha: f32) {
     let top = egui::Color32::from_rgb(27, 29, 34).gamma_multiply(alpha);
     let bottom = egui::Color32::from_rgb(21, 23, 27).gamma_multiply(alpha);
@@ -1023,59 +873,42 @@ fn central_gradient(painter: &egui::Painter, rect: egui::Rect, alpha: f32) {
     painter.add(egui::Shape::mesh(mesh));
 }
 
-/// A subtle ambient "light from above" glow at the top centre of the central panel:
-/// a few concentric, semi-transparent circles whose overlap brightens the centre,
-/// so the brand title and tab strip read as lit from above (the same cue as the
-/// ground gradient and the top bevels). Painted on the panel's own painter, *before*
-/// any content is added, so it sits behind the content (the same rule as
-/// [`central_gradient`]). The fill is a slightly lighter shade of the ground at a
-/// very low alpha (not a `gamma_multiply` of a dark colour, which would darken the
-/// top rather than light it): a depth cue, not a recolor.
+/// An ambient "light from above" glow at the top centre of the central panel:
+/// concentric circles at a very low alpha, whose overlap brightens the centre.
+/// Painted before any content, like [`central_gradient`].
 fn ambient_glow(painter: &egui::Painter, rect: egui::Rect) {
     let center = egui::pos2(rect.center().x, rect.top());
-    // A slightly lighter shade of the ground (the ground's top is ~27,29,34), so the
-    // glow reads as light from above rather than a darkening.
+    // A lighter shade of the ground at alpha 3, so this lights rather than darkens.
     let color = egui::Color32::from_rgba_unmultiplied(58, 64, 74, 3);
-    // Six concentric circles, each larger than the last, at the same low alpha. The
-    // overlap brightens the centre (where all six coincide) and fades out radially
-    // (where only the outermost reach), so the result reads as a soft radial glow
-    // rather than a set of rings.
+    // Overlapping circles brighten the centre and fade out radially.
     for radius in [40.0, 65.0, 90.0, 115.0, 140.0, 165.0] {
         painter.circle_filled(center, radius, color);
     }
 }
 
-/// A subtle radial vignette: a darkening that is transparent at the centre and
-/// fades in toward the edges, so the eye is gently drawn to the centre of the panel
-/// (the same depth / "lit from above" language as the ground gradient and the
-/// ambient glow). The falloff is radial from the centre, so the corners (the farthest
-/// points) are the darkest and the mid-edges are lighter — a proper vignette, not a
-/// flat border. Painted on the panel's own painter, *before* any content is added, so
-/// it sits behind the content (the same rule as [`central_gradient`]). A depth cue,
-/// not a recolor: the edge alpha is very low.
+/// A radial vignette: transparent at the centre, fading in toward the edges, so the
+/// eye is drawn to the middle. The falloff is radial, so the corners (farthest out)
+/// are darkest — a proper vignette, not a flat border. Painted before any content,
+/// like [`central_gradient`].
 fn vignette(painter: &egui::Painter, rect: egui::Rect) {
     let center = rect.center();
-    // The radius reaches the farthest corner, so the whole panel is covered (the
-    // mid-edges sit inside the circle and read lighter than the corners).
+    // Reaches the farthest corner, so the whole panel is covered.
     let radius = (rect.size() * 0.5).length();
     if radius <= 0.0 {
         return;
     }
-    // A dark neutral, transparent at the centre and faint at the edges.
     let clear = egui::Color32::from_rgba_unmultiplied(12, 14, 18, 0);
     let edge = egui::Color32::from_rgba_unmultiplied(12, 14, 18, 16);
     let n = 32;
     let mut mesh = egui::epaint::Mesh::default();
-    // The centre vertex (transparent).
+    // Centre vertex (transparent), then one faint vertex per outer segment.
     mesh.colored_vertex(center, clear);
-    // The outer ring vertices (the faint edge), one per segment.
     for i in 0..n {
         let a = std::f32::consts::TAU * i as f32 / n as f32;
         let p = center + egui::vec2(a.cos() * radius, a.sin() * radius);
         mesh.colored_vertex(p, edge);
     }
-    // A fan: one triangle from the centre to each outer segment, wrapping the last
-    // segment back to the first outer vertex.
+    // A fan: one triangle from the centre to each outer segment.
     for i in 0..n {
         let a = 1 + i as u32;
         let b = 1 + ((i + 1) % n) as u32;
@@ -1084,21 +917,11 @@ fn vignette(painter: &egui::Painter, rect: egui::Rect) {
     painter.add(egui::Shape::mesh(mesh));
 }
 
-/// A soft halo behind the primary action button: three stacked rounded rects that
-/// fall off from the button's edge (nearest strongest, farthest faintest), so the
-/// hero action reads as lit by `color` rather than a flat button.
+/// A soft halo behind a primary action button: three stacked rounded rects falling off
+/// from the button's edge. Paint this *before* the button so only the rim shows.
 ///
-/// The caller paints this *before* adding the button, so the button (added next,
-/// on top) covers the halo's centre and only the rim around the button's edge
-/// shows. `color` is the action's accent: the live green for a Start/Watch, a
-/// muted red for a Stop, so the halo's hue matches the button's intent.
-///
-/// `hover` lifts the halo: the alphas roughly double, so the hero action reads as
-/// lit brighter under the mouse. `pressed` contracts it: the alphas drop below the
-/// resting level and the halo tightens, so the hero action reads as physically
-/// pressed in rather than flat. The hero buttons use a fixed `.fill()`, which
-/// suppresses egui's own hover feedback, so the glow carries the hover and press
-/// response.
+/// The hero buttons use a fixed `.fill()`, which suppresses egui's own feedback, so
+/// this glow carries the hover (brighter) and press (dimmer, contracted) response.
 fn primary_button_glow(
     painter: &egui::Painter,
     rect: egui::Rect,
@@ -1107,8 +930,7 @@ fn primary_button_glow(
     pressed: bool,
 ) {
     let corner = egui::CornerRadius::same(10);
-    // A pressed halo is dimmer than even the resting halo, so the button reads as
-    // pushed in. A hover is the brightest. The resting state is the baseline.
+    // Pressed is dimmer than the resting halo (reads as pushed in); hover is brightest.
     let (a1, a2, a3) = if pressed {
         (0.01, 0.03, 0.06)
     } else if hover {
@@ -1121,15 +943,9 @@ fn primary_button_glow(
     }
 }
 
-/// A soft accent glow around a secondary interactive surface: two stacked rounded
-/// rects that fall off from the edge (nearest strongest, farthest faintest). The
-/// shared halo language for the copy box's hover and the ticket/buffer boxes' focus,
-/// so both read as lit by the accent under the same cue. Dimmer than the hero
-/// buttons' halo: the surfaces it lights are secondary, not the hero action.
-/// Purely decorative: it takes no layout space. `corner` matches the surface's own
-/// corner radius so the glow hugs its rounded outline, and `color` is the accent the
-/// surface is lit by (the live green for a broadcast surface, the watch blue for a
-/// watch surface), so the glow's hue matches the surface's own accent.
+/// A soft glow around a secondary interactive surface (a copy box's hover, a ticket or
+/// buffer field's focus). Two stacked rounded rects, dimmer than the hero buttons'
+/// [`primary_button_glow`]; takes no layout space.
 pub(crate) fn soft_glow(
     painter: &egui::Painter,
     rect: egui::Rect,
@@ -1141,12 +957,9 @@ pub(crate) fn soft_glow(
     }
 }
 
-/// The status bar's fill, tinted by the live session's accent so the bar carries
-/// the session's state at a glance: a green cast while broadcasting, a blue cast
-/// while watching, a warm cast while a session is coming up, and the plain dark
-/// ground when idle. The tint is blended in at a low alpha (6%), so it reads as a
-/// subtle state cue rather than a recolor; when there is no tint the base fill is
-/// returned unchanged, so the bar's resting look is byte-identical to before.
+/// The status bar's fill: the base dark ground, tinted 6% by the live session's accent
+/// so the bar carries the session state at a glance. Returns `base` unchanged when
+/// there is no tint, so the resting look is untouched.
 fn status_bar_fill(base: egui::Color32, tint: Option<egui::Color32>) -> egui::Color32 {
     let Some(t) = tint else {
         return base;
@@ -1161,20 +974,15 @@ fn status_bar_fill(base: egui::Color32, tint: Option<egui::Color32>) -> egui::Co
 }
 
 /// Whether the pointer is over `rect` this frame, for a hand-painted widget's hover
-/// response. The hero buttons use a fixed `.fill()`, which suppresses egui's own
-/// hover feedback, so the hover is read from the pointer position instead.
+/// response (a fixed `.fill()` suppresses egui's own hover feedback).
 fn pointer_over(ui: &Ui, rect: egui::Rect) -> bool {
     ui.ctx()
         .input(|i| i.pointer.latest_pos())
         .is_some_and(|p| rect.contains(p))
 }
 
-/// Whether the primary pointer button is pressed over `rect` this frame, for a
-/// hand-painted widget's press response. The hero buttons use a fixed `.fill()`,
-/// which suppresses egui's own hover *and* active feedback, so the press is read
-/// from the pointer position and button state instead. A press always implies a
-/// hover (the pointer is over the rect), so callers can treat `pressed` as a
-/// refinement of `hovered`.
+/// Whether the primary button is pressed over `rect` this frame. A press always implies
+/// a hover, so callers can treat `pressed` as a refinement of [`pointer_over`].
 fn pointer_pressed_over(ui: &Ui, rect: egui::Rect) -> bool {
     ui.ctx().input(|i| {
         i.pointer.button_pressed(egui::PointerButton::Primary)
@@ -1182,12 +990,9 @@ fn pointer_pressed_over(ui: &Ui, rect: egui::Rect) -> bool {
     })
 }
 
-/// A sonar pulse: a soft ring that expands from a live indicator's dot and fades
-/// out, looping on `period` seconds, so "live" reads as an active signal rather than
-/// a static glyph. `center` is the dot's centre, `base` its resting radius, `color`
-/// the accent, `secs` the animation clock (expected to advance between repaints,
-/// which already fire while live). Purely decorative: it paints on the caller's
-/// painter and takes no layout space.
+/// A sonar pulse: a soft ring expanding from a live indicator's dot and fading out,
+/// looping on `period` seconds. Decorative — takes no layout space. `secs` is the
+/// animation clock, which advances between the repaints that already fire while live.
 fn sonar_pulse(
     painter: &egui::Painter,
     center: egui::Pos2,
@@ -1209,14 +1014,9 @@ fn sonar_pulse(
     );
 }
 
-/// A compact "LIVE" badge for the status bar: a small outlined pill in the session's
-/// accent, so the live state reads at a glance rather than only as a small breathing
-/// dot. `color` is the session's accent (green while broadcasting, blue while
-/// watching) and `breath` (0.6..=1.0) is the same pulse factor that drives the dot,
-/// so the badge and the dot breathe in lockstep. The pill is a stroked rect (not a
-/// line segment) and the text is a laid-out galley, so neither disturbs the
-/// line-segment-based tests. Purely decorative: it takes a hover-sense slot but is
-/// never clicked.
+/// A compact "LIVE" badge for the status bar: an outlined pill in the session's accent
+/// that breathes in lockstep with the status dot (`breath` is the same
+/// [`pulse_factor`] driving it).
 fn live_badge(ui: &mut Ui, color: egui::Color32, breath: f32) {
     let font_id = egui::FontId::proportional(10.0);
     let galley =
@@ -1230,8 +1030,7 @@ fn live_badge(ui: &mut Ui, color: egui::Color32, breath: f32) {
         egui::vec2(tw + pad_x * 2.0, th + pad_y * 2.0),
         egui::Sense::hover(),
     );
-    // A faint fill and a breathing outline in the session's accent: the outline
-    // carries the signal, the fill keeps it from shouting.
+    // The breathing outline carries the signal; the faint fill keeps it from shouting.
     let corner = egui::CornerRadius::same(4);
     ui.painter()
         .rect_filled(rect, corner, color.gamma_multiply(0.10));
@@ -1241,25 +1040,17 @@ fn live_badge(ui: &mut Ui, color: egui::Color32, breath: f32) {
         egui::Stroke::new(1.0, color.gamma_multiply(breath)),
         egui::StrokeKind::Inside,
     );
-    // Centre the text in the pill.
     let text_pos = egui::pos2(rect.center().x - tw * 0.5, rect.center().y - th * 0.5);
     ui.painter()
         .galley(text_pos, galley, color.gamma_multiply(breath.max(0.8)));
 }
 
-/// A section heading: a small accent-coloured rounded bar to the left of a bold
-/// label, so the label reads as a deliberate section marker rather than a plain
-/// strong label. The bar and label sit in a horizontal row, so the bar sits neatly
-/// beside the text. `color` is the section's accent (the live green for a broadcast
-/// section, the watch blue for a watch section), echoing the two-accent design
-/// language used across the app.
+/// A section heading: a small accent bar beside a bold label.
 fn section_tick(ui: &mut Ui, text: &str, color: egui::Color32) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         let (bar, _) = ui.allocate_exact_size(egui::vec2(3.0, 12.0), egui::Sense::hover());
-        // Nudge the bar down a couple of pixels so it centres on the label's text: the
-        // row is top-aligned, so an un-nudged bar would sit a touch high relative to the
-        // label. The nudge stays within the row's height, so it never overflows.
+        // Nudge the bar down so it centres on the label's text (the row is top-aligned).
         ui.painter().rect_filled(
             bar.translate(egui::vec2(0.0, 2.0)),
             egui::CornerRadius::same(1),
@@ -1269,11 +1060,8 @@ fn section_tick(ui: &mut Ui, text: &str, color: egui::Color32) {
     });
 }
 
-/// A soft error callout: a muted red-tinted rounded surface with a red left bar
-/// (the section-tick's language, in the error hue) and the message in the error
-/// red, so a failure reads as a deliberate surface rather than a stray line of
-/// text. The tint is dark enough to recede against the ground; the bar and the
-/// text carry the signal. Long messages wrap within the surface.
+/// A soft error callout: a muted red-tinted surface with a red left bar (mirroring
+/// [`section_tick`] in the error hue) and the message in the error red.
 fn error_callout(ui: &mut Ui, text: &str) {
     let frame = egui::Frame::group(ui.style())
         .fill(ERROR.gamma_multiply(0.12))
@@ -1282,8 +1070,6 @@ fn error_callout(ui: &mut Ui, text: &str) {
     let inner = frame.show(ui, |ui| {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
-            // The left bar, centred on the first line's text (the same nudge as
-            // [`section_tick`], which it mirrors in the error hue).
             let (bar, _) = ui.allocate_exact_size(egui::vec2(3.0, 14.0), egui::Sense::hover());
             ui.painter().rect_filled(
                 bar.translate(egui::vec2(0.0, 1.0)),
@@ -1293,16 +1079,11 @@ fn error_callout(ui: &mut Ui, text: &str) {
             ui.label(egui::RichText::new(text).color(ERROR));
         });
     });
-    // The same light catch the copy boxes and stats panel carry, so the callout
-    // reads as a surface lit from above like the rest of the app.
     top_bevel(ui.painter(), inner.response.rect, frame.corner_radius.nw);
 }
 
-/// The display colour of a log line, by its level: tracing's default format is
-/// `LEVEL target: message`, so the level is the line's first word. Errors read in
-/// the app's error red, warnings in a muted amber, debug and trace recede to a dim
-/// grey, and everything else (info, and lines without a level prefix) takes the
-/// normal text colour.
+/// The display colour of a log line, keyed off its leading tracing level word
+/// (`LEVEL target: message`). Info and unlevelled lines take the default colour.
 fn log_line_color(line: &str, default: egui::Color32) -> egui::Color32 {
     match line.split_whitespace().next() {
         Some("ERROR") => ERROR,
@@ -1312,27 +1093,21 @@ fn log_line_color(line: &str, default: egui::Color32) -> egui::Color32 {
     }
 }
 
-/// The muted amber a `WARN` line is coloured with (shared by [`log_line_color`] and
-/// [`log_level_chip`], so a warning's text and its chip always match).
+/// The muted amber a `WARN` line is coloured with, shared by [`log_line_color`] and
+/// [`log_level_chip`] so a warning's text and chip always match.
 const WARN_AMBER: egui::Color32 = egui::Color32::from_rgb(214, 178, 94);
 
-/// A small level chip for a log line: a compact rounded tag in the line's level
-/// colour ("ERR" in the error red, "WARN" in the muted amber), so an error or warning
-/// pops out of a wall of grey log text instead of reading as just another line. INFO
-/// and level-less lines get no chip. `alpha` fades the chip in with the line it tags
-/// (the same fade window the line uses), so the chip and the line appear together.
-/// Returns `true` if a chip was painted. The chip is a stroked rect plus a laid-out
-/// galley (no line segments), so it never disturbs the line-segment-based tests.
+/// A small level chip ("ERR" / "WARN") leading a log line, so a problem pops out of a
+/// wall of grey text. INFO and unlevelled lines get no chip. `alpha` fades the chip in
+/// with its line. Returns whether a chip was painted.
 fn log_level_chip(ui: &mut Ui, line: &str, alpha: f32) -> bool {
     let (text, color) = match line.split_whitespace().next() {
         Some("ERROR") => ("ERR", ERROR),
         Some("WARN") => ("WARN", WARN_AMBER),
         _ => return false,
     };
-    // A faint fill and a steady outline in the level colour; the text is near-full
-    // strength so the tag is legible. All three scale with `alpha` so the chip fades
-    // in with its line. The text is laid out with its own (non-placeholder) colour,
-    // so the galley carries the chip's hue.
+    // Faint fill, steadier outline, near-full-strength text — all scaled by `alpha` so
+    // the chip fades in with its line.
     let corner = egui::CornerRadius::same(3);
     let fill = egui::Color32::from_rgba_unmultiplied(
         color.r(),
@@ -1380,11 +1155,9 @@ fn log_level_chip(ui: &mut Ui, line: &str, alpha: f32) -> bool {
     true
 }
 
-/// A small hand-painted "×" for the log panel's header: two crossing strokes in a
-/// dim grey that brightens on hover, so the panel can be dismissed without knowing
-/// the Ctrl/Cmd+L shortcut. Hand-painted (rather than a text button) so it does not
-/// depend on a glyph the bundled faces may not carry — the same reason the copy
-/// box's glyph is drawn by hand.
+/// A hand-painted "×" for the log panel's header (two crossing strokes, brightening on
+/// hover), so the panel can be dismissed without knowing Ctrl/Cmd+L. Hand-painted so it
+/// doesn't depend on a glyph the bundled faces may not carry.
 fn close_button(ui: &mut Ui) -> bool {
     let size = 16.0;
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
@@ -1397,8 +1170,7 @@ fn close_button(ui: &mut Ui) -> bool {
     } else {
         egui::Color32::from_rgb(130, 133, 140)
     };
-    // A 4 px inset keeps the strokes inside the slot; two diagonals cross at the
-    // slot's centre.
+    // A 4 px inset keeps the two crossing diagonals inside the slot.
     let m = 4.0;
     ui.painter().line_segment(
         [
@@ -1417,13 +1189,9 @@ fn close_button(ui: &mut Ui) -> bool {
     resp.clicked()
 }
 
-/// One step of the tab underline's exponential ease: `current` moves toward
-/// `target` by a fraction of the remaining distance that grows with `dt`
-/// (wall-clock seconds), so the slide's speed is independent of frame rate.
-///
-/// A step never overshoots, and once within `0.002` of the target (about a
-/// pixel at the widest window) it snaps on, so the caller can stop requesting
-/// repaints and an idle window falls asleep again.
+/// One step of the tab underline's exponential ease toward `target`, scaled by the
+/// wall-clock `dt` so the slide's speed is frame-rate independent. Never overshoots,
+/// and snaps on within ~a pixel so the caller can stop requesting repaints.
 fn tab_slide_step(current: f32, target: f32, dt: f32) -> f32 {
     let next = current + (target - current) * (1.0 - (-dt * 30.0).exp());
     if (next - target).abs() <= 0.002 {
@@ -1433,14 +1201,8 @@ fn tab_slide_step(current: f32, target: f32, dt: f32) -> f32 {
     }
 }
 
-/// One step of the log panel's height tween: `current` moves toward `target` (the
-/// open fraction, 0.0 closed / 1.0 open) by a fraction of the remaining distance
-/// that grows with `dt` (wall-clock seconds), so the slide's speed is independent
-/// of frame rate. A step never overshoots, and once within `0.002` of the target it
-/// snaps on, so the caller can stop requesting repaints and an idle window falls
-/// asleep again. A touch slower than the tab underline (`30.0` vs `18.0`), so the
-/// larger travel (up to half the window) reads as a deliberate slide rather than a
-/// snap.
+/// One step of the log panel's height tween (open fraction). Same shape as
+/// [`tab_slide_step`] but slower, so the larger travel reads as a deliberate slide.
 fn log_anim_step(current: f32, target: f32, dt: f32) -> f32 {
     let next = current + (target - current) * (1.0 - (-dt * 18.0).exp());
     if (next - target).abs() <= 0.002 {
@@ -1450,14 +1212,9 @@ fn log_anim_step(current: f32, target: f32, dt: f32) -> f32 {
     }
 }
 
-/// One step of the live stats' eased display: `current` moves toward `target` by a
-/// fraction of the remaining distance that grows with `dt` (wall-clock seconds), so
-/// the settle's speed is independent of frame rate. A step never overshoots, and once
-/// within a small epsilon of the target it snaps on, so the caller can stop requesting
-/// repaints the moment the numbers settle. A touch slower than the tab underline, so a
-/// bitrate change reads as a gentle settle rather than a snap. The epsilon (0.05) is
-/// well below one unit of every displayed stat (kbit/s, fps, viewers), so the snap is
-/// never visible.
+/// One step of the live stats' eased display. Same shape as [`tab_slide_step`], slower
+/// still; the 0.05 epsilon is well below one unit of every displayed stat, so the snap
+/// is never visible.
 fn stat_ease(current: f32, target: f32, dt: f32) -> f32 {
     let next = current + (target - current) * (1.0 - (-dt * 8.0).exp());
     if (next - target).abs() <= 0.05 {
@@ -1467,10 +1224,9 @@ fn stat_ease(current: f32, target: f32, dt: f32) -> f32 {
     }
 }
 
-/// One step of the tab content's fade-in: the eased alpha after `elapsed` seconds
-/// from the switch, and whether the fade has settled. An ease-out cubic over
-/// `duration`, so the new content appears quickly then settles gently. Pure (the
-/// clock is injected) so the settle is testable without a live window.
+/// The tab content's fade-in alpha after `elapsed` seconds, and whether it has settled.
+/// An ease-out cubic, so new content appears quickly then settles gently. Pure (the
+/// clock is injected) so the settle is testable headlessly.
 fn tab_fade_step(elapsed: f32, duration: f32) -> (f32, bool) {
     let t = (elapsed / duration).clamp(0.0, 1.0);
     if t >= 1.0 {
@@ -1482,13 +1238,10 @@ fn tab_fade_step(elapsed: f32, duration: f32) -> (f32, bool) {
 
 /// Install the app's tuned dark theme once, before the first frame.
 ///
-/// egui ships an OS-following stock palette; this pins a deliberate dark look
-/// with an accent-tinted selection/hover so the app does not depend on the host
-/// OS theme. `all_styles_mut` retunes both the dark and light variants, so the
-/// palette stays coherent even if the theme preference is ever switched, while
-/// `set_theme` makes dark the deterministic default across platforms. Deltas are
-/// kept small: a slightly deeper neutral ground, an accent selection, and gentle
-/// widget and spacing bumps.
+/// Pins a deliberate dark look (rather than egui's OS-following stock palette) with an
+/// accent-tinted selection/hover. `all_styles_mut` retunes both variants so the palette
+/// stays coherent if the theme is ever switched; `set_theme` makes dark the deterministic
+/// default.
 fn apply_theme(ctx: &egui::Context) {
     ctx.set_theme(egui::Theme::Dark);
     ctx.all_styles_mut(|style| {
@@ -1500,7 +1253,6 @@ fn apply_theme(ctx: &egui::Context) {
         // Accent-tinted selection and hover, reused by the copy-box stroke.
         v.selection.bg_fill = ACCENT.gamma_multiply(0.28);
         v.selection.stroke.color = ACCENT;
-        // Nudge the interactive surfaces toward the accent without shouting.
         v.widgets.inactive.weak_bg_fill = egui::Color32::from_rgb(44, 48, 54);
         v.widgets.inactive.bg_fill = egui::Color32::from_rgb(44, 48, 54);
         v.widgets.hovered.weak_bg_fill = ACCENT.gamma_multiply(0.16);
@@ -1515,13 +1267,9 @@ fn apply_theme(ctx: &egui::Context) {
     });
 }
 
-/// The application's window / task-bar icon: a rounded square (the app's dark
-/// ground, lit from above) carrying a green "stream" — a thick diagonal conduit
-/// with a soft glow and a flow arrow at its tip — so the app has a small brand
-/// mark in the title bar and task bar instead of egui's default "e". Generated in
-/// code (no asset file), square, with a transparent margin outside the rounded
-/// square. The stream runs through the icon's centre and reads as "streaming" at
-/// a glance even at task-bar sizes.
+/// The window / task-bar icon: a rounded square (dark ground, lit from above) carrying a
+/// green "stream" — a diagonal conduit with a soft glow and a flow arrow at its tip.
+/// Generated in code, so there is no asset file to ship.
 fn app_icon() -> Arc<egui::IconData> {
     let size = 64usize;
     let mut rgba = vec![0u8; size * size * 4];
@@ -1542,34 +1290,33 @@ fn app_icon() -> Arc<egui::IconData> {
     })
 }
 
-/// The colour of one icon pixel: the rounded-square ground (a subtle vertical
-/// gradient, lit from above), a soft glow around the stream, and the stream itself
-/// (a thick diagonal capsule plus a flow arrow) in the live accent. Transparent
-/// outside the rounded square.
+/// The colour of one icon pixel: the rounded-square ground (a vertical gradient, lit from
+/// above), a soft glow around the stream, and the stream itself in the live accent.
+/// Transparent outside the rounded square.
 fn icon_pixel(x: f32, y: f32, size: f32) -> (u8, u8, u8, u8) {
     let (px, py) = (x + 0.5, y + 0.5); // centre the sample in the pixel
     let accent: (f32, f32, f32) = (80.0, 200.0, 120.0); // the live accent (ACCENT)
-                                                        // The rounded-square ground.
+
     let radius = size * 0.22;
     let d_bg = rounded_box_sdf(px, py, size, radius);
     if d_bg > 0.5 {
         return (0, 0, 0, 0); // outside the icon
     }
     let edge = (0.5 - d_bg).clamp(0.0, 1.0); // 1 px anti-aliasing
-                                             // A subtle vertical gradient: lighter at the top (lit from above).
+    // Ground: a vertical gradient, lighter at the top.
     let t = (py / size).clamp(0.0, 1.0);
     let (top, bot) = ((31.0, 34.0, 40.0), (19.0, 21.0, 25.0));
     let mut r = top.0 + (bot.0 - top.0) * t;
     let mut g = top.1 + (bot.1 - top.1) * t;
     let mut b = top.2 + (bot.2 - top.2) * t;
-    // The stream: a thick diagonal capsule from lower-left to upper-right.
+
+    // The stream: a thick diagonal capsule from lower-left to upper-right, with a glow.
     let a = (size * 0.30, size * 0.70);
     let tip = (size * 0.70, size * 0.30);
     let half = size * 0.085;
     let glow = size * 0.10;
     let d = dist_to_segment(px, py, a, tip);
     if d < half + glow {
-        // A soft glow: strongest at the capsule's edge, fading outward.
         let gt = ((half + glow - d) / glow).clamp(0.0, 1.0);
         let ga = gt * gt * 0.5;
         r = r * (1.0 - ga) + accent.0 * ga;
@@ -1592,8 +1339,7 @@ fn icon_pixel(x: f32, y: f32, size: f32) -> (u8, u8, u8, u8) {
     (r as u8, g as u8, b as u8, (edge * 255.0) as u8)
 }
 
-/// A rounded box's signed distance field (negative inside): the box fills `[0,
-/// size]²` with corner radius `radius`.
+/// A rounded box's signed distance field (negative inside) over `[0, size]²`.
 fn rounded_box_sdf(px: f32, py: f32, size: f32, radius: f32) -> f32 {
     let (qx, qy) = (
         (px - size * 0.5).abs() - (size * 0.5 - radius),
@@ -1603,7 +1349,7 @@ fn rounded_box_sdf(px: f32, py: f32, size: f32, radius: f32) -> f32 {
         - radius
 }
 
-/// The distance from `(px, py)` to the segment `a..=b` (a capsule's centre line).
+/// The distance from `(px, py)` to the segment `a..=b`.
 fn dist_to_segment(px: f32, py: f32, a: (f32, f32), b: (f32, f32)) -> f32 {
     let (abx, aby) = (b.0 - a.0, b.1 - a.1);
     let t = (((px - a.0) * abx + (py - a.1) * aby) / (abx * abx + aby * aby)).clamp(0.0, 1.0);
@@ -1638,16 +1384,14 @@ fn normalize(x: f32, y: f32) -> (f32, f32) {
 
 /// Open the GUI.
 ///
-/// Creates the background runtime, loads config, installs the tee logger, wires
-/// the stats channel and consumer task, and runs eframe until the window closes.
+/// Creates the runtimes, loads config, installs the tee logger, wires the stats channel
+/// and consumer task, and runs eframe until the window closes.
 ///
-/// Two runtimes: the primary one hosts the eframe event loop's async work (the
-/// stats consumer that requests repaints), the second one — `streampipe-engine`
-/// — hosts the streaming engine. Media must not share threads with the renderer:
-/// the WHIP host polls the ICE socket from a worker thread, and if that worker is
-/// stalled the OS UDP receive buffer (clamped to a few hundred KB long before the
-/// 8 MiB we ask for) overflows during a keyframe burst, which the viewer sees as
-/// smearing, `error while decoding MB` and jumping timestamps.
+/// Two runtimes: the primary hosts the UI's async work, the `streampipe-engine` one the
+/// streaming engine. Media must not share threads with the renderer — the WHIP host polls
+/// the ICE socket from a worker, and if that worker stalls the OS UDP receive buffer
+/// overflows during a keyframe burst, which the viewer sees as smearing and decoding
+/// errors.
 pub fn run() {
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(runtime) => runtime,
@@ -1658,8 +1402,7 @@ pub fn run() {
     };
     let handle = runtime.handle().clone();
 
-    // The engine runtime: every media session (broadcast and watch) and every
-    // task they spawn runs here, on threads no UI repaint or stats consumer
+    // The engine runtime: every media session runs here, on threads no UI repaint
     // ever touches.
     let engine_runtime = match tokio::runtime::Builder::new_multi_thread()
         .thread_name("streampipe-engine")
@@ -1683,13 +1426,12 @@ pub fn run() {
     let state = Arc::new(Mutex::new(SharedState::new(secret, whip)));
 
     let (stats_tx, stats_rx) = mpsc::unbounded_channel::<StreamStats>();
-    // Keep one sender alive for the whole session so the consumer task does not
-    // see the channel close between broadcast start/stops.
+    // Keep one sender alive for the whole session so the consumer never sees the
+    // channel close between broadcast start/stops.
     let keepalive = stats_tx.clone();
 
-    // The app gets the engine handle, so `spawn_broadcast`/`spawn_watch` land on
-    // the engine runtime; the stats consumer stays on the GUI runtime with the
-    // renderer it asks to repaint.
+    // The app gets the engine handle, so sessions land on the engine runtime while the
+    // stats consumer stays on the GUI runtime with the renderer it repaints.
     let app = App::new(engine_handle, config, state.clone(), log.clone(), stats_tx);
     let consumer_state = state.clone();
 
@@ -1713,15 +1455,14 @@ pub fn run() {
         }),
     );
 
-    // Close the stats channel so the consumer task exits, then give any teardown
-    // (e.g. the player kill task) a moment to run before the runtime stops.
+    // Close the stats channel so the consumer exits, then give any teardown (e.g. the
+    // player kill task) a moment to run before the runtimes stop.
     drop(keepalive);
     engine_runtime.shutdown_timeout(Duration::from_millis(1000));
     runtime.shutdown_timeout(Duration::from_millis(1000));
 
-    // A normal window close returns `Ok`. An `Err` means the window/GL context
-    // never came up (e.g. no display); report that as a failed launch rather
-    // than exiting 0, so launchers and scripts do not see false success.
+    // A normal window close returns `Ok`. Report an `Err` as a failed launch so
+    // launchers and scripts don't see false success.
     if let Err(e) = result {
         eprintln!("error: gui failed: {e:?}");
         std::process::exit(1);
@@ -1736,14 +1477,12 @@ mod tests {
     use super::options::CLOSE_GREY;
     use super::*;
 
-    /// An `App` wired to throwaway state, plus the runtime it borrows a handle
-    /// from (kept alive by the caller).
+    /// An `App` wired to throwaway state, plus the runtime it borrows a handle from.
     fn test_app() -> (App, tokio::runtime::Runtime) {
         test_app_with(Config::default())
     }
 
-    /// The same, seeded from an arbitrary config (so a test can check what the app
-    /// restores from disk).
+    /// The same, seeded from an arbitrary config.
     fn test_app_with(config: Config) -> (App, tokio::runtime::Runtime) {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let whip = state::whip_url(&config.broadcast_host, config.broadcast_port);
@@ -1759,12 +1498,9 @@ mod tests {
         (app, rt)
     }
 
-    /// Drive real frames of the UI headlessly and report the repaint delay the
-    /// viewport settled on. `Duration::MAX` means "do not wake me up".
-    ///
-    /// egui spends its first couple of passes priming (font texture, deferred
-    /// repaint bookkeeping) and reports a zero delay there, so the settled value
-    /// is read after three passes.
+    /// Drive real frames of the UI headlessly and report the repaint delay the viewport
+    /// settled on (`Duration::MAX` = "don't wake me up"). Read after three passes: egui
+    /// reports a zero delay while it primes.
     fn settled_repaint_delay(app: &mut App) -> Duration {
         let ctx = egui::Context::default();
         let raw = egui::RawInput {
@@ -1782,20 +1518,16 @@ mod tests {
                 .get(&egui::ViewportId::ROOT)
                 .map(|v| v.repaint_delay)
                 .expect("root viewport");
-            // There is no backend here to consume the font texture upload, so clear
-            // it rather than letting it panic on drop.
+            // No backend here to consume the font texture upload; clear it so it
+            // doesn't panic on drop.
             out.textures_delta.clear();
         }
         delay
     }
 
-    /// Regression: `copied` used to be set on the first copy box click and never
-    /// cleared, so the guard in [`App::draw`] stayed armed and an idle window
-    /// repaints every tick forever.
     /// Assert the viewport has scheduled *some* follow-up repaint. Compared as
-    /// "less than `Duration::MAX`" rather than exactly [`REPAINT`]: egui shaves
-    /// the time spent inside the passes off the reported delay, and revealing the
-    /// toast Area forces one settling frame.
+    /// "less than `Duration::MAX`" rather than exactly [`REPAINT`]: egui shaves the
+    /// time spent inside the passes off the reported delay.
     fn assert_awake(delay: Duration) {
         assert!(
             delay < Duration::MAX,
@@ -1808,16 +1540,15 @@ mod tests {
     fn idle_window_falls_asleep_once_the_copy_toast_expires() {
         let (mut app, _rt) = test_app();
 
-        // Idle, nothing ever copied: no repaint is requested at all.
+        // Idle, nothing copied: no repaint requested at all.
         assert_eq!(settled_repaint_delay(&mut app), Duration::MAX);
 
-        // A click arms the toast, so frames keep coming (even while idle) to fade it.
+        // A click arms the toast, so frames keep coming to fade it.
         app.copied = Some(("whip", Instant::now()));
         assert_awake(settled_repaint_delay(&mut app));
 
-        // The toast window has closed: the idle app must stop asking for frames and
-        // clear the flag that armed the guard. This is the regression — before the
-        // fix `copied` stayed set, so this stayed awake for ever.
+        // The toast window has closed: the idle app must stop asking for frames.
+        // This is the regression — before the fix `copied` stayed set forever.
         app.copied = Some(("whip", Instant::now() - TOAST - Duration::from_millis(1)));
         assert_eq!(
             settled_repaint_delay(&mut app),
@@ -1835,10 +1566,8 @@ mod tests {
         assert_awake(settled_repaint_delay(&mut app));
     }
 
-    /// The toast fade is an animation, so it has to be repainted at display rate.
-    /// It used to ride on the 250 ms session cadence, which gives a 1.5 s dissolve
-    /// only six frames: the pill visibly steps down through six greys (and pops out
-    /// at the end) instead of fading.
+    /// A fading toast is an animation, so it must repaint at display rate — the 250 ms
+    /// session cadence gives a 1.5 s dissolve only six frames.
     #[test]
     fn a_fading_toast_repaints_at_display_rate() {
         // The action toast (raised by "Save", a relay refresh, a ticket reset).
@@ -1860,8 +1589,7 @@ mod tests {
             "a live copy toast should repaint at ~60 fps too"
         );
 
-        // Nothing live: the guard must stay disarmed, or an idle window burns frames
-        // for ever (the regression the two tests above cover).
+        // Nothing live: the guard must stay disarmed, or an idle window burns frames.
         let (mut app, _rt) = test_app();
         assert_eq!(settled_repaint_delay(&mut app), Duration::MAX);
     }
@@ -1878,12 +1606,9 @@ mod tests {
         out.shapes
     }
 
-    /// The Watch tab carries a full-width initial-volume slider on its own row
-    /// under the Player/Buffer line, with a `Player Initial Volume: N%` label on
-    /// its left whose number matches the slider.
-    ///
-    /// Checked from the painted shapes: the label text, the slider track (a wide
-    /// rounded rect), and that the track spans nearly the whole panel.
+    /// The Watch tab has a full-width volume slider on its own row under the
+    /// Player/Buffer line, with a matching `Player Initial Volume: N%` label. Checked
+    /// from the painted shapes.
     #[test]
     fn the_watch_tab_has_a_full_width_volume_slider() {
         let (mut app, _rt) = test_app();
@@ -1892,22 +1617,18 @@ mod tests {
         let size = egui::vec2(760.0, 560.0);
         let shapes = render_shapes(&mut app, size);
 
-        // The label names the control and carries the number. `TextShape::pos` is
-        // the top-left of the text, `galley.rect` the box it lays out in.
+        // The label names the control and carries the number.
         let label_rect = shapes
             .iter()
             .find_map(|s| match &s.shape {
                 egui::epaint::Shape::Text(t) if t.galley.text() == "Player Initial Volume: 40%" => {
-                    // `pos` is where the text box is placed; the galley's size is
-                    // local, so lift it to the placement.
                     Some(egui::Rect::from_min_size(t.pos, t.galley.rect.size()))
                 }
                 _ => None,
             })
             .expect("the volume label should be painted");
 
-        // The slider track: the widest thin rounded rect on the label's row, to
-        // the right of it (the handle is the same language, just narrower).
+        // The slider track: the widest rounded rect on the label's row, to its right.
         let track = shapes
             .iter()
             .filter_map(|s| match &s.shape {
@@ -1928,37 +1649,31 @@ mod tests {
             "the slider should span most of the panel, got {track:?} vs label \
              {label_rect:?}"
         );
-        // It reaches the right edge of the panel (the panel is inset by its frame
-        // margins plus the item spacing, so "full width" lands ~40 points short of
-        // the window edge).
+        // It reaches the right edge (the panel is inset by its frame margins plus item
+        // spacing, so "full width" lands ~40 points short of the window edge).
         assert!(
             track.right() >= size.x - 44.0,
             "the slider should reach the right edge, got {track:?}"
         );
     }
 
-    /// The volume slider opens at half on a fresh install, and at whatever the user
-    /// last set once it has been persisted.
-    ///
-    /// `App::new` seeds `watch_volume` from the config that was loaded off disk, the
-    /// Watch tab writes it back the moment the slider is released (and again on
-    /// Watch / on close), so the number survives closing and reopening the app.
+    /// The volume slider opens at half on a fresh install, and at whatever the user last
+    /// set once persisted.
     #[test]
     fn the_volume_slider_opens_at_half_and_reopens_where_it_was_left() {
-        // Fresh install: nothing on disk, so the slider opens at half, not full.
+        // Fresh install: opens at half, not full.
         let (app, _rt) = test_app();
         assert_eq!(app.watch_volume, DEFAULT_VOLUME);
         assert_eq!(app.watch_volume, 50);
 
-        // A config that persisted 37 % seeds the slider at 37 %.
+        // A persisted 37 % seeds the slider at 37 %.
         let (app, _rt) = test_app_with(Config {
             volume: 37,
             ..Config::default()
         });
         assert_eq!(app.watch_volume, 37);
 
-        // `sync_watch_from_config` (run after the Settings panel edits the config)
-        // pulls the slider back to the stored value.
+        // `sync_watch_from_config` pulls the slider back to the stored value.
         let (mut app, _rt) = test_app_with(Config {
             volume: 37,
             ..Config::default()
@@ -1975,10 +1690,9 @@ mod tests {
         assert_eq!(app.watch_volume, 100);
     }
 
-    /// Render the live broadcast tab with viewers at the minimum window size, to
-    /// exercise the click-to-copy boxes, the viewers cell and the floating toast for
-    /// real: egui does the layout, and we check it paints, that the toast adds its
-    /// own painting, and that nothing escapes the window.
+    /// Render the live broadcast tab at the minimum window size: egui does the layout,
+    /// and we check it paints, that the toast adds its own painting, and that nothing
+    /// escapes the window.
     #[test]
     fn broadcast_tab_renders_at_min_size() {
         let (mut app, _rt) = test_app();
@@ -1986,8 +1700,7 @@ mod tests {
         {
             let mut g = app.state.lock().unwrap();
             g.broadcast = Mode::Broadcasting;
-            // A realistically long ticket: the copy box must elide it so it neither
-            // runs off the box nor past the window edge.
+            // A realistically long ticket: the copy box must elide it.
             g.ticket = Some("b".repeat(140));
             g.stats = Some(StreamStats {
                 viewers: 3,
@@ -2000,7 +1713,7 @@ mod tests {
         let with_toast = render_shapes(&mut app, min);
         assert!(!with_toast.is_empty(), "the broadcast tab painted nothing");
 
-        // Nothing escapes the window: no overflow at the minimum size.
+        // Nothing escapes the window.
         let window = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), min);
         for shape in &with_toast {
             assert!(
@@ -2010,10 +1723,9 @@ mod tests {
             );
         }
 
-        // Text extents (not just clip rects) stay inside the window: a long ticket
-        // is elided, so no glyph run spills past the right edge. `clip_rect` is the
-        // enclosing panel clip and would pass even if the galley overflowed, so the
-        // galley's own width is checked here — the regression the copy box had.
+        // Text *extents* (not just clip rects) stay inside the window. `clip_rect` is
+        // the enclosing panel clip and would pass even if the galley overflowed, so the
+        // galley's own width is checked here.
         for shape in &with_toast {
             if let egui::epaint::Shape::Text(t) = &shape.shape {
                 let right = t.pos.x + t.galley.rect.width();
@@ -2038,9 +1750,9 @@ mod tests {
         );
     }
 
-    /// Render the Watch tab at the minimum window size and assert nothing escapes
-    /// the window. The Watch tab has a multiline ticket box, two combo boxes and a
-    /// buffer field, so it is checked separately from the broadcast tab.
+    /// Render the Watch tab at the minimum window size and assert nothing escapes. It has
+    /// a multiline ticket box, two combo boxes and a buffer field, so it's checked
+    /// separately from the broadcast tab.
     #[test]
     fn watch_tab_renders_at_min_size() {
         let (mut app, _rt) = test_app();
@@ -2059,9 +1771,8 @@ mod tests {
         }
     }
 
-    /// Count the interactive rects the Options window registers with the given
-    /// mode, rendering only that window so the tab panels' own gating cannot
-    /// confound the comparison.
+    /// Count the interactive rects the Options window registers with the given mode,
+    /// rendering only that window so the tab panels' gating can't confound it.
     fn options_interactive_rects(mode: Mode) -> usize {
         let (mut app, _rt) = test_app();
         app.state.lock().unwrap().broadcast = mode;
@@ -2083,10 +1794,9 @@ mod tests {
         ctx.interactive_rects_last_pass().len()
     }
 
-    /// Regression (AC3): the Options "Streaming" inputs must leave the interactive
-    /// set while a session is live and return to it when idle. `interactive_rects_last_pass`
-    /// filters out disabled widgets, so this count distinguishes disabled from enabled
-    /// where an in-bounds/no-crash render check would pass either way.
+    /// The Options "Streaming" inputs must leave the interactive set while a session is
+    /// live and return when idle. `interactive_rects_last_pass` filters out disabled
+    /// widgets, so this count distinguishes the two where a render check would not.
     #[test]
     fn options_streaming_fields_are_disabled_while_a_session_is_active() {
         let idle = options_interactive_rects(Mode::Idle);
@@ -2146,17 +1856,15 @@ mod tests {
         );
     }
 
-    /// The tab underline's tween approaches its target monotonically, settles
-    /// exactly on it after a realistic number of 60 fps frames (so the repaint
-    /// guard can disarm and an idle window falls asleep), and stays settled.
+    /// The tab underline's tween approaches its target monotonically, settles exactly on
+    /// it after a realistic number of 60 fps frames, and stays settled.
     #[test]
     fn tab_slide_settles_on_the_target_without_overshooting() {
         // A single 60 fps step moves partway but never past the target.
         let step = tab_slide_step(0.0, 1.0, 1.0 / 60.0);
         assert!(step > 0.0 && step < 1.0, "one frame is partway, got {step}");
 
-        // Stepping at 60 fps settles exactly on the target; the slide should take
-        // well under a second of frames, never overshoot, and never stall.
+        // Stepping at 60 fps settles exactly on the target, well under a second.
         let mut pos = 0.0;
         let mut frames = 0;
         while pos != 1.0 {
@@ -2174,9 +1882,9 @@ mod tests {
             frames * 1000 / 60
         );
 
-        // Settled stays settled: the repaint guard can disarm.
+        // Settled stays settled, so the repaint guard can disarm.
         assert_eq!(tab_slide_step(1.0, 1.0, 1.0 / 60.0), 1.0);
-        // The reverse direction (Broadcast -> Watch) settles the same way.
+        // The reverse direction settles the same way.
         let mut pos = 1.0;
         while pos != 0.0 {
             pos = tab_slide_step(pos, 0.0, 1.0 / 60.0);
@@ -2184,22 +1892,15 @@ mod tests {
         assert_eq!(pos, 0.0);
     }
 
-    /// Count the interactive rects on the Watch tab that are the size of the
-    /// full-width "Watch Stream" button (it is `add_sized` to 36 tall; the tab
-    /// strip buttons are 32 and the multiline ticket box ~70, so a 34..=38 band
-    /// isolates the primary action). `interactive_rects_last_pass` filters out
-    /// disabled widgets, so a blank ticket — which disables the button — yields zero.
-    ///
-    /// The faint "paste a ticket to begin" hint is *not* counted: egui registers
-    /// hover-sense rects for plain labels too, so a naive total count would tie
-    /// (disabled button out, hint in). Filtering by the button's height isolates
-    /// the button and makes the gating observable.
+    /// Count the interactive rects on the Watch tab the size of the full-width "Watch
+    /// Stream" button (36 tall; the tab strip buttons are 32 and the ticket box ~70, so a
+    /// 34..=38 band isolates it). `interactive_rects_last_pass` filters out disabled
+    /// widgets, so a blank ticket — which disables the button — yields zero.
     fn watch_button_rects(ticket: &str) -> usize {
         watch_button_rects_with(Mode::Idle, ticket)
     }
 
     /// As [`watch_button_rects`], but with the broadcast track forced to `broadcast`.
-    /// Used to prove the Watch action stays live while a broadcast runs.
     fn watch_button_rects_with(broadcast: Mode, ticket: &str) -> usize {
         let (mut app, _rt) = test_app();
         app.tab = Tab::Watch;
@@ -2223,9 +1924,8 @@ mod tests {
             .count()
     }
 
-    /// The core of the new feature: while broadcasting, the Watch tab's primary
-    /// action stays enabled, so you can watch a stream in the same instance (your
-    /// own broadcast, or a friend's) without stopping the broadcast.
+    /// While broadcasting, the Watch tab's primary action stays enabled, so you can watch
+    /// a stream in the same instance without stopping the broadcast.
     #[test]
     fn watch_button_stays_live_while_broadcasting() {
         assert_eq!(
@@ -2255,8 +1955,8 @@ mod tests {
     }
 
     /// Drive the real UI headlessly for `passes` frames and return the last frame's
-    /// output. The app's `Context` is not reachable from outside, so an interactivity
-    /// test has to run its own loop (`render_shapes` builds a throwaway one).
+    /// output. The app's `Context` isn't reachable from outside, so an interactivity test
+    /// has to run its own loop.
     fn drive_frames(
         app: &mut App,
         ctx: &egui::Context,
@@ -2279,28 +1979,27 @@ mod tests {
 
     /// A real, parseable watch ticket for a fresh (throwaway) endpoint identity.
     ///
-    /// A junk string like `"abc"` makes `start_watch` bail with an inline "invalid
-    /// ticket" error and spawn nothing, which would make every click-through assertion
-    /// vacuous — so anything that clicks a start control mints a real one.
+    /// A junk string like `"abc"` makes `start_watch` bail and spawn nothing, which would
+    /// make every click-through assertion vacuous — so anything clicking a start control
+    /// mints a real one.
     fn real_ticket() -> String {
         streampipe::EndpointTicket::new(iroh::EndpointAddr::new(SecretKey::generate().public()))
             .to_string()
     }
 
-    /// AC1/AC2/AC4: with a watch session live the tab shows two half-width buttons
-    /// side by side (`Restart` left, `■  Stop` right) filling the panel with a 12 px
-    /// gap, the status text on its own row *underneath* them, and the Player combo
-    /// and Buffer field still interactive.
+    /// With a watch session live, the tab shows two half-width buttons side by side
+    /// (`Restart` left, `■  Stop` right) filling the panel with a 12 px gap, the status
+    /// text on its own row underneath, and the Player combo and Buffer field live.
     ///
-    /// Driven at the real minimum window size (560×630, `mod.rs` `run`), not the
-    /// 420 of `watch_tab_renders_at_min_size` — that one only checks `clip_rect`,
-    /// which is always in-bounds and so cannot see an overflowing row.
+    /// Driven at the real minimum window size (560×630), not the 420 of
+    /// `watch_tab_renders_at_min_size` — that one only checks `clip_rect`, which is
+    /// always in-bounds and so cannot see an overflowing row.
     #[test]
     fn the_live_watch_tab_shows_restart_and_stop_side_by_side() {
         let (mut app, _rt) = test_app();
         app.tab = Tab::Watch;
-        // A real ticket so the "no ticket yet?" hint row is not painted (it would add
-        // a row above the buttons and skew the vertical comparisons).
+        // A real ticket so the "no ticket yet?" hint row isn't painted (it would add a
+        // row above the buttons and skew the vertical comparisons).
         app.watch_ticket = real_ticket();
         app.watch_buffer = "90".into();
         {
@@ -2315,10 +2014,8 @@ mod tests {
         let out = drive_frames(&mut app, &ctx, size, 3);
         let rects = ctx.interactive_rects_last_pass();
 
-        // AC1: exactly two interactive rects the height of the buttons (36 tall).
-        // The band excludes the tab strip (32), the labels (~19/15), the combo (19)
-        // and the buffer field (23.4); the count is the whole point — "two buttons",
-        // not "one button plus clutter".
+        // Exactly two interactive rects the height of the buttons (36 tall). The band
+        // excludes the tab strip (32), the labels, the combo and the buffer field.
         let mut band: Vec<egui::Rect> = rects
             .iter()
             .copied()
@@ -2333,8 +2030,7 @@ mod tests {
         band.sort_by(|a, b| a.min.x.total_cmp(&b.min.x));
         let (restart, stop) = (band[0], band[1]);
 
-        // Equal halves, 12 px apart, filling the panel: content width is the window
-        // minus the panel's 2×16 side margins, so 2*half + 12 == 528.
+        // Equal halves, 12 px apart, filling the panel.
         assert!(
             (restart.width() - stop.width()).abs() < 1.0,
             "the two buttons should be the same width, got {restart:?} vs {stop:?}"
@@ -2358,7 +2054,7 @@ mod tests {
             "the button row escapes the bottom: {stop:?}"
         );
 
-        // AC2: the status text sits on its own row underneath the button row.
+        // The status text sits on its own row underneath the button row.
         let status = out
             .shapes
             .iter()
@@ -2375,8 +2071,8 @@ mod tests {
              vs {restart:?} / {stop:?}"
         );
 
-        // AC4: the Player combo and the Buffer field are interactive while live.
-        // Identified by the labels they sit immediately right of.
+        // The Player combo and the Buffer field are interactive while live, identified by
+        // the labels they sit immediately right of.
         let label_rect = |want: &str| {
             out.shapes
                 .iter()
@@ -2408,8 +2104,8 @@ mod tests {
         );
     }
 
-    /// AC5: the exact prompt line appears iff a session is live *and* the shown
-    /// player/buffer differ from what the live session was launched with.
+    /// The prompt line appears iff a session is live *and* the shown player/buffer differ
+    /// from what the live session was launched with.
     #[test]
     fn the_watch_tab_prompts_to_restart_only_for_a_pending_edit() {
         const PROMPT: &str = "Press 'Restart' button to apply changes.";
@@ -2447,7 +2143,7 @@ mod tests {
             ),
             "a live tab with matching player/buffer must not prompt"
         );
-        // Live with an edited buffer: prompt.
+        // Live with an edited buffer, or a switched player: prompt.
         assert!(
             shows_prompt(
                 Mode::Watching,
@@ -2457,7 +2153,6 @@ mod tests {
             ),
             "an edited buffer should raise the prompt"
         );
-        // Live with a switched player: prompt.
         assert!(
             shows_prompt(
                 Mode::Watching,
@@ -2467,22 +2162,21 @@ mod tests {
             ),
             "a switched player should raise the prompt"
         );
-        // Live and coming up with nothing recorded yet (defensive: the invariant says
-        // this cannot happen, the condition must still be total).
+        // Live with nothing recorded yet (defensive: the invariant says this can't
+        // happen, but the condition must still be total).
         assert!(
             shows_prompt(Mode::Starting, None, Player::Mpv, ""),
             "a live session with no record and a shown value should prompt"
         );
     }
 
-    /// AC3 (UI level): clicking `Restart` tears the previous session down before the
-    /// new one is brought up — the old handle finishes, a different handle takes its
-    /// place, and the record moves to what is shown on screen.
+    /// Clicking `Restart` tears the previous session down before the new one is brought
+    /// up: the old handle finishes, a different handle takes its place, and the record
+    /// moves to what's shown on screen.
     #[test]
     fn clicking_restart_replaces_the_live_watch_session() {
-        // The click below writes the config (`start_watch` → `config.save()`), so
-        // redirect the config dir into a temp folder, serialized with the other
-        // config-dir tests by the same mutex.
+        // The click writes the config, so redirect the config dir into a temp folder
+        // (serialized with the other config-dir tests by the same mutex).
         let _guard = config::CONFIG_ENV.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("XDG_CONFIG_HOME", dir.path());
@@ -2491,14 +2185,13 @@ mod tests {
         app.tab = Tab::Watch;
         app.watch_ticket = real_ticket();
         app.watch_buffer = "120".into();
-        // `Player::None` never launches a process, so nothing is spawned in CI, and
-        // the shown pair is visibly stale (live = Mpv, shown = None).
+        // `Player::None` never launches a process, so nothing spawns in CI, and the
+        // shown pair is visibly stale (live = Mpv, shown = None).
         app.watch_player = Player::None;
 
-        // A stand-in for the live session: one long sleep, so no network work happens
-        // behind it, plus a drop-flag the abort trips. `JoinHandle` is not `Clone`
-        // and the handle is moved into `spawn_watch`, so the flag — not the handle —
-        // is what the test observes.
+        // A stand-in for the live session: one long sleep plus a drop-flag the abort
+        // trips. `JoinHandle` isn't `Clone` and is moved into `spawn_watch`, so the
+        // flag — not the handle — is what the test observes.
         let torn_down = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = torn_down.clone();
         let previous = rt.spawn(async move {
@@ -2521,8 +2214,8 @@ mod tests {
         let ctx = egui::Context::default();
         let size = egui::vec2(560.0, 630.0);
         let out = drive_frames(&mut app, &ctx, size, 3);
-        // The leftmost of the two ~36-tall rects is `Restart` (clicking Stop would
-        // abort and go idle, which the assertions below would catch).
+        // The leftmost of the two ~36-tall rects is `Restart` (clicking Stop would abort
+        // and go idle, which the assertions below would catch).
         let mut band: Vec<egui::Rect> = ctx
             .interactive_rects_last_pass()
             .into_iter()
@@ -2541,8 +2234,7 @@ mod tests {
         click_at(&mut app, &ctx, restart.center(), size);
 
         // Asserted on the release frame: `start_watch` runs synchronously inside it.
-        let g = app.state.lock().unwrap();
-        assert_eq!(
+        let g = app.state.lock().unwrap();        assert_eq!(
             g.watch_applied,
             Some((Player::None, Some(120))),
             "the record moves to the player/buffer shown on screen"
@@ -2557,8 +2249,8 @@ mod tests {
         );
         drop(g);
 
-        // The previous session must be torn down, never left running alongside the new
-        // one (at most one watch session is live at any moment). Bounded polling only.
+        // The previous session must be torn down — at most one watch session is live at
+        // any moment. Bounded polling only.
         let mut polls = 0;
         while !torn_down.load(std::sync::atomic::Ordering::SeqCst) && polls < 200 {
             std::thread::sleep(Duration::from_millis(10));
@@ -2624,8 +2316,7 @@ mod tests {
     }
 
     /// Run one headless frame, discarding the font-texture upload no backend eats.
-    fn frame(ctx: &egui::Context, app: &mut App, raw: egui::RawInput) {
-        let mut out = ctx.run_ui(raw, |ui| app.draw(ui));
+    fn frame(ctx: &egui::Context, app: &mut App, raw: egui::RawInput) {        let mut out = ctx.run_ui(raw, |ui| app.draw(ui));
         out.textures_delta.clear();
     }
 
@@ -2640,8 +2331,8 @@ mod tests {
         }
     }
 
-    /// Autofocus grabs a prefilled ticket (the "press Enter to replay" case) but
-    /// leaves an empty box unfocused, so an idle Watch tab still falls asleep.
+    /// Autofocus grabs a prefilled ticket (the "press Enter to replay" case) but leaves
+    /// an empty box unfocused, so an idle Watch tab still falls asleep.
     #[test]
     fn autofocus_grabs_a_prefilled_ticket_but_not_an_empty_one() {
         // Prefilled: focus is taken within a couple of frames, no click issued.
@@ -2656,8 +2347,7 @@ mod tests {
             "a prefilled ticket autofocuses so Enter can start it"
         );
 
-        // Empty: nothing focuses (an empty box can never submit), which is exactly
-        // what keeps the repaint-sleep regression green under `focused: true`.
+        // Empty: nothing focuses, which is what keeps the repaint-sleep regression green.
         let (mut app, _rt) = test_app();
         app.tab = Tab::Watch;
         let ctx = egui::Context::default();
@@ -2673,9 +2363,9 @@ mod tests {
         );
     }
 
-    /// Regression for the concrete wart: Enter on the focused ticket box used to
-    /// drop a stray newline into the multiline field. Now Enter never inserts a
-    /// newline, and an invalid ticket never starts (matching the button path).
+    /// Regression: Enter on the focused ticket box used to drop a stray newline into the
+    /// multiline field. Now Enter never inserts a newline, and an invalid ticket never
+    /// starts (matching the button path).
     #[test]
     fn enter_on_the_focused_ticket_never_inserts_a_newline() {
         let (mut app, _rt) = test_app();
@@ -2683,8 +2373,7 @@ mod tests {
         app.watch_ticket = "not-a-real-ticket".into();
         let ctx = egui::Context::default();
         // Two frames to let autofocus settle, then press Enter with focus held.
-        frame(&ctx, &mut app, focused_raw(vec![]));
-        frame(&ctx, &mut app, focused_raw(vec![]));
+        frame(&ctx, &mut app, focused_raw(vec![]));        frame(&ctx, &mut app, focused_raw(vec![]));
         assert!(ctx.memory(|m| m.focused()).is_some(), "ticket autofocused");
         frame(&ctx, &mut app, focused_raw(vec![enter_key()]));
 
@@ -2719,9 +2408,8 @@ mod tests {
         );
     }
 
-    /// On the Broadcast tab, when idle and focused, the start button owns keyboard
-    /// focus so Enter/Space can start it (AC4 precondition). Real-app start then
-    /// flows through the button's native keyboard `clicked()`.
+    /// On the Broadcast tab, when idle and focused, the start button owns keyboard focus
+    /// so Enter/Space can start it.
     #[test]
     fn broadcast_start_button_autofocuses_when_idle() {
         let (mut app, _rt) = test_app();
@@ -2735,9 +2423,8 @@ mod tests {
         );
     }
 
-    /// The connecting/starting spinner paints a single mesh of 24 ring quads
-    /// (96 vertices, 48 triangles) — a 270° arc — so the waiting moment has a
-    /// visible, controlled shape rather than a raw stroked line.
+    /// The spinner paints a single mesh of 24 ring quads (96 vertices, 48 triangles) — a
+    /// 270° arc.
     #[test]
     fn spinner_paints_a_270_degree_arc() {
         let ctx = egui::Context::default();
@@ -2770,8 +2457,8 @@ mod tests {
         );
     }
 
-    /// The spinner's arc rotates with `secs`: two different times paint two
-    /// different meshes, so the animation actually moves.
+    /// The spinner's arc rotates with `secs`: two different times paint two different
+    /// meshes, so the animation actually moves.
     #[test]
     fn spinner_rotates_with_time() {
         let raw = egui::RawInput {
@@ -2800,8 +2487,8 @@ mod tests {
         assert_ne!(a, b, "the arc should rotate between two times");
     }
 
-    /// Hovering a tab raises the pointing-hand cursor, so the tab strip reads as a
-    /// live control under the mouse (the hover also lifts the tab's surface).
+    /// Hovering a tab raises the pointing-hand cursor, so the strip reads as a live
+    /// control under the mouse.
     #[test]
     fn hovering_a_tab_raises_the_pointing_hand_cursor() {
         let (mut app, _rt) = test_app();
@@ -2812,8 +2499,7 @@ mod tests {
             ..Default::default()
         };
         // Render once (no pointer) to locate the Broadcast tab's fill rect.
-        let ctx = egui::Context::default();
-        let mut out = ctx.run_ui(raw.clone(), |ui| app.draw(ui));
+        let ctx = egui::Context::default();        let mut out = ctx.run_ui(raw.clone(), |ui| app.draw(ui));
         out.textures_delta.clear();
         let tab_rects: Vec<egui::Rect> = out
             .shapes
@@ -2916,11 +2602,8 @@ mod tests {
         );
     }
 
-    /// The central panel paints a subtle vertical gradient (a two-triangle quad:
-    /// 4 vertices, 6 indices) as its ground, so the window reads as a surface lit
-    /// from above rather than a flat fill. The sparkline and spinner are meshes too,
-    /// but with more vertices / a different index count, so a 4-vertex, 6-index mesh
-    /// is unique to the gradient.
+    /// The central panel's ground is a gradient mesh (4 vertices, 6 indices — unique,
+    /// as the sparkline and spinner meshes have different counts).
     #[test]
     fn the_central_panel_paints_a_subtle_vertical_gradient() {
         let (mut app, _rt) = test_app();
@@ -2936,9 +2619,8 @@ mod tests {
         );
     }
 
-    /// A copy box paints a faint light-catch bevel along its top edge: a horizontal
-    /// line in a faint white (alpha 24), distinct from the status bar hairline
-    /// (alpha 16) and the tab separator.
+    /// A copy box paints a faint horizontal light-catch bevel (white alpha 24) on its
+    /// top edge — distinct from the status bar hairline (alpha 16).
     #[test]
     fn the_copy_box_paints_a_top_light_catch_bevel() {
         let (mut app, _rt) = test_app();
@@ -2955,10 +2637,8 @@ mod tests {
         assert!(bevel, "the copy box should paint its top light-catch bevel");
     }
 
-    /// The idle Start button paints a soft 3-layer accent halo (the live green at
-    /// low alpha), so the hero action reads as lit by the accent rather than a flat
-    /// button. The three halo fills (0.02 / 0.05 / 0.09) are distinct from the
-    /// button's own fill (0.18).
+    /// The idle Start button paints a 3-layer accent halo (0.02 / 0.05 / 0.09),
+    /// distinct from the button's own 0.18 fill.
     #[test]
     fn the_idle_start_button_paints_a_soft_accent_halo() {
         let (mut app, _rt) = test_app();
@@ -2981,9 +2661,8 @@ mod tests {
         );
     }
 
-    /// While broadcasting, the Stop button paints a subtle 3-layer red halo (the same
-    /// muted red the tab uses for errors), so the one control that tears down a live
-    /// stream reads as a "stop" action at a glance.
+    /// While broadcasting, the Stop button paints a 3-layer red halo, so the one
+    /// control that tears down a live stream reads as "stop" at a glance.
     #[test]
     fn the_stop_button_paints_a_subtle_red_halo() {
         let (mut app, _rt) = test_app();
@@ -3005,24 +2684,23 @@ mod tests {
         assert_eq!(count, 3, "the stop button should paint a 3-layer red halo");
     }
 
-    /// The tab content's fade-in starts hidden, eases out monotonically, and settles
-    /// exactly on fully-visible at the duration (so the repaint guard can disarm and
-    /// an idle window falls asleep).
+    /// The tab content's fade-in is monotonic and settles exactly on fully visible at
+    /// the duration, so the repaint guard can disarm and an idle window falls asleep.
     #[test]
     fn tab_fade_settles_on_fully_visible_without_overshooting() {
         // Starts hidden, not settled.
         assert_eq!(tab_fade_step(0.0, TAB_FADE_SECS), (0.0, false));
-        // Mid-fade: partway, not settled, never above fully visible.
+        // Mid-fade: partway, not settled.
         let (mid, settled) = tab_fade_step(TAB_FADE_SECS * 0.5, TAB_FADE_SECS);
         assert!((0.0..1.0).contains(&mid), "mid-fade is partway, got {mid}");
         assert!(!settled, "mid-fade is not settled");
-        // Settles exactly on 1.0 at the duration, and stays settled past it.
+        // Settles exactly on 1.0 at the duration, and stays settled.
         assert_eq!(tab_fade_step(TAB_FADE_SECS, TAB_FADE_SECS), (1.0, true));
         assert_eq!(
             tab_fade_step(TAB_FADE_SECS * 5.0, TAB_FADE_SECS),
             (1.0, true)
         );
-        // Monotonic: the alpha never decreases as the fade advances.
+        // Monotonic.
         let mut prev = 0.0;
         let mut t = 0.0;
         while t <= TAB_FADE_SECS {
@@ -3033,8 +2711,8 @@ mod tests {
         }
     }
 
-    /// The sonar pulse paints a ring that expands over the pulse and fades out near
-    /// the end (so "live" reads as an active signal), and paints nothing once faded.
+    /// The sonar pulse paints a ring that expands as it fades, and paints nothing
+    /// once fully faded.
     #[test]
     fn sonar_pulse_paints_a_fading_ring_that_expands() {
         let raw = egui::RawInput {
@@ -3058,7 +2736,7 @@ mod tests {
                 })
                 .next()
         };
-        // Mid-pulse: a ring is painted, and it expands over the pulse.
+        // The ring expands over the pulse.
         let early = ring(0.2).expect("an early-pulse frame paints a ring");
         let late = ring(1.0).expect("a late-pulse frame paints a ring");
         assert!(
@@ -3067,22 +2745,20 @@ mod tests {
             early.radius,
             late.radius
         );
-        // Near the end of the pulse the ring has faded out: nothing is painted.
+        // Fully faded: nothing is painted.
         assert!(ring(1.99).is_none(), "a nearly-faded ring paints nothing");
     }
 
-    /// The button's own fill rect: full-width and 36 tall. The halo layers are
-    /// expanded (taller), so a 34..=38 height band isolates the button's fill.
-    ///
-    /// (Locating by the button's unique resting fill below is more robust: the idle
-    /// ticket copy box is also ~34 tall and full-width, so a size-only match would tie.)
+    /// Hovering the Start button lifts its fill to the hover shade. Located by its
+    /// unique resting fill — the ticket copy box is also ~34 tall and full-width, so
+    /// a size-only match would tie.
     #[test]
     fn hovering_the_start_button_lifts_its_fill() {
         let (mut app, _rt) = test_app();
         app.tab = Tab::Broadcast;
         let size = egui::vec2(760.0, 560.0);
-        // The Start button's fill is unique to it (the halo uses 0.02/0.05/0.09, the
-        // ticket box a flat alpha-14 tint), so it can be located by exact colour.
+        // Located by exact colour: unique among the halo (0.02/0.05/0.09) and the
+        // ticket box's flat alpha-14 tint.
         let resting_fill = ACCENT.gamma_multiply(0.18);
         let hover_fill = ACCENT.gamma_multiply(0.26);
         let raw = egui::RawInput {
@@ -3102,8 +2778,7 @@ mod tests {
             })
             .expect("the idle start button paints its resting fill");
 
-        // Hover: the pointer moves over the button; egui reads the hover from the
-        // pointer position, so two passes make the lifted fill live.
+        // Two passes: egui reads the pointer from the previous pass.
         let ctx2 = egui::Context::default();
         let raw_hover = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), size)),
@@ -3122,18 +2797,16 @@ mod tests {
         );
     }
 
-    /// The log panel's height tween approaches its target monotonically, settles
-    /// exactly on it after a realistic number of 60 fps frames (so the repaint
-    /// guard can disarm and an idle window falls asleep), and stays settled. The
-    /// reverse direction (open -> closed) settles the same way.
+    /// The log panel's height tween is monotonic, settles exactly on its target
+    /// within a second of 60 fps frames (so the repaint guard can disarm), and
+    /// settles the same way in reverse.
     #[test]
     fn log_anim_settles_on_the_target_without_overshooting() {
         // A single 60 fps step moves partway but never past the target.
         let step = log_anim_step(0.0, 1.0, 1.0 / 60.0);
         assert!(step > 0.0 && step < 1.0, "one frame is partway, got {step}");
 
-        // Stepping at 60 fps settles exactly on the target; the slide should take
-        // well under a second of frames, never overshoot, and never stall.
+        // Settles on the target within a second of 60 fps frames, never overshooting.
         let mut pos = 0.0;
         let mut frames = 0;
         while pos != 1.0 {
@@ -3151,7 +2824,7 @@ mod tests {
             frames * 1000 / 60
         );
 
-        // Settled stays settled: the repaint guard can disarm.
+        // Settled stays settled.
         assert_eq!(log_anim_step(1.0, 1.0, 1.0 / 60.0), 1.0);
         // The reverse direction (open -> closed) settles the same way.
         let mut pos = 1.0;
@@ -3161,11 +2834,9 @@ mod tests {
         assert_eq!(pos, 0.0);
     }
 
-    /// The stats' eased display approaches its target monotonically, settles exactly
-    /// on it after a realistic number of 60 fps frames (so the repaint guard can
-    /// disarm and the panel fall back to the session cadence), never overshoots, and
-    /// stays settled. A single frame moves partway. The reverse direction (a bitrate
-    /// drop) settles the same way, never undershooting.
+    /// The eased stats display approaches its target monotonically, settles exactly
+    /// on it within two seconds of 60 fps frames, and settles the same way in
+    /// reverse (a bitrate drop), never overshooting.
     #[test]
     fn stat_ease_settles_on_the_target_without_overshooting() {
         // A single 60 fps step moves partway but never past the target.
@@ -3175,8 +2846,7 @@ mod tests {
             "one frame is partway, got {step}"
         );
 
-        // Stepping at 60 fps settles exactly on the target; the settle should take
-        // well under two seconds of frames, never overshoot, and never stall.
+        // Settles on the target within two seconds of 60 fps frames, never overshooting.
         let mut pos = 0.0;
         let mut frames = 0;
         while pos != 5000.0 {
@@ -3189,9 +2859,9 @@ mod tests {
             );
         }
 
-        // Settled stays settled: the repaint guard can disarm.
+        // Settled stays settled.
         assert_eq!(stat_ease(5000.0, 5000.0, 1.0 / 60.0), 5000.0);
-        // The reverse direction (a bitrate drop) settles the same way, never undershooting.
+        // The reverse direction settles too, never undershooting.
         let mut pos = 5000.0;
         while pos != 0.0 {
             pos = stat_ease(pos, 0.0, 1.0 / 60.0);
@@ -3200,10 +2870,8 @@ mod tests {
         assert_eq!(pos, 0.0);
     }
 
-    /// A filled small circle in the tab strip (y < 120): the live dot is the only
-    /// one. The status dot is a text glyph (not a `Shape::Circle`), and the sonar
-    /// pulses are *stroked* rings (`stroke.width > 0`), so a filled-circle check
-    /// isolates the live dot.
+    /// Locate the live dot: the only small filled circle in the tab strip. The status
+    /// dot is a text glyph, and sonar pulses are stroked rings.
     fn live_dot_present(shapes: &[egui::epaint::ClippedShape]) -> bool {
         shapes.iter().any(|s| match &s.shape {
             egui::epaint::Shape::Circle(c) => {
@@ -3216,9 +2884,7 @@ mod tests {
         })
     }
 
-    /// While a track is live, its tab carries a small filled "live" dot in the tab
-    /// strip (green for a broadcast, blue for a watch), so a live session is visible
-    /// at a glance right on the strip. While idle, no such dot is painted.
+    /// A live track carries a small filled "live" dot on its tab; idle paints none.
     #[test]
     fn the_active_tab_carries_a_live_dot_when_live() {
         // A live broadcast paints a dot on the Broadcast tab.
@@ -3231,8 +2897,7 @@ mod tests {
             "a live broadcast should paint a live dot on its tab"
         );
 
-        // A live watch paints a dot on the Watch tab (the broadcast is idle, so the
-        // only live dot is the watch's).
+        // A live watch paints a dot on the Watch tab.
         let (mut app, _rt) = test_app();
         app.tab = Tab::Watch;
         app.state.lock().unwrap().watch = Mode::Watching;
@@ -3250,10 +2915,8 @@ mod tests {
         );
     }
 
-    /// The brand title is two-tone: "Stream" in near-white and "pipe" in a soft
-    /// accent green, so the wordmark carries a small brand mark. The title is
-    /// painted as two separate galleys (not one "Streampipe"), and each word's
-    /// foreground colour is the one it was laid out with.
+    /// The brand title is two-tone: "Stream" near-white, "pipe" accent green, laid
+    /// out as two separate galleys.
     #[test]
     fn the_brand_title_is_two_tone() {
         let (mut app, _rt) = test_app();
@@ -3274,7 +2937,7 @@ mod tests {
                 _ => None,
             }
         };
-        // The title is split into two words, each painted (plus its shadow).
+        // The title is split into two words.
         assert!(
             shapes.iter().any(|s| is_text(s, "Stream")),
             "the title should paint a 'Stream' galley"
@@ -3283,8 +2946,7 @@ mod tests {
             shapes.iter().any(|s| is_text(s, "pipe")),
             "the title should paint a 'pipe' galley"
         );
-        // The "pipe" word is the accent green and the "Stream" word near-white
-        // (the foreground galleys; the shadows are a dark low-alpha tint).
+        // Each word is painted in its own colour (shadows are a dark low-alpha tint).
         assert!(
             shapes
                 .iter()
@@ -3299,10 +2961,7 @@ mod tests {
         );
     }
 
-    /// `section_tick` paints a small accent bar (a filled rect in the accent colour,
-    /// a few pixels wide) beside a bold label (a text galley holding the section
-    /// text), so a section heading reads as a deliberate marker rather than a plain
-    /// strong label.
+    /// `section_tick` paints a small accent bar beside its bold label.
     #[test]
     fn section_tick_paints_a_bar_and_a_label() {
         let ctx = egui::Context::default();
@@ -3332,10 +2991,8 @@ mod tests {
         assert!(label, "section_tick should paint its label");
     }
 
-    /// The stats panel eases its displayed measurements toward the latest sample:
-    /// starting from zero, a non-zero target moves the display partway (never past the
-    /// target) over the first frames, so the numbers settle smoothly instead of
-    /// jumping on each 5-second tick.
+    /// The stats panel eases its display toward the latest sample, never past it,
+    /// so the numbers settle smoothly instead of jumping on each tick.
     #[test]
     fn the_stats_panel_eases_its_display_toward_the_target() {
         let (mut app, _rt) = test_app();
@@ -3381,9 +3038,7 @@ mod tests {
         );
     }
 
-    /// When no broadcast is live, the eased stats display is reset to zero (in
-    /// [`App::draw`]), so a new broadcast starts from a clean zero rather than counting
-    /// down from the previous session's values.
+    /// When idle, the eased stats display resets to zero so a new session starts clean.
     #[test]
     fn the_stats_display_resets_to_zero_when_idle() {
         let (mut app, _rt) = test_app();
@@ -3404,9 +3059,7 @@ mod tests {
         assert_eq!(app.disp_viewers, 0.0, "idle resets the viewer display");
     }
 
-    /// The Settings window's "Save" button is the accent primary action: it paints a
-    /// soft 3-layer accent halo (the live green at low alpha), matching the hero
-    /// buttons on the tabs, so committing the edits reads as the primary commitment.
+    /// The Settings "Save" button paints the same 3-layer accent halo as the hero buttons.
     #[test]
     fn the_settings_save_button_paints_a_soft_accent_halo() {
         let (mut app, _rt) = test_app();
@@ -3418,7 +3071,7 @@ mod tests {
             )),
             ..Default::default()
         };
-        // A few passes so the window and its content settle at their final size.
+        // Settle the window to its final size.
         for _ in 0..3 {
             let mut out = ctx.run_ui(raw.clone(), |ui| {
                 app.options_window(ui.ctx());
@@ -3446,15 +3099,11 @@ mod tests {
         );
     }
 
-    /// The Settings footer is a matched pair of actions: "Save" in the accent green
-    /// and "Close" in a neutral grey, both the same 90x30 box with the same halo
-    /// language, so they read as one set with the green one leading. Clicking Save
-    /// writes the config and raises the floating "Saved" pill; clicking Close
-    /// dismisses the panel.
+    /// Settings footer: "Save" (accent) and "Close" (grey) are matched 90x30 boxes.
+    /// Save writes the config and raises the "Saved" pill; Close dismisses the panel.
     #[test]
     fn the_settings_footer_is_a_matched_pair_and_save_raises_a_toast() {
-        // The click below writes the config, so redirect the config dir into a temp
-        // folder (serialized with the other config-dir test by the same mutex).
+        // The click writes config; redirect the config dir (mutex serializes these tests).
         let _guard = config::CONFIG_ENV.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("XDG_CONFIG_HOME", dir.path());
@@ -3467,7 +3116,7 @@ mod tests {
             screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), size)),
             ..Default::default()
         };
-        // Two settling passes so the window and its footer reach their final size.
+        // Two settling passes so the footer reaches its final size.
         let mut out = ctx.run_ui(raw.clone(), |ui| app.draw(ui));
         out.textures_delta.clear();
         let mut out = ctx.run_ui(raw.clone(), |ui| app.draw(ui));
@@ -3484,14 +3133,13 @@ mod tests {
         let save = rect_of(ACCENT.gamma_multiply(0.18)).expect("Save paints its resting fill");
         let close =
             rect_of(CLOSE_GREY.gamma_multiply(0.12)).expect("Close paints its resting grey fill");
-        // Same box, side by side: the pair matches, the grey one is the secondary.
+        // Same box, side by side.
         assert_eq!(save.size(), close.size(), "Save and Close are the same box");
         assert_eq!((save.width(), save.height()), (90.0, 30.0));
         assert!(close.min.x > save.max.x, "Close sits to the right of Save");
 
-        // A click is a press frame then a release frame on the same point. Driven by
-        // a nested `fn` (not a closure) so it only borrows the app while it runs,
-        // leaving the flags below readable between the two clicks.
+        // A click is a press frame then a release frame. A nested `fn` (not a
+        // closure) so the app borrow ends before the assertions below.
         fn click_at(app: &mut App, ctx: &egui::Context, at: egui::Pos2, size: egui::Vec2) {
             let press = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), size)),
@@ -3522,7 +3170,7 @@ mod tests {
             out.textures_delta.clear();
         }
 
-        // Save: the config goes to disk and the confirmation pill is raised.
+        // Save: config hits disk, confirmation pill raised.
         click_at(&mut app, &ctx, save.center(), size);
         assert_eq!(
             app.toast.as_ref().map(|(msg, _)| msg.as_str()),
@@ -3535,19 +3183,15 @@ mod tests {
         );
         assert!(app.show_options, "Save leaves the panel open");
 
-        // Close: the panel goes away, and the toast has expired by then (the click
-        // above was two frames ago, the pill lasts 1500 ms of wall clock, and the
-        // draw loop expires it).
+        // Close: the panel goes away (the toast has expired by then).
         click_at(&mut app, &ctx, close.center(), size);
         assert!(!app.show_options, "Close dismisses the panel");
 
         std::env::remove_var("XDG_CONFIG_HOME");
     }
 
-    /// Log lines are coloured by their level prefix (tracing's `LEVEL target:
-    /// message` format): errors in the app's error red, warnings in a muted amber,
-    /// debug and trace receded to a dim grey, and everything else (info, and lines
-    /// without a level prefix) in the normal text colour.
+    /// Log lines are coloured by their tracing level prefix; unprefixed lines and
+    /// info keep the default text colour.
     #[test]
     fn log_line_color_maps_levels_to_their_colours() {
         let default = egui::Color32::from_rgb(200, 200, 200);
@@ -3580,10 +3224,8 @@ mod tests {
         assert_eq!(log_line_color("", default), default);
     }
 
-    /// The error callout paints a muted red-tinted surface with a red left bar
-    /// (the section-tick's language in the error hue) and the message in the error
-    /// red, so a failure reads as a deliberate surface rather than a stray line of
-    /// text.
+    /// The error callout paints a red-tinted surface, a red left bar, and its
+    /// message in the error red.
     #[test]
     fn the_error_callout_paints_a_tinted_surface_with_a_red_bar() {
         let ctx = egui::Context::default();
@@ -3633,15 +3275,13 @@ mod tests {
         assert_eq!(color, Some(ERROR), "the message should be the error red");
     }
 
-    /// The log panel's header carries a close button (two crossing 1.5 px strokes),
-    /// and clicking it closes the panel — the same toggle as Ctrl/Cmd+L, so the
-    /// panel can be dismissed without knowing the shortcut.
+    /// The log panel's header close button (two crossing 1.5 px strokes) closes the panel.
     #[test]
     fn the_log_panel_close_button_closes_the_panel() {
         let (mut app, _rt) = test_app();
         app.log_open = true;
-        // Fully open: the height tween runs on the wall clock, which barely advances
-        // between headless passes, so the tween is pinned at its open target.
+        // Fully open: the tween runs on the wall clock, which barely advances
+        // between headless passes.
         app.log_anim = 1.0;
         let size = egui::vec2(760.0, 560.0);
         let ctx = egui::Context::default();
@@ -3649,10 +3289,8 @@ mod tests {
             screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), size)),
             ..Default::default()
         };
-        // Render once to locate the close button: on an idle app the only 1.5 px
-        // line segments are its two crossing strokes (the hairlines, bevels and
-        // separators are all 1.0, and the sparkline and spinner are not drawn
-        // while idle).
+        // Locate the close button: on an idle app the only 1.5 px line segments are
+        // its two crossing strokes (hairlines, bevels and separators are all 1.0).
         let mut out = ctx.run_ui(raw.clone(), |ui| app.draw(ui));
         out.textures_delta.clear();
         let segs: Vec<[egui::Pos2; 2]> = out
@@ -3724,16 +3362,13 @@ mod tests {
         );
     }
 
-    /// A freshly-arrived log line is faded in (its text alpha is reduced), while a
-    /// line that arrived long ago is fully opaque. This is the log fade-in: new lines
-    /// ease in over the fade window rather than popping in.
+    /// New log lines fade in; lines older than the fade window are fully opaque.
     #[test]
     fn a_new_log_line_fades_in_and_an_old_one_is_opaque() {
         let (mut app, _rt) = test_app();
         app.log_open = true;
         app.log_anim = 1.0;
-        // Two lines: the first (front) is backdated so it is fully opaque, the second
-        // (back) is fresh so it is still fading in.
+        // First line backdated (opaque), second fresh (still fading in).
         log::push(&app.log, "old line");
         log::push(&app.log, "fresh line");
         {
@@ -3744,7 +3379,7 @@ mod tests {
         }
         let size = egui::vec2(760.0, 560.0);
         let shapes = render_shapes(&mut app, size);
-        // Read the laid-out colour's alpha of the text galley holding `text`.
+        // The laid-out text alpha of the galley holding `text`.
         let alpha_of = |text: &str| -> Option<u8> {
             shapes.iter().find_map(|s| match &s.shape {
                 egui::epaint::Shape::Text(t) if t.galley.text() == text => t
@@ -3765,9 +3400,8 @@ mod tests {
         );
     }
 
-    /// Pressing the idle Start button pushes its fill in to the press shade (a touch
-    /// darker than the hover lift), so the hero action reads as physically pressed in
-    /// rather than flat. The pointer is over the button and the primary button is held.
+    /// Pressing the idle Start button pushes its fill in to the press shade, a touch
+    /// darker than the hover lift.
     #[test]
     fn pressing_the_start_button_pushes_its_fill_in() {
         let (mut app, _rt) = test_app();
@@ -3793,9 +3427,7 @@ mod tests {
             .expect("the idle start button paints its resting fill");
         let center = btn_rect.center();
 
-        // Press: the pointer moves over the button and the primary button is held.
-        // Two passes make the pressed fill live (egui reads the pointer from the
-        // previous pass).
+        // Two passes: egui reads the pointer from the previous pass.
         let ctx2 = egui::Context::default();
         let raw_press = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), size)),
@@ -3822,9 +3454,8 @@ mod tests {
         );
     }
 
-    /// Hovering a copy box paints a soft 2-layer accent glow around it and brightens
-    /// its copy glyph (0.5 -> 0.8), so the "click to copy" affordance reads as lit and
-    /// alive under the mouse. A live broadcast shows the copy boxes.
+    /// Hovering a copy box paints a 2-layer accent glow (0.03 / 0.06) and brightens
+    /// its copy glyph (0.5 -> 0.8).
     #[test]
     fn hovering_a_copy_box_paints_a_soft_glow_and_brightens_the_glyph() {
         let (mut app, _rt) = test_app();
@@ -3861,9 +3492,8 @@ mod tests {
         out2.textures_delta.clear();
         let mut out3 = ctx2.run_ui(raw_hover, |ui| app.draw(ui));
         out3.textures_delta.clear();
-        // The glow: two accent rects at 0.03 and 0.06 alpha (the farthest and nearest
-        // layers of the halo). The start button is idle (not pressed), so its halo
-        // uses the resting alphas (0.02/0.05/0.09) and cannot match.
+        // The glow: two accent rects at 0.03 / 0.06. The idle start button's halo
+        // uses 0.02/0.05/0.09, so it cannot match.
         let glow_count = out3
             .shapes
             .iter()
@@ -3878,8 +3508,7 @@ mod tests {
             glow_count, 2,
             "hovering the copy box should paint a 2-layer soft glow"
         );
-        // The copy glyph brightens on hover (0.5 -> 0.8): its two sheets are stroked
-        // in the brighter accent.
+        // The copy glyph brightens on hover: its two sheets are stroked brighter.
         let glyph_bright = ACCENT.gamma_multiply(0.8);
         let glyph_count = out3
             .shapes
@@ -3895,16 +3524,13 @@ mod tests {
         );
     }
 
-    /// While a session is live, the status bar's fill carries a subtle tint of the
-    /// session's accent (green while broadcasting, blue while watching), mirroring
-    /// the status dot, so the bar reads as part of the live session. Idle keeps the
-    /// plain dark ground (byte-identical to before the tint).
+    /// The status bar's fill tints with the live session's accent (green broadcasting,
+    /// blue watching); idle keeps the plain dark ground.
     #[test]
     fn the_status_bar_tints_with_the_live_session() {
         let size = egui::vec2(760.0, 560.0);
-        // The status bar's fill: the only opaque, dark, full-width rect at the very
-        // bottom of the window. The Stop/Watch button's fill is a low-alpha accent
-        // tint (alpha < 255), so the opaque + dark filter isolates the bar.
+        // The bar's fill: the only opaque, dark, full-width rect at the bottom
+        // (the Stop/Watch button's fill is low-alpha, so it can't match).
         let bar_fill = |shapes: &[egui::epaint::ClippedShape]| -> Option<egui::Color32> {
             shapes.iter().find_map(|s| match &s.shape {
                 egui::epaint::Shape::Rect(r)
@@ -3946,21 +3572,17 @@ mod tests {
         assert!(f.b() > idle_fill.b(), "the watch tint is bluer, got {f:?}");
     }
 
-    /// The moment its text is copied, a copy box's glyph becomes a checkmark (two
-    /// 1.5 px strokes in the full accent) instead of the two sheets, so the
-    /// confirmation lands right at the point of action, not only in the toast far
-    /// below. A box that was not just copied keeps its sheets.
+    /// On copy, a copy box's glyph becomes a checkmark (two 1.5 px accent strokes);
+    /// an un-copied box keeps its sheets.
     #[test]
     fn the_copy_glyph_becomes_a_checkmark_on_copy() {
         let (mut app, _rt) = test_app();
         app.tab = Tab::Broadcast;
         app.state.lock().unwrap().broadcast = Mode::Broadcasting;
         let size = egui::vec2(760.0, 560.0);
-        // A checkmark stroke: a 1.5 px line segment in the accent green. The
-        // checkmark is painted at `ACCENT.gamma_multiply(flash)`, and the flash
-        // decays in real time over the render, so the exact shade is not stable —
-        // but the hue always is (the accent's green channel leads), so the hue is
-        // what is checked, not the exact colour.
+        // A checkmark stroke: 1.5 px in `ACCENT.gamma_multiply(flash)`. The flash
+        // decays in real time, so the exact shade is unstable — the hue (green
+        // leads) is what's checked.
         let is_check_stroke = |s: &egui::epaint::ClippedShape| -> bool {
             matches!(&s.shape, egui::epaint::Shape::LineSegment { stroke, .. }
                 if (stroke.width - 1.5).abs() < 0.01
@@ -3968,8 +3590,7 @@ mod tests {
                     && stroke.color.g() > stroke.color.b())
         };
 
-        // Nothing copied yet: no checkmark strokes (the glyph is two sheets, which
-        // are stroked rects, not line segments).
+        // Nothing copied yet: no checkmark strokes.
         let before = render_shapes(&mut app, size);
         assert_eq!(
             before.iter().filter(|s| is_check_stroke(s)).count(),
@@ -3977,9 +3598,8 @@ mod tests {
             "an un-copied box has no checkmark"
         );
 
-        // Just copied: the flash is live, so the copied box's glyph cross-fades into
-        // a checkmark. Only the copied box (key "whip") morphs; the ticket box keeps
-        // its sheets, so exactly two checkmark strokes appear.
+        // Just copied: only the copied box (key "whip") morphs, so exactly two
+        // strokes appear.
         app.copied = Some(("whip", Instant::now()));
         let after = render_shapes(&mut app, size);
         let check = after.iter().filter(|s| is_check_stroke(s)).count();
@@ -3989,10 +3609,8 @@ mod tests {
         );
     }
 
-    /// A focused ticket box paints its focus ring: the frame's stroke brightens to
-    /// the focus shade (and a soft glow is lit), so the active input reads as lit
-    /// rather than relying on a blinking caret alone. A prefilled ticket autofocuses
-    /// on a window-focused frame, so the ring is observable headlessly.
+    /// A focused ticket box paints its bright focus ring. A prefilled ticket
+    /// autofocuses on a window-focused frame, so this is observable headlessly.
     #[test]
     fn the_focused_ticket_box_paints_a_focus_ring() {
         let (mut app, _rt) = test_app();
@@ -4005,8 +3623,7 @@ mod tests {
             ..Default::default()
         };
         let ctx = egui::Context::default();
-        // Two frames let the autofocus settle (a prefilled ticket grabs focus on a
-        // window-focused frame).
+        // Two frames for the autofocus to settle.
         for _ in 0..2 {
             let mut out = ctx.run_ui(focused_raw.clone(), |ui| app.draw(ui));
             out.textures_delta.clear();
@@ -4027,9 +3644,7 @@ mod tests {
         );
     }
 
-    /// While a session is live, the status bar carries a compact "LIVE" badge (a
-    /// stroked pill in the session's accent), so the live state reads at a glance
-    /// rather than only as a small breathing dot. While idle, no badge is painted.
+    /// The status bar carries a "LIVE" badge while a session is live; none when idle.
     #[test]
     fn the_status_bar_paints_a_live_badge_when_live() {
         let size = egui::vec2(760.0, 560.0);
@@ -4063,8 +3678,7 @@ mod tests {
         );
     }
 
-    /// The bitrate sparkline carries a small "now … kbit/s" caption above the chart,
-    /// so the current bitrate is readable at a glance without hovering.
+    /// The bitrate sparkline carries a "now … kbit/s" caption above the chart.
     #[test]
     fn the_sparkline_carries_a_now_value_caption() {
         let (mut app, _rt) = test_app();
@@ -4072,8 +3686,7 @@ mod tests {
         {
             let mut g = app.state.lock().unwrap();
             g.broadcast = Mode::Broadcasting;
-            // Two or more samples so the sparkline (and its caption) is drawn; the
-            // newest sample is the "now" value the caption reads out.
+            // Two+ samples so the sparkline (and caption) is drawn; newest is "now".
             g.video_kbps_history = std::collections::VecDeque::from(vec![100.0, 200.0, 150.0]);
             g.stats = Some(StreamStats {
                 video_kbps: 150.0,
@@ -4090,10 +3703,9 @@ mod tests {
         );
     }
 
-    /// The log panel leads an error line with a red "ERR" chip and a warning line
-    /// with an amber "WARN" chip, so problems pop out of the wall of grey log text.
-    /// An info line gets no chip. The lines are backdated to fully opaque so the
-    /// chip colours are deterministic.
+    /// The log panel leads error lines with a red "ERR" chip and warnings with an
+    /// amber "WARN" chip; info gets none. Lines are backdated so chip colours are
+    /// deterministic.
     #[test]
     fn the_log_panel_marks_errors_and_warnings_with_chips() {
         let (mut app, _rt) = test_app();
@@ -4102,8 +3714,7 @@ mod tests {
         log::push(&app.log, "ERROR streampipe::whip: bind failed");
         log::push(&app.log, "WARN streampipe::udp: dropping datagram");
         log::push(&app.log, "INFO streampipe::state: endpoint online");
-        // Backdate every line past the fade window so each is fully opaque (alpha 1),
-        // making the chip colours exact.
+        // Backdate every line past the fade window so chip colours are exact.
         {
             let mut ring = app.log.lock().unwrap();
             for entry in ring.iter_mut() {
@@ -4146,10 +3757,8 @@ mod tests {
         );
     }
 
-    /// Hovering a log line paints a faint background highlight, so a line under the
-    /// cursor is easy to track in a dense log. The highlight is a faint white rect
-    /// (alpha 12), painted before the line's content so the text sits on top. A line
-    /// that is not hovered paints no such highlight.
+    /// Hovering a log line paints a faint white highlight (alpha 12) behind its text;
+    /// an un-hovered line paints none.
     #[test]
     fn hovering_a_log_line_paints_a_faint_highlight() {
         let (mut app, _rt) = test_app();
@@ -4188,8 +3797,7 @@ mod tests {
             })
             .expect("the log line is painted");
         let center = line_rect.center();
-        // Hover the log line: two passes make the hover live (egui reads the pointer
-        // from the previous pass).
+        // Hover the log line: two passes (egui reads the pointer from the previous pass).
         let ctx2 = egui::Context::default();
         let raw_hover = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), size)),
@@ -4206,10 +3814,8 @@ mod tests {
         );
     }
 
-    /// `soft_glow` paints a two-layer halo in the colour it is given (not a
-    /// hard-coded accent), so the shared halo language can light a surface in its
-    /// own accent (the live green for a broadcast surface, the watch blue for a
-    /// watch surface). The two layers are 0.03 and 0.06 alpha in that colour.
+    /// `soft_glow` paints a 2-layer halo (0.03 / 0.06) in the colour it is given,
+    /// not a hard-coded accent.
     #[test]
     fn soft_glow_paints_a_halo_in_the_given_color() {
         let ctx = egui::Context::default();
@@ -4220,8 +3826,7 @@ mod tests {
             )),
             ..Default::default()
         };
-        // The watch blue, not the default accent green, so the test proves the
-        // colour is honoured rather than hard-coded.
+        // The watch blue, not the accent green, so the colour is proved honoured.
         let color = WATCH_ACCENT;
         let mut out = ctx.run_ui(raw, |ui| {
             let rect = egui::Rect::from_min_size(egui::pos2(10.0, 10.0), egui::vec2(80.0, 30.0));
@@ -4244,14 +3849,9 @@ mod tests {
         );
     }
 
-    /// Regression: the central panel's ground gradient must be painted *behind* the
-    /// panel content, not on top of it. The gradient is a 4-vertex, 6-index mesh
-    /// covering the central panel; the panel content (e.g. the tab labels) is text in
-    /// the upper area. If the gradient were painted on a separate background layer
-    /// (whose order relative to the content is not guaranteed in egui 0.36, where the
-    /// panel content already lives on the background order), it could land *after*
-    /// the content in the paint list and cover the whole panel, leaving a blank
-    /// window. Assert the gradient precedes the content so it stays behind it.
+    /// Regression: the gradient mesh must be painted *before* the panel content.
+    /// egui 0.36 doesn't guarantee a separate background layer's order, so painting
+    /// it on top would cover the panel and leave a blank window.
     #[test]
     fn the_central_panel_gradient_paints_behind_its_content() {
         let (mut app, _rt) = test_app();
@@ -4265,9 +3865,8 @@ mod tests {
                 egui::epaint::Shape::Mesh(m) if m.vertices.len() == 4 && m.indices.len() == 6 => {
                     gradient_idx = Some(i);
                 }
-                // Central panel content lives in the upper area; the status bar is
-                // at the very bottom (y ~ 541). Track the first such shape: the
-                // gradient must precede even that one to be behind all the content.
+                // Central panel content lives in the upper area (the status bar is at
+                // the bottom); the gradient must precede the first such shape.
                 egui::epaint::Shape::Text(t) if t.pos.y < 500.0 && content_idx.is_none() => {
                     content_idx = Some(i);
                 }
@@ -4288,11 +3887,8 @@ mod tests {
         );
     }
 
-    /// The bitrate sparkline carries a subtle peak marker (a small dot at the recent
-    /// peak, with a faint vertical line down to the baseline), so a wobbly stream's
-    /// headroom is visible at a glance (how far the current bitrate is from the
-    /// recent peak). The marker is skipped when the peak is the newest sample (the
-    /// "now" dot already marks that point).
+    /// The sparkline marks the recent peak (dot + faint vline); skipped when the
+    /// peak is the newest sample, as the "now" dot already marks it.
     #[test]
     fn the_sparkline_marks_the_recent_peak() {
         let (mut app, _rt) = test_app();
@@ -4339,7 +3935,6 @@ mod tests {
         {
             let mut g = app.state.lock().unwrap();
             g.broadcast = Mode::Broadcasting;
-            // The newest sample is the peak, so the peak marker is skipped.
             g.video_kbps_history = std::collections::VecDeque::from(vec![100.0, 150.0, 400.0]);
             g.stats = Some(StreamStats {
                 video_kbps: 400.0,
@@ -4361,10 +3956,8 @@ mod tests {
         );
     }
 
-    /// The central panel paints a subtle ambient "light from above" glow at the top
-    /// centre: six concentric circles at a very low alpha, so the brand title and tab
-    /// strip read as lit from above (the same cue as the ground gradient and the top
-    /// bevels).
+    /// The central panel paints a "light from above" glow at the top centre: six
+    /// concentric low-alpha circles.
     #[test]
     fn the_central_panel_paints_an_ambient_light_glow() {
         let (mut app, _rt) = test_app();
@@ -4384,9 +3977,7 @@ mod tests {
         );
     }
 
-    /// The Watch tab shows a friendly "where do I get a ticket?" hint below the box
-    /// while it is empty, so a first-time viewer knows what to do. The hint recedes
-    /// once a ticket is pasted.
+    /// The Watch tab shows a ticket hint while empty; it recedes once a ticket is pasted.
     #[test]
     fn the_watch_tab_shows_a_ticket_hint_when_empty() {
         let hint = "No ticket yet? Start a broadcast, or ask a friend to share theirs.";
@@ -4414,11 +4005,8 @@ mod tests {
         );
     }
 
-    /// The window icon is a square, non-empty RGBA image whose centre is the live
-    /// accent (the stream runs through the centre) and whose corners are transparent
-    /// (outside the rounded square). Guards against an empty, mis-sized, or
-    /// all-opaque / all-transparent icon that the task bar would render blank or as a
-    /// solid block.
+    /// The window icon is a square RGBA image: accent stream through the centre,
+    /// transparent corners. Guards against an empty, mis-sized, or solid-block icon.
     #[test]
     fn the_app_icon_is_a_square_with_a_centred_stream() {
         let icon = app_icon();
@@ -4439,7 +4027,7 @@ mod tests {
                 icon.rgba[i + 3],
             )
         };
-        // The centre sits on the stream's centre line: the full accent green.
+        // The centre sits on the stream: the accent green.
         let (r, g, b, a) = px(size / 2, size / 2);
         assert!(a > 0, "the centre is opaque, got alpha {a}");
         assert!(
@@ -4460,9 +4048,7 @@ mod tests {
         );
     }
 
-    /// The icon's ground is a subtle vertical gradient (lit from above): a pixel near
-    /// the top edge-centre is lighter than one near the bottom edge-centre, so the
-    /// icon reads as a surface lit from above (the same cue as the panel ground).
+    /// The icon's ground is lit from above: the top edge-centre is lighter than the bottom.
     #[test]
     fn the_app_icon_ground_is_lit_from_above() {
         let icon = app_icon();
@@ -4482,11 +4068,8 @@ mod tests {
         );
     }
 
-    /// The central panel paints a subtle radial vignette (a fan mesh of 32 segments:
-    /// 33 vertices, 96 indices) behind its content, so the eye is gently drawn to the
-    /// centre of the panel (the same depth cue as the ground gradient and the ambient
-    /// glow). The vertex/index count is unique to the vignette: the ground gradient is
-    /// a 4-vertex quad and the spinner is a 96-vertex arc.
+    /// The central panel paints a radial vignette behind its content (32-segment fan:
+    /// 33 vertices, 96 indices — unique among the panel's meshes).
     #[test]
     fn the_central_panel_paints_a_subtle_vignette() {
         let (mut app, _rt) = test_app();
@@ -4502,11 +4085,8 @@ mod tests {
         );
     }
 
-    /// The "Waiting for OBS to start streaming…" hint (a live broadcast that has not
-    /// yet received media from OBS) carries a small breathing dot (a filled circle of
-    /// radius 4.0 in the live accent), so the wait reads as an active signal rather
-    /// than a static label. A broadcast that is already receiving media (or has
-    /// viewers) shows no such dot.
+    /// The "Waiting for OBS to start streaming…" hint carries a breathing dot
+    /// (filled, radius 4.0); a broadcast already receiving media shows none.
     #[test]
     fn the_waiting_for_obs_hint_carries_a_breathing_dot() {
         // Live, no viewers, not receiving, no history: the "Waiting for OBS" hint
@@ -4516,9 +4096,8 @@ mod tests {
         app.state.lock().unwrap().broadcast = Mode::Broadcasting;
         let size = egui::vec2(760.0, 560.0);
         let shapes = render_shapes(&mut app, size);
-        // The breathing dot: a filled circle (stroke.width == 0) of radius 4.0. The
-        // ambient-glow circles are far larger and the sonar rings are stroked, so a
-        // filled radius-4.0 circle isolates the dot.
+        // The breathing dot: a filled radius-4.0 circle (ambient glow is larger,
+        // sonar rings are stroked).
         let dot = shapes.iter().any(|s| match &s.shape {
             egui::epaint::Shape::Circle(c) => {
                 (c.radius - 4.0).abs() < 0.01 && c.stroke.width == 0.0 && c.fill.a() > 0
@@ -4554,9 +4133,7 @@ mod tests {
         );
     }
 
-    /// The status bar carries a subtle keyboard-shortcut hint on its right edge, so
-    /// the (otherwise hidden) Ctrl+L / Ctrl+, shortcuts are discoverable without a
-    /// manual.
+    /// The status bar shows the Ctrl+L / Ctrl+, shortcuts so they're discoverable.
     #[test]
     fn the_status_bar_shows_a_keyboard_shortcut_hint() {
         let (mut app, _rt) = test_app();
