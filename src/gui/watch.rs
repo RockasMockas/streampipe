@@ -20,7 +20,7 @@ pub fn parse_buffer_ms(text: &str) -> Option<u64> {
 }
 
 /// The status label shown under the buttons while a watch session is up.
-fn watch_action_label(mode: Mode, receiving: bool) -> &'static str {
+pub fn watch_action_label(mode: Mode, receiving: bool) -> &'static str {
     match mode {
         Mode::Starting => "connecting…",
         _ if receiving => "Playing stream in player window",
@@ -29,14 +29,14 @@ fn watch_action_label(mode: Mode, receiving: bool) -> &'static str {
 }
 
 /// Whether the "Watch Stream" button is actionable: idle, with a non-blank ticket.
-fn watch_can_start(busy: bool, ticket: &str) -> bool {
+pub fn watch_can_start(busy: bool, ticket: &str) -> bool {
     !busy && !ticket.trim().is_empty()
 }
 
 /// Whether Enter should start a watch session: the ticket box must own keyboard focus,
 /// Enter must be pressed, and the button's idle/non-blank gate must hold. Extracted so
 /// the keyboard gate is testable without focus plumbing.
-fn watch_enter_starts(focused: bool, enter: bool, busy: bool, ticket: &str) -> bool {
+pub fn watch_enter_starts(focused: bool, enter: bool, busy: bool, ticket: &str) -> bool {
     focused && enter && watch_can_start(busy, ticket)
 }
 
@@ -435,48 +435,5 @@ impl App {
             .map(|ms| ms.to_string())
             .unwrap_or_default();
         self.watch_volume = self.config.volume.min(100);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn watch_action_label_distinguishes_connecting_waiting_from_playing() {
-        assert_eq!(watch_action_label(Mode::Starting, false), "connecting…");
-        // Connecting, with a gate signal in flight: still "connecting…" — the session
-        // is not up yet, so the live labels must not show.
-        assert_eq!(watch_action_label(Mode::Starting, true), "connecting…");
-        assert_eq!(
-            watch_action_label(Mode::Watching, true),
-            "Playing stream in player window"
-        );
-        // Regression: `Watching` used to claim it was playing even while the broadcaster
-        // had sent nothing, so the tab lied about a blank window.
-        assert_eq!(
-            watch_action_label(Mode::Watching, false),
-            "Waiting for streamer to begin broadcasting..."
-        );
-    }
-
-    #[test]
-    fn watch_can_start_needs_idle_and_a_non_blank_ticket() {
-        assert!(!watch_can_start(false, " "));
-        assert!(!watch_can_start(false, ""));
-        assert!(watch_can_start(false, "abc"));
-        assert!(!watch_can_start(true, "abc"));
-    }
-
-    #[test]
-    fn watch_enter_starts_needs_focus_enter_and_a_startable_ticket() {
-        // Enter starts only when the box owns focus, Enter is pressed, and the button's
-        // own idle/non-blank gate holds.
-        assert!(watch_enter_starts(true, true, false, "abc"));
-        assert!(!watch_enter_starts(false, true, false, "abc")); // not focused
-        assert!(!watch_enter_starts(true, false, false, "abc")); // no Enter
-        assert!(!watch_enter_starts(true, true, false, "  ")); // blank ticket
-        assert!(!watch_enter_starts(true, true, false, ""));
-        assert!(!watch_enter_starts(true, true, true, "abc")); // busy
     }
 }

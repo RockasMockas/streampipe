@@ -23,7 +23,7 @@ use std::{
 use tracing_subscriber::{fmt::MakeWriter, EnvFilter};
 
 /// The most log lines kept in the ring.
-const MAX_LINES: usize = 2000;
+pub const MAX_LINES: usize = 2000;
 
 /// A bounded, thread-safe ring of log lines, each tagged with the instant it was
 /// added so the panel can fade a new line in over the first ~200 ms.
@@ -57,9 +57,11 @@ pub fn push(ring: &LogRing, line: impl Into<String>) {
 /// Non-blocking by design: `write` only appends to a local buffer and pushes
 /// finished lines onto a channel, so the engine worker that is logging never
 /// performs I/O and never locks a mutex.
-pub(crate) struct TeeWriter {
-    tx: Sender<String>,
-    buf: Vec<u8>,
+pub struct TeeWriter {
+    /// Lines go to the single background logging thread.
+    pub tx: Sender<String>,
+    /// Not-yet-complete bytes, flushed on `flush()`.
+    pub buf: Vec<u8>,
 }
 
 impl TeeWriter {
@@ -139,62 +141,4 @@ pub fn install(ring: LogRing, verbosity: u8) {
         .with_writer(tee)
         .with_ansi(false)
         .try_init();
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn writer_splits_lines_into_ring() {
-        let (tx, rx) = std::sync::mpsc::channel::<String>();
-        let mut w = TeeWriter {
-            tx: tx.clone(),
-            buf: Vec::new(),
-        };
-        w.write_all(b"first\nsecond").unwrap();
-        w.flush().unwrap();
-        // Drop every sender to close the channel so collecting terminates.
-        drop(tx);
-        drop(w);
-        let texts: Vec<String> = rx.iter().collect();
-        assert_eq!(texts, vec!["first".to_string(), "second".to_string()]);
-    }
-
-    /// The whole pipeline: writer to channel to drain thread to ring.
-    #[test]
-    fn drained_lines_land_in_the_ring() {
-        let ring = new_ring();
-        let (tx, rx) = std::sync::mpsc::channel::<String>();
-        let drain_ring = ring.clone();
-        let drainer = std::thread::spawn(move || {
-            while let Ok(line) = rx.recv() {
-                push(&drain_ring, line);
-            }
-        });
-        let mut w = TeeWriter {
-            tx,
-            buf: Vec::new(),
-        };
-        w.write_all(b"a\nb\nc").unwrap();
-        w.flush().unwrap();
-        drop(w);
-        drainer.join().unwrap();
-        let texts: Vec<String> = snapshot(&ring).into_iter().map(|(s, _)| s).collect();
-        assert_eq!(
-            texts,
-            vec!["a".to_string(), "b".to_string(), "c".to_string()]
-        );
-    }
-
-    #[test]
-    fn ring_is_bounded() {
-        let ring = new_ring();
-        for i in 0..(MAX_LINES + 50) {
-            push(&ring, format!("line {i}"));
-        }
-        let snap = snapshot(&ring);
-        assert_eq!(snap.len(), MAX_LINES);
-        assert_eq!(snap.last().unwrap().0, format!("line {}", MAX_LINES + 49));
-    }
 }

@@ -16,22 +16,3 @@ pub mod udp;
 pub mod whip;
 
 pub use iroh_tickets::endpoint::EndpointTicket;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The pipe path must stay wire-compatible with upstream dumbpipe, so these
-    /// are pinned and must never change.
-    #[test]
-    fn classic_pipe_wire_compat_is_pinned() {
-        assert_eq!(ALPN, b"DUMBPIPEV0");
-        assert_eq!(HANDSHAKE, *b"hello");
-    }
-
-    #[test]
-    fn new_features_use_streampipe_alpn() {
-        assert_eq!(STREAM_ALPN, b"STREAMPIPE_WEBRTC_V0");
-        assert_eq!(udp::ALPN, b"STREAMPIPE_UDP_V0");
-    }
-}

@@ -625,7 +625,7 @@ impl App {
 /// Parse the configured fixed bind addresses, `None`/empty meaning ephemeral. IPv4 is
 /// parsed as `ip:port`; IPv6 as `[ip]:port` (brackets optional, so a bare `::1:45678`
 /// is rejected in favour of `[::1]:45678`, matching `SocketAddrV6`'s syntax).
-fn parse_bind(config: &Config) -> Result<BindAddrs, String> {
+pub fn parse_bind(config: &Config) -> Result<BindAddrs, String> {
     let ipv4 = match config.broadcast_bind_ipv4.as_deref().map(str::trim) {
         Some(s) if !s.is_empty() => Some(
             s.parse::<SocketAddrV4>()
@@ -664,7 +664,7 @@ fn viewers_cell(ui: &mut Ui, viewers: usize, display: f32) {
 /// Map bitrate samples (kbit/s, oldest first) to pixel points spanning `rect`: oldest at
 /// the left edge, newest at the right, auto-scaled to the window's peak with a 60 kbit/s
 /// floor so a quiet but steady stream still shows its shape.
-fn sparkline_points(samples: &[f64], rect: egui::Rect) -> Vec<egui::Pos2> {
+pub fn sparkline_points(samples: &[f64], rect: egui::Rect) -> Vec<egui::Pos2> {
     let max = samples.iter().copied().fold(0.0, f64::max).max(60.0);
     samples
         .iter()
@@ -680,7 +680,7 @@ fn sparkline_points(samples: &[f64], rect: egui::Rect) -> Vec<egui::Pos2> {
 /// The direction of the video bitrate over the recent samples, a small visual cue beside
 /// the Video stat so a wobbly stream's drift is readable without reading the number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Trend {
+pub enum Trend {
     /// The bitrate is building up over the recent samples.
     Rising,
     /// The bitrate is dropping over the recent samples.
@@ -695,7 +695,7 @@ pub(crate) enum Trend {
 /// floored at 5 kbit/s) reads as rising or falling, and anything within the band — or
 /// too few samples to judge — reads as flat. Pure (samples injected) so the
 /// classification is testable without a live window.
-pub(crate) fn bitrate_trend(samples: &[f64]) -> Trend {
+pub fn bitrate_trend(samples: &[f64]) -> Trend {
     if samples.len() < 2 {
         return Trend::Flat;
     }
@@ -721,7 +721,7 @@ pub(crate) fn bitrate_trend(samples: &[f64]) -> Trend {
 /// doesn't depend on a symbol the bundled faces may not carry — the same reason the copy
 /// glyph and close button are drawn by hand. Decorative: takes a hover-sense slot, never
 /// clicked.
-fn trend_arrow(ui: &mut Ui, trend: Trend) {
+pub fn trend_arrow(ui: &mut Ui, trend: Trend) {
     let size = 9.0;
     let (rect, _resp) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
     let c = rect.center();
@@ -767,7 +767,7 @@ fn trend_arrow(ui: &mut Ui, trend: Trend) {
 /// data the panel already shows as a number, so it is non-interactive apart from a hover
 /// tooltip. `secs` drives the "now" dot's sonar pulse and is expected to advance between
 /// repaints, so the live edge reads as an active signal.
-fn bitrate_sparkline(ui: &mut Ui, samples: &[f64], secs: f32) {
+pub fn bitrate_sparkline(ui: &mut Ui, samples: &[f64], secs: f32) {
     let width = ui.available_width();
     let height = 26.0;
     if samples.len() < 2 || width <= 0.0 {
@@ -890,7 +890,7 @@ fn bitrate_sparkline(ui: &mut Ui, samples: &[f64], secs: f32) {
 /// change at the end, so a head-only truncation would look identical between refreshes
 /// even when the ticket had changed. Measured with the same monospace face the box
 /// renders with, so the estimate is exact.
-fn fit_monospace(ui: &Ui, text: &str, max_width: f32) -> String {
+pub fn fit_monospace(ui: &Ui, text: &str, max_width: f32) -> String {
     let font_id = egui::TextStyle::Monospace.resolve(ui.style());
     let full = ui
         .painter()
@@ -921,7 +921,7 @@ fn fit_monospace(ui: &Ui, text: &str, max_width: f32) -> String {
 /// `[back, front]`: two small overlapping rounded rects, the front offset up-right of
 /// the back, so the pair reads as the universal "copy" mark without relying on a font
 /// glyph the bundled faces may not carry.
-fn copy_glyph_rects(rect: egui::Rect) -> [egui::Rect; 2] {
+pub fn copy_glyph_rects(rect: egui::Rect) -> [egui::Rect; 2] {
     let size = egui::vec2(8.0, 9.0);
     let cx = rect.right() - 16.0;
     let cy = rect.center().y;
@@ -959,7 +959,7 @@ fn format_elapsed(secs: u64) -> String {
 /// on a symbol the bundled faces may not carry — the same reason the copy glyph, the
 /// close button and the trend arrow are drawn by hand. It brightens on hover so the
 /// toggle reads as a live control. Returns `true` on the frame it is clicked.
-fn eye_toggle(ui: &mut Ui, open: bool, size: egui::Vec2) -> bool {
+pub fn eye_toggle(ui: &mut Ui, open: bool, size: egui::Vec2) -> bool {
     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -984,377 +984,4 @@ fn eye_toggle(ui: &mut Ui, open: bool, size: egui::Vec2) -> bool {
             .line_segment([egui::pos2(c.x - r, c.y), egui::pos2(c.x + r, c.y)], stroke);
     }
     resp.clicked()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Empty bind fields mean ephemeral (no fixed socket, ticket changes each run).
-    #[test]
-    fn parse_bind_empty_is_ephemeral() {
-        let bind = parse_bind(&Config::default()).unwrap();
-        assert_eq!(bind, BindAddrs::default());
-    }
-
-    /// A fixed IPv4/IPv6 bind parses through and would pin the ticket's socket.
-    #[test]
-    fn parse_bind_accepts_fixed_addresses() {
-        let cfg = Config {
-            broadcast_bind_ipv4: Some(" 203.0.113.7:45678 ".into()),
-            broadcast_bind_ipv6: Some("[2001:db8::1]:45678".into()),
-            ..Config::default()
-        };
-        let bind = parse_bind(&cfg).unwrap();
-        assert_eq!(
-            bind,
-            BindAddrs {
-                ipv4: Some("203.0.113.7:45678".parse().unwrap()),
-                ipv6: Some("[2001:db8::1]:45678".parse().unwrap()),
-            }
-        );
-    }
-
-    /// A malformed bind is surfaced as an error, not silently dropped to ephemeral.
-    #[test]
-    fn parse_bind_rejects_malformed() {
-        let cfg = Config {
-            broadcast_bind_ipv4: Some("not-an-address".into()),
-            ..Config::default()
-        };
-        assert!(parse_bind(&cfg).is_err());
-    }
-
-    /// The copy glyph's two sheets sit inside the box, non-degenerate, front up-right
-    /// of the back — a misplaced glyph passes a shape-count check but not this.
-    #[test]
-    fn copy_glyph_sheets_are_in_bounds_and_offset() {
-        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 34.0));
-        let [back, front] = copy_glyph_rects(rect);
-        for sheet in [back, front] {
-            assert!(
-                sheet.width() > 0.0 && sheet.height() > 0.0,
-                "non-degenerate"
-            );
-            assert!(
-                rect.contains(sheet.min) && rect.contains(sheet.max),
-                "in bounds"
-            );
-        }
-        let front_c = front.center();
-        let back_c = back.center();
-        assert!(front_c.x > back_c.x, "front is right of back");
-        assert!(front_c.y < back_c.y, "front is above back");
-    }
-
-    /// `fit_monospace` leaves text that fits untouched, and middle-elides long values
-    /// to a width that fits — keeping head and tail so a ticket's changing transport
-    /// hints stay visible between refreshes. The full string is what gets copied.
-    #[test]
-    fn fit_monospace_elides_only_when_too_wide() {
-        let ctx = egui::Context::default();
-        let raw = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(760.0, 560.0),
-            )),
-            ..Default::default()
-        };
-        let mut out = ctx.run_ui(raw, |ui| {
-            let short = "http://127.0.0.1:8080/whip";
-            assert_eq!(
-                fit_monospace(ui, short, 400.0),
-                short,
-                "a WHIP URL that fits is unchanged"
-            );
-
-            let long = "abcdefghij".repeat(20);
-            let elided = fit_monospace(ui, &long, 200.0);
-            assert!(
-                elided.contains('…') && elided.chars().count() < long.chars().count(),
-                "a long ticket is middle-elided, got {elided:?}"
-            );
-            assert!(
-                elided.starts_with('a') && elided.ends_with('j'),
-                "both ends are kept so the changing tail stays visible, got {elided:?}"
-            );
-            let w = ui
-                .painter()
-                .layout_no_wrap(
-                    elided.clone(),
-                    egui::TextStyle::Monospace.resolve(ui.style()),
-                    egui::Color32::PLACEHOLDER,
-                )
-                .rect
-                .width();
-            assert!(w <= 200.0, "elided display width {w} must fit 200");
-        });
-        out.textures_delta.clear();
-    }
-
-    /// `sparkline_points` spans the rect edge to edge, peak above troughs, all points
-    /// inside the rect, and floors the scale at 60 kbit/s so quiet streams don't hug
-    /// the bottom edge.
-    #[test]
-    fn sparkline_points_span_the_rect_and_scale_to_the_peak() {
-        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(100.0, 26.0));
-        let samples = [60.0, 120.0, 60.0];
-        let pts = sparkline_points(&samples, rect);
-        assert_eq!(pts.len(), samples.len());
-        assert_eq!(pts[0].x, rect.left(), "oldest sample at the left edge");
-        assert_eq!(pts[2].x, rect.right(), "newest sample at the right edge");
-        assert!(
-            pts[1].y < pts[0].y,
-            "the peak sample sits above the troughs"
-        );
-        for p in &pts {
-            assert!(rect.contains(*p), "point {p:?} escapes the rect");
-        }
-
-        // A quiet stream (below the 60 kbit/s floor) stays low: its peak maps
-        // well clear of the top of the rect.
-        let quiet = sparkline_points(&[10.0, 20.0], rect);
-        assert!(
-            quiet[1].y > rect.height() * 0.5,
-            "a 20 kbit/s stream must not scale to the full height, got y={}",
-            quiet[1].y
-        );
-    }
-
-    /// The sparkline's area fill is a vertical gradient (bottom-edge vertices
-    /// transparent, line vertices carry the accent's alpha), and the newest sample
-    /// carries a small filled "now" dot.
-    #[test]
-    fn the_sparkline_fills_with_a_vertical_gradient_and_marks_the_now_point() {
-        let ctx = egui::Context::default();
-        let raw = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(300.0, 60.0),
-            )),
-            ..Default::default()
-        };
-        let mut out = ctx.run_ui(raw, |ui| {
-            bitrate_sparkline(ui, &[60.0, 120.0, 60.0], 0.0);
-        });
-        out.textures_delta.clear();
-
-        // The area fill: one mesh, bottom-edge vertices transparent, line vertices
-        // more opaque the higher they sit.
-        let mesh = out
-            .shapes
-            .iter()
-            .find_map(|s| match &s.shape {
-                egui::epaint::Shape::Mesh(m) => Some(m.as_ref()),
-                _ => None,
-            })
-            .expect("the sparkline paints its area mesh");
-        let bottom = &mesh.vertices[0];
-        assert_eq!(
-            bottom.color.a(),
-            0,
-            "the fill fades to nothing at the bottom edge"
-        );
-        let line_vertex = &mesh.vertices[2];
-        assert!(
-            line_vertex.color.a() > bottom.color.a(),
-            "the fill must be strongest near the line, got a={}",
-            line_vertex.color.a()
-        );
-        assert!(
-            line_vertex.color.a() < 255,
-            "the fill stays a soft tint, not an opaque block"
-        );
-
-        // The "now" dot: a small filled circle (a stroked ring would have a width).
-        let dot = out.shapes.iter().any(|s| {
-            matches!(&s.shape,
-                egui::epaint::Shape::Circle(c)
-                    if c.stroke.width == 0.0 && (2.0..3.0).contains(&c.radius) && c.fill.a() > 0
-            )
-        });
-        assert!(dot, "the newest sample should carry a filled 'now' dot");
-    }
-
-    /// The "now" dot carries a soft sonar pulse (a stroked ring in the accent, same
-    /// language as the status/viewers dots), distinct from the filled dot (width 0);
-    /// it expands and fades over the pulse.
-    #[test]
-    fn the_sparkline_now_dot_carries_a_sonar_pulse() {
-        let raw = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(300.0, 60.0),
-            )),
-            ..Default::default()
-        };
-        // The sonar ring at a given time: a stroked circle (width > 0).
-        let ring = |secs: f32| -> Option<f32> {
-            let ctx = egui::Context::default();
-            let mut out = ctx.run_ui(raw.clone(), |ui| {
-                bitrate_sparkline(ui, &[60.0, 120.0, 60.0], secs);
-            });
-            out.textures_delta.clear();
-            out.shapes
-                .iter()
-                .filter_map(|s| match &s.shape {
-                    egui::epaint::Shape::Circle(c) if c.stroke.width > 0.0 => Some(c.radius),
-                    _ => None,
-                })
-                .next()
-        };
-        // Mid-pulse: a ring is painted, and it expands over the pulse.
-        let early = ring(0.2).expect("an early-pulse frame paints a ring");
-        let late = ring(1.0).expect("a late-pulse frame paints a ring");
-        assert!(
-            late > early,
-            "the ring should expand over the pulse ({} -> {})",
-            early,
-            late
-        );
-        // Near the end of the pulse the ring has faded out: nothing is painted.
-        assert!(ring(1.99).is_none(), "a nearly-faded ring paints nothing");
-    }
-
-    /// `bitrate_trend` classifies direction: clear rise → Rising, clear drop →
-    /// Falling, within the noise band (or too few samples) → Flat; a two-sample rise
-    /// compares against the first.
-    #[test]
-    fn bitrate_trend_classifies_rising_falling_and_flat() {
-        assert_eq!(bitrate_trend(&[100.0, 100.0, 100.0, 200.0]), Trend::Rising);
-        assert_eq!(bitrate_trend(&[200.0, 200.0, 200.0, 100.0]), Trend::Falling);
-        // A 2 kbit/s wobble on a 100 kbit/s stream is within the band: flat.
-        assert_eq!(bitrate_trend(&[100.0, 100.0, 100.0, 102.0]), Trend::Flat);
-        // Too few samples to judge: flat.
-        assert_eq!(bitrate_trend(&[]), Trend::Flat);
-        assert_eq!(bitrate_trend(&[100.0]), Trend::Flat);
-        // A two-sample rise still compares against the first sample.
-        assert_eq!(bitrate_trend(&[100.0, 200.0]), Trend::Rising);
-    }
-
-    /// `trend_arrow` paints a triangle mesh for rising/falling and a plain dash
-    /// (line segment, no mesh) for flat, so the three states read as distinct marks.
-    #[test]
-    fn the_trend_arrow_paints_a_triangle_or_a_dash() {
-        let raw = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(100.0, 100.0),
-            )),
-            ..Default::default()
-        };
-        let has_mesh = |trend: Trend| {
-            let ctx = egui::Context::default();
-            let mut out = ctx.run_ui(raw.clone(), |ui| trend_arrow(ui, trend));
-            out.textures_delta.clear();
-            out.shapes
-                .iter()
-                .any(|s| matches!(&s.shape, egui::epaint::Shape::Mesh(_)))
-        };
-        assert!(
-            has_mesh(Trend::Rising),
-            "a rising trend paints a triangle mesh"
-        );
-        assert!(
-            has_mesh(Trend::Falling),
-            "a falling trend paints a triangle mesh"
-        );
-        // Flat: a dash (a line segment), and no triangle mesh.
-        let ctx = egui::Context::default();
-        let mut out = ctx.run_ui(raw, |ui| trend_arrow(ui, Trend::Flat));
-        out.textures_delta.clear();
-        assert!(
-            out.shapes
-                .iter()
-                .any(|s| matches!(&s.shape, egui::epaint::Shape::LineSegment { .. })),
-            "a flat trend paints a dash"
-        );
-        assert!(
-            !out.shapes
-                .iter()
-                .any(|s| matches!(&s.shape, egui::epaint::Shape::Mesh(_))),
-            "a flat trend paints no triangle"
-        );
-    }
-
-    /// The sparkline paints a dashed horizontal average line (short same-y segments in
-    /// muted green-grey), distinct from the accent data line, so normal level is
-    /// visible against current value and peak.
-    #[test]
-    fn the_sparkline_paints_a_dashed_average_reference_line() {
-        let ctx = egui::Context::default();
-        let raw = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(300.0, 60.0),
-            )),
-            ..Default::default()
-        };
-        let mut out = ctx.run_ui(raw, |ui| {
-            bitrate_sparkline(ui, &[60.0, 120.0, 60.0], 0.0);
-        });
-        out.textures_delta.clear();
-        let avg_color = egui::Color32::from_rgb(120, 150, 135);
-        let avg_segs = out
-            .shapes
-            .iter()
-            .filter(|s| {
-                matches!(&s.shape,
-                    egui::epaint::Shape::LineSegment { points, stroke }
-                        if (points[0].y - points[1].y).abs() < 0.01
-                            && stroke.color == avg_color
-                )
-            })
-            .count();
-        assert!(
-            avg_segs >= 2,
-            "the sparkline should paint a dashed average line (got {avg_segs} segments)"
-        );
-    }
-
-    /// The eye toggle paints an eyeball circle always, plus a filled pupil when open
-    /// and a lid line when closed, so the two states read as distinct.
-    #[test]
-    fn the_eye_toggle_paints_an_open_or_closed_eye() {
-        let ctx = egui::Context::default();
-        let raw = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(40.0, 40.0),
-            )),
-            ..Default::default()
-        };
-        let open: Vec<_> = {
-            let mut out = ctx.run_ui(raw.clone(), |ui| {
-                eye_toggle(ui, true, egui::vec2(34.0, 34.0));
-            });
-            out.textures_delta.clear();
-            out.shapes
-        };
-        let closed: Vec<_> = {
-            let mut out = ctx.run_ui(raw, |ui| {
-                eye_toggle(ui, false, egui::vec2(34.0, 34.0));
-            });
-            out.textures_delta.clear();
-            out.shapes
-        };
-        // Open: an eye circle stroke + a filled pupil (a circle with fill, no stroke).
-        let open_has_pupil = open.iter().any(|s| match &s.shape {
-            egui::epaint::Shape::Circle(c) => c.stroke.is_empty() && c.fill.a() > 0,
-            _ => false,
-        });
-        assert!(open_has_pupil, "an open eye paints a filled pupil");
-        // Closed: an eye circle stroke + a horizontal lid line, and no filled pupil.
-        let closed_has_lid = closed.iter().any(|s| {
-            matches!(&s.shape,
-                egui::epaint::Shape::LineSegment { points, .. }
-                    if (points[0].y - points[1].y).abs() < 0.01)
-        });
-        let closed_has_pupil = closed.iter().any(|s| match &s.shape {
-            egui::epaint::Shape::Circle(c) => c.stroke.is_empty(),
-            _ => false,
-        });
-        assert!(closed_has_lid, "a closed eye paints a lid line");
-        assert!(!closed_has_pupil, "a closed eye paints no pupil");
-    }
 }

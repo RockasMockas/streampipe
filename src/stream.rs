@@ -84,13 +84,13 @@ const WAN_RTT: Duration = Duration::from_millis(50);
 /// How often a viewer reports that it is waiting for media.
 const WAIT_INTERVAL: Duration = Duration::from_secs(5);
 /// How often periodic counters are logged while a tunnel runs.
-const STATS_INTERVAL: Duration = Duration::from_secs(5);
+pub const STATS_INTERVAL: Duration = Duration::from_secs(5);
 /// How long a viewer waits before redialing a host that went away.
 const RECONNECT_DELAY: Duration = Duration::from_secs(2);
 /// Capacity of the per-viewer media queue.
 const VIEWER_QUEUE: usize = 8192;
 /// Size of the buffer used to read from the ICE UDP socket.
-const ICE_BUF: usize = 2048;
+pub const ICE_BUF: usize = 2048;
 /// How far below the level in the GUI ffplay is started, in percentage points.
 ///
 /// ffplay's `-volume` scale falls away much more slowly than mpv's `--volume` or
@@ -275,25 +275,25 @@ impl Player {
 
 /// Counters for a running media tunnel, used for logging.
 #[derive(Debug, Default)]
-struct Counters {
+pub struct Counters {
     /// RTP packets forwarded to viewers.
-    forwarded: AtomicU64,
+    pub forwarded: AtomicU64,
     /// Bytes of those packets.
-    forwarded_bytes: AtomicU64,
+    pub forwarded_bytes: AtomicU64,
     /// Packets dropped because they were too large for a QUIC datagram.
-    dropped: AtomicU64,
+    pub dropped: AtomicU64,
     /// Packets dropped because they were not a negotiated media payload type.
-    unwanted: AtomicU64,
+    pub unwanted: AtomicU64,
     /// Packets that could not be delivered.
-    undeliverable: AtomicU64,
+    pub undeliverable: AtomicU64,
     /// Fragment datagrams sent for packets too large for one datagram.
-    fragmented: AtomicU64,
+    pub fragmented: AtomicU64,
     /// Keyframe requests.
-    keyframes: AtomicU64,
+    pub keyframes: AtomicU64,
 }
 
 impl Counters {
-    fn get(&self, counter: &AtomicU64) -> u64 {
+    pub fn get(&self, counter: &AtomicU64) -> u64 {
         counter.load(Ordering::Relaxed)
     }
 
@@ -347,25 +347,25 @@ impl Counters {
 /// interval is reported, so the numbers in the line are the numbers of the
 /// last five seconds rather than of the whole session.
 #[derive(Debug)]
-struct MediaTally {
+pub struct MediaTally {
     /// When the current interval started.
-    since: Instant,
+    pub since: Instant,
     /// RTP packets seen in this interval.
-    packets: u64,
+    pub packets: u64,
     /// Bytes of those packets, RTP header included.
-    bytes: u64,
+    pub bytes: u64,
     /// Frames completed in this interval, counted on the RTP marker bit.
-    frames: u64,
+    pub frames: u64,
     /// Keyframes seen in this interval.
-    keyframes: u64,
+    pub keyframes: u64,
     /// Keyframes seen since the session started.
-    keyframes_total: u64,
+    pub keyframes_total: u64,
     /// When the last keyframe arrived, to report the keyframe interval.
-    last_keyframe: Option<Instant>,
+    pub last_keyframe: Option<Instant>,
 }
 
 impl MediaTally {
-    fn new(now: Instant) -> Self {
+    pub fn new(now: Instant) -> Self {
         MediaTally {
             since: now,
             packets: 0,
@@ -378,12 +378,12 @@ impl MediaTally {
     }
 
     /// Whether any media arrived in this interval.
-    fn active(&self) -> bool {
+    pub fn active(&self) -> bool {
         self.packets > 0
     }
 
     /// The average bitrate of this interval in kbit/s.
-    fn kbit_per_second(&self, now: Instant) -> f64 {
+    pub fn kbit_per_second(&self, now: Instant) -> f64 {
         let secs = now.duration_since(self.since).as_secs_f64();
         if secs <= 0.0 {
             return 0.0;
@@ -392,7 +392,7 @@ impl MediaTally {
     }
 
     /// Start a new interval.
-    fn restart(&mut self, now: Instant) {
+    pub fn restart(&mut self, now: Instant) {
         self.since = now;
         self.packets = 0;
         self.bytes = 0;
@@ -406,17 +406,17 @@ impl MediaTally {
 /// Reported every [`STATS_INTERVAL`] by [`Host::report_media`] and again when
 /// the input closes.
 #[derive(Debug)]
-struct StreamReport {
+pub struct StreamReport {
     /// When the first media packet of this session arrived.
-    started: Option<Instant>,
+    pub started: Option<Instant>,
     /// The video tally.
-    video: MediaTally,
+    pub video: MediaTally,
     /// The audio tally.
-    audio: MediaTally,
+    pub audio: MediaTally,
 }
 
 impl StreamReport {
-    fn new(now: Instant) -> Self {
+    pub fn new(now: Instant) -> Self {
         StreamReport {
             started: None,
             video: MediaTally::new(now),
@@ -425,7 +425,14 @@ impl StreamReport {
     }
 
     /// Account for one RTP packet.
-    fn record(&mut self, kind: MediaKind, now: Instant, marker: bool, keyframe: bool, bytes: u64) {
+    pub fn record(
+        &mut self,
+        kind: MediaKind,
+        now: Instant,
+        marker: bool,
+        keyframe: bool,
+        bytes: u64,
+    ) {
         self.started.get_or_insert(now);
         let tally = match kind {
             MediaKind::Video => &mut self.video,
@@ -453,7 +460,7 @@ impl StreamReport {
     /// `gui_mode` sends the line through `tracing` (whose writer is the
     /// non-blocking tee) instead of blocking a media worker on synchronous
     /// `stderr`. The CLI keeps `eprintln!`.
-    fn log(&mut self, now: Instant, viewers: usize, gui_mode: bool) {
+    pub fn log(&mut self, now: Instant, viewers: usize, gui_mode: bool) {
         let Some(started) = self.started else {
             return;
         };
@@ -540,7 +547,7 @@ impl StreamReport {
 }
 
 /// Format a duration as `42s`, `7m13s` or `1h02m03s`.
-fn human_duration(d: Duration) -> String {
+pub fn human_duration(d: Duration) -> String {
     let secs = d.as_secs();
     match (secs / 3600, (secs % 3600) / 60, secs % 60) {
         (0, 0, s) => format!("{s}s"),
@@ -574,7 +581,7 @@ fn kind_of(kind: Str0mMediaKind) -> MediaKind {
 
 /// A message from the media session to exactly one viewer.
 #[derive(Debug)]
-enum Frame {
+pub enum Frame {
     /// The session header, so the viewer can (re)write its SDP.
     Header(Bytes),
     /// The next media packet is the start of a keyframe.
@@ -587,7 +594,7 @@ enum Frame {
 
 /// What the viewer acceptor tells the media session.
 #[derive(Debug)]
-enum ViewerEvent {
+pub enum ViewerEvent {
     /// A viewer dialed in and announced its local RTP port.
     Joined {
         /// Identifier of this viewer.
@@ -963,63 +970,63 @@ async fn read_announcement(recv: &mut RecvStream) -> Result<u16> {
 }
 
 /// One connected viewer.
-struct Viewer {
+pub struct Viewer {
     /// Identifier of the viewer.
-    id: u64,
+    pub id: u64,
     /// Where to send the media of this viewer.
-    tx: mpsc::Sender<Frame>,
+    pub tx: mpsc::Sender<Frame>,
     /// Whether the keyframe gate of this viewer is open.
-    streaming: bool,
+    pub streaming: bool,
 }
 
 /// The host side of the media session.
 ///
 /// One task owns the [`Rtc`] and everything it mutates, as required by str0m's
 /// single mutation invariant: one input, then drain the output, then wait.
-struct Host {
+pub struct Host {
     /// The WebRTC session, renegotiated by every WHIP offer.
-    rtc: Rtc,
+    pub rtc: Rtc,
     /// The ICE socket.
-    ice: Arc<UdpSocket>,
+    pub ice: Arc<UdpSocket>,
     /// The address of the ICE socket, advertised as our ICE candidate.
-    ice_addr: SocketAddr,
+    pub ice_addr: SocketAddr,
     /// The media the publisher offered.
-    offer: Vec<OfferMedia>,
+    pub offer: Vec<OfferMedia>,
     /// What the viewers are told about the stream.
-    header: SessionHeader,
+    pub header: SessionHeader,
     /// The last session header bytes sent to a viewer.
-    last_header: Vec<u8>,
+    pub last_header: Vec<u8>,
     /// The H.264 parameter sets seen in band.
-    sets: ParameterSets,
+    pub sets: ParameterSets,
     /// The connected viewers.
-    viewers: Vec<Viewer>,
+    pub viewers: Vec<Viewer>,
     /// Counter for the entity tags of the resources.
-    etag_seq: u64,
+    pub etag_seq: u64,
     /// The mids of the live media.
-    mids: Vec<(Mid, MediaKind)>,
+    pub mids: Vec<(Mid, MediaKind)>,
     /// Counters for logging.
-    counters: Arc<Counters>,
+    pub counters: Arc<Counters>,
     /// Rolling media statistics for the periodic report.
-    report: StreamReport,
+    pub report: StreamReport,
     /// The media kinds we have seen a packet of, to log the milestone once.
-    seen: Vec<MediaKind>,
+    pub seen: Vec<MediaKind>,
     /// Whether to log periodic counters.
-    stats: bool,
+    pub stats: bool,
     /// When the host session started, for the elapsed time in the stats panel.
-    started_at: Instant,
+    pub started_at: Instant,
     /// The last non-zero video bitrate, reused on viewer join/leave so the GUI
     /// bitrate does not flicker to zero between periodic ticks.
-    last_video_kbps: f64,
+    pub last_video_kbps: f64,
     /// The last non-zero audio bitrate, reused on viewer join/leave.
-    last_audio_kbps: f64,
+    pub last_audio_kbps: f64,
     /// The last non-zero video fps, reused on viewer join/leave.
-    last_video_fps: f64,
+    pub last_video_fps: f64,
     /// Optional channel for structured live statistics (used by the GUI).
-    stats_tx: Option<mpsc::UnboundedSender<StreamStats>>,
+    pub stats_tx: Option<mpsc::UnboundedSender<StreamStats>>,
 }
 
 impl Host {
-    fn new(
+    pub fn new(
         ice: Arc<UdpSocket>,
         ice_addr: SocketAddr,
         stats: bool,
@@ -1083,7 +1090,7 @@ impl Host {
     /// Session events are logged through `tracing` when a stats channel is wired
     /// up (GUI) and through `eprintln!` in the CLI, so a media worker never
     /// blocks on terminal I/O where the GUI has a tee behind it.
-    fn on_viewer_event(&mut self, event: ViewerEvent) {
+    pub fn on_viewer_event(&mut self, event: ViewerEvent) {
         // The GUI has a tee writer that hands the line to a background thread;
         // the CLI writes straight to stderr.
         let gui_mode = self.stats_tx.is_some();
@@ -1146,7 +1153,7 @@ impl Host {
     /// Every offer starts a fresh session: a `POST` is a new resource and a
     /// `PUT` replaces the existing one, so the old ICE/DTLS state is dropped
     /// and the viewers are re-gated to wait for the next keyframe.
-    fn negotiate(&mut self, offer: &str, via_put: bool) -> std::result::Result<Answer, String> {
+    pub fn negotiate(&mut self, offer: &str, via_put: bool) -> std::result::Result<Answer, String> {
         let parsed = sdp::parse_offer(offer);
         if parsed.iter().all(|m| m.payloads.is_empty()) {
             return Err("the offer contains no audio or video media".to_string());
@@ -1227,7 +1234,7 @@ impl Host {
     }
 
     /// The kind and codec of a payload type the publisher offered.
-    fn payload_of(&self, pt: u8) -> Option<(MediaKind, &sdp::Payload)> {
+    pub fn payload_of(&self, pt: u8) -> Option<(MediaKind, &sdp::Payload)> {
         for media in &self.offer {
             for payload in &media.payloads {
                 if payload.pt == pt {
@@ -1271,7 +1278,7 @@ impl Host {
     }
 
     /// Forward one RTP packet to the viewers whose gate is open.
-    fn handle_media(&mut self, info: RtpInfo, payload: &[u8]) {
+    pub fn handle_media(&mut self, info: RtpInfo, payload: &[u8]) {
         let pt = info.pt;
         let Some((kind, announced)) = self.payload_of(pt) else {
             // rtx, red, or a payload type that was never negotiated.
@@ -1383,7 +1390,7 @@ impl Host {
     /// staring at a black player wants confirmed.
     ///
     /// Routed through `tracing` in GUI mode, `eprintln!` in the CLI.
-    fn log_streaming(&mut self, kind: MediaKind, params: &sdp::Payload, keyframe: bool) {
+    pub fn log_streaming(&mut self, kind: MediaKind, params: &sdp::Payload, keyframe: bool) {
         if self.seen.contains(&kind) {
             return;
         }
@@ -1422,7 +1429,7 @@ impl Host {
     }
 
     /// Print the periodic media report of the last interval.
-    fn report_media(&mut self) {
+    pub fn report_media(&mut self) {
         let now = Instant::now();
         // Compute the rates of the interval that `log` is about to report and
         // reset, before the tallies are cleared. Silence reports as zero.
@@ -1507,7 +1514,7 @@ impl Host {
     }
 
     /// Feed one datagram from the publisher into the WebRTC session.
-    fn on_ice(&mut self, buf: &[u8], source: SocketAddr) {
+    pub fn on_ice(&mut self, buf: &[u8], source: SocketAddr) {
         let Ok(receive) = Receive::new(Protocol::Udp, source, self.ice_addr, buf) else {
             tracing::trace!("ignoring {source} data that is not webrtc");
             return;
@@ -1521,7 +1528,7 @@ impl Host {
     }
 
     /// Drive the WebRTC session clock.
-    fn on_timeout(&mut self) {
+    pub fn on_timeout(&mut self) {
         if let Err(e) = self.rtc.handle_input(Input::Timeout(Instant::now())) {
             tracing::debug!("webrtc timeout error: {e}");
         }
@@ -1531,7 +1538,7 @@ impl Host {
     ///
     /// The connected line goes through `tracing` in GUI mode (see
     /// [`Self::log_streaming`]) and straight to stderr in the CLI.
-    fn on_event(&mut self, event: Event) {
+    pub fn on_event(&mut self, event: Event) {
         match event {
             Event::Connected => {
                 let line = "whip publisher connected, ICE and DTLS up, waiting for media";
@@ -1701,7 +1708,7 @@ async fn drain(host: &mut Host) -> Result<Instant> {
 }
 
 /// Parse one `a=candidate:` line of a trickle ICE fragment.
-fn parse_candidate(rest: &str) -> Option<Candidate> {
+pub fn parse_candidate(rest: &str) -> Option<Candidate> {
     // `<foundation> <component> <transport> <priority> <ip> <port> typ <type> ...`
     let fields: Vec<&str> = rest.split_whitespace().collect();
     if fields.len() < 7 {
@@ -2148,7 +2155,7 @@ fn media_signature(header: &SessionHeader) -> String {
 /// round-trip times, clamped to 150-500 ms. That is the reorder window the
 /// player waits for late packets; without it a path that jitters more than a
 /// few milliseconds drops intact packets and shows corrupt pictures.
-fn auto_buffer(configured: Option<Duration>, rtt: Option<Duration>) -> Option<Duration> {
+pub fn auto_buffer(configured: Option<Duration>, rtt: Option<Duration>) -> Option<Duration> {
     configured.or_else(|| {
         rtt.filter(|r| *r >= WAN_RTT)
             .map(|r| (r * 4).clamp(Duration::from_millis(150), Duration::from_millis(500)))
@@ -2161,7 +2168,7 @@ fn auto_buffer(configured: Option<Duration>, rtt: Option<Duration>) -> Option<Du
 /// usable path, `here` drops the file in the current folder so the user can
 /// open it by hand (`--player none`, or a bare `--sdp`); otherwise it goes to
 /// the system temp dir to keep the folder clean.
-fn sdp_path(
+pub fn sdp_path(
     explicit: Option<std::path::PathBuf>,
     here: bool,
     video_port: u16,
@@ -2278,7 +2285,7 @@ async fn launch(
 ///
 /// Until then there is nobody to receive the forwarded packets, and starting a
 /// player takes longer than the keyframe we would send it.
-async fn wait_until_listening(port: u16) {
+pub async fn wait_until_listening(port: u16) {
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     let started = Instant::now();
     while started.elapsed() < PLAYER_READY_TIMEOUT {
@@ -2313,7 +2320,7 @@ async fn wait_until_listening(port: u16) {
 // Pre-existing: this forwarder threads a handful of per-viewer state pointers
 // through the hot path; left as-is to avoid churn in the media forwarding code.
 #[allow(clippy::too_many_arguments)]
-async fn forward(
+pub async fn forward(
     socket: &Arc<UdpSocket>,
     packet: &[u8],
     port: u16,
@@ -2373,885 +2380,4 @@ async fn write_handshake(send: &mut SendStream) -> Result<()> {
     send.write_all(&crate::HANDSHAKE).await.anyerr()?;
     tracing::debug!("handshake sent");
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::sdp::render_player_sdp;
-
-    fn offer() -> String {
-        let fingerprint = "00:01:02:03:04:05:06:07:08:09:0A:0B:0C:0D:0E:0F:10:11:12:13:14:15:16:17:18:19:1A:1B:1C:1D:1E:1F";
-        format!(
-            "v=0\r\n\
-             o=- 4611731400498476682 2 IN IP4 127.0.0.1\r\n\
-             s=-\r\n\
-             t=0 0\r\n\
-             a=group:BUNDLE 0 1\r\n\
-             m=video 9 UDP/TLS/RTP/SAVPF 96 97\r\n\
-             c=IN IP4 0.0.0.0\r\n\
-             a=rtcp-mux\r\n\
-             a=ice-ufrag:aBcD\r\n\
-             a=ice-pwd:012345678901234567890123456789\r\n\
-             a=fingerprint:sha-256 {fingerprint}\r\n\
-             a=setup:actpass\r\n\
-             a=mid:0\r\n\
-             a=sendonly\r\n\
-             a=rtpmap:96 H264/90000\r\n\
-             a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f\r\n\
-             a=rtpmap:97 rtx/90000\r\n\
-             a=fmtp:97 apt=96\r\n\
-             m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
-             c=IN IP4 0.0.0.0\r\n\
-             a=rtcp-mux\r\n\
-             a=ice-ufrag:aBcD\r\n\
-             a=ice-pwd:012345678901234567890123456789\r\n\
-             a=fingerprint:sha-256 {fingerprint}\r\n\
-             a=setup:actpass\r\n\
-             a=mid:1\r\n\
-             a=sendonly\r\n\
-             a=rtpmap:111 opus/48000/2\r\n\
-             a=fmtp:111 minptime=10;useinbandfec=1\r\n"
-        )
-    }
-
-    fn nal(ty: u8, body: &[u8]) -> Vec<u8> {
-        let mut buf = vec![0x60 | ty];
-        buf.extend_from_slice(body);
-        buf
-    }
-
-    fn stap(nals: &[&[u8]]) -> Vec<u8> {
-        let mut buf = vec![24];
-        for nal in nals {
-            buf.extend_from_slice(&(nal.len() as u16).to_be_bytes());
-            buf.extend_from_slice(nal);
-        }
-        buf
-    }
-
-    fn info(pt: u8, seq: u16) -> RtpInfo {
-        RtpInfo {
-            marker: false,
-            pt,
-            seq,
-            timestamp: 90_000,
-            ssrc: 7,
-        }
-    }
-
-    fn keyframe() -> Vec<u8> {
-        let sps = nal(7, b"sps");
-        let pps = nal(8, b"pps");
-        stap(&[&sps, &pps, &nal(5, b"idr")])
-    }
-
-    async fn host() -> Host {
-        let ice = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
-        let ice_addr = ice.local_addr().unwrap();
-        Host::new(ice, ice_addr, false, None)
-    }
-
-    fn viewer(host: &mut Host) -> mpsc::Receiver<Frame> {
-        let (tx, rx) = mpsc::channel(16);
-        host.on_viewer_event(ViewerEvent::Joined {
-            id: 1,
-            port: 5004,
-            tx,
-        });
-        rx
-    }
-
-    fn text(frame: Frame) -> String {
-        match frame {
-            Frame::Header(b) => String::from_utf8(b.to_vec()).expect("utf8 header"),
-            other => panic!("expected a header, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn whip_offer_is_answered() {
-        let mut host = host().await;
-        let answer = host.negotiate(&offer(), false).expect("an answer");
-        assert!(answer.sdp.contains("m=video"), "{}", answer.sdp);
-        assert!(answer.sdp.contains("a=recvonly"), "{}", answer.sdp);
-        assert!(!answer.etag.is_empty());
-        assert_eq!(host.offer.len(), 2);
-        assert_eq!(host.payload_of(96).unwrap().0, MediaKind::Video);
-        assert_eq!(host.payload_of(96).unwrap().1.codec, "H264");
-        assert!(host.payload_of(97).is_none(), "rtx is never forwarded");
-    }
-
-    #[tokio::test]
-    async fn bad_offer_is_rejected() {
-        let mut host = host().await;
-        let err = host.negotiate("v=0\r\n", false).unwrap_err();
-        assert!(!err.is_empty());
-        assert!(host.offer.is_empty());
-    }
-
-    #[tokio::test]
-    async fn mid_gop_join_starts_at_a_keyframe() {
-        let mut host = host().await;
-        host.negotiate(&offer(), false).expect("an answer");
-        let mut rx = viewer(&mut host);
-
-        let header = text(rx.try_recv().expect("a header"));
-        assert!(header.contains("gen="), "{header}");
-
-        host.handle_media(info(96, 10), &nal(1, b"inter"));
-        host.handle_media(info(96, 11), &nal(1, b"inter"));
-        assert!(rx.try_recv().is_err(), "media must wait for a keyframe");
-
-        let kf = keyframe();
-        host.handle_media(info(96, 12), &kf);
-        let header = text(rx.recv().await.expect("a header"));
-        assert!(header.contains("pt=96"), "{header}");
-        assert!(header.contains("media video"), "{header}");
-        assert!(matches!(rx.recv().await, Some(Frame::Epoch)));
-        assert!(matches!(rx.recv().await, Some(Frame::Video(_))));
-
-        let sdp = render_player_sdp(&host.header, 5004, 5006);
-        assert!(
-            sdp.contains("sprop-parameter-sets="),
-            "a mid-gop join needs the parameter sets: {sdp}"
-        );
-
-        host.handle_media(info(96, 13), &nal(1, b"inter"));
-        assert!(matches!(rx.try_recv(), Ok(Frame::Video(_))));
-    }
-
-    #[tokio::test]
-    async fn keyframe_request_keeps_the_stream_flowing() {
-        // Once a viewer is streaming it has its SDP and parameter sets, so a
-        // keyframe request (a gap on a lossy path) must NOT blackout the stream:
-        // the gate stays open, inter frames keep flowing, and every keyframe is
-        // epoch-tagged so the viewer can pace its requests.
-        let mut host = host().await;
-        host.negotiate(&offer(), false).expect("an answer");
-        let mut rx = viewer(&mut host);
-        rx.try_recv().expect("a header");
-
-        host.handle_media(info(96, 1), &keyframe());
-        assert!(matches!(rx.try_recv(), Ok(Frame::Header(_))));
-        assert!(matches!(rx.try_recv(), Ok(Frame::Epoch)));
-        assert!(matches!(rx.try_recv(), Ok(Frame::Video(_))));
-
-        // A gap nudges the encoder, but the gate stays open: the next inter
-        // frame is still forwarded, no blackout until the next IDR.
-        host.on_viewer_event(ViewerEvent::Keyframe { id: 1 });
-        host.handle_media(info(96, 2), &nal(1, b"inter"));
-        assert!(
-            matches!(rx.try_recv(), Ok(Frame::Video(_))),
-            "the gate stays open after a keyframe request"
-        );
-
-        // The next keyframe is epoch-tagged (no header, the viewer has it) so
-        // the viewer resets its sequence baseline there.
-        host.handle_media(info(96, 3), &keyframe());
-        assert!(matches!(rx.try_recv(), Ok(Frame::Epoch)));
-        assert!(matches!(rx.try_recv(), Ok(Frame::Video(_))));
-    }
-
-    #[tokio::test]
-    async fn audio_and_video_are_tagged_apart() {
-        let mut host = host().await;
-        host.negotiate(&offer(), false).expect("an answer");
-        let mut rx = viewer(&mut host);
-        rx.try_recv().expect("a header");
-
-        host.handle_media(info(96, 1), &keyframe());
-        assert!(matches!(rx.try_recv(), Ok(Frame::Header(_))));
-        assert!(matches!(rx.try_recv(), Ok(Frame::Epoch)));
-        assert!(matches!(rx.try_recv(), Ok(Frame::Video(_))));
-
-        host.handle_media(info(111, 1), b"opus-frame");
-        assert!(matches!(rx.try_recv(), Ok(Frame::Audio(_))));
-
-        host.handle_media(info(97, 2), b"rtx");
-        assert!(rx.try_recv().is_err());
-        assert_eq!(host.counters.get(&host.counters.unwanted), 1);
-    }
-
-    #[tokio::test]
-    async fn viewers_leave_and_rejoin() {
-        let mut host = host().await;
-        host.negotiate(&offer(), false).expect("an answer");
-        let rx = viewer(&mut host);
-        assert_eq!(host.viewers.len(), 1);
-
-        host.handle_media(info(96, 1), &keyframe());
-        host.on_viewer_event(ViewerEvent::Left { id: 1 });
-        assert!(host.viewers.is_empty());
-
-        host.handle_media(info(96, 2), &nal(1, b"inter"));
-        assert_eq!(host.counters.get(&host.counters.undeliverable), 1);
-        drop(rx);
-
-        let mut rx = viewer(&mut host);
-        rx.try_recv().expect("a header");
-        host.handle_media(info(96, 3), &nal(1, b"inter"));
-        assert!(rx.try_recv().is_err());
-        host.handle_media(info(96, 4), &keyframe());
-        assert!(matches!(rx.try_recv(), Ok(Frame::Header(_))));
-    }
-
-    #[test]
-    fn auto_buffer_follows_the_path_rtt() {
-        // An explicit buffer always wins, whatever the path says.
-        let explicit = Duration::from_millis(800);
-        assert_eq!(
-            auto_buffer(Some(explicit), Some(Duration::from_secs(1))),
-            Some(explicit)
-        );
-        assert_eq!(auto_buffer(Some(explicit), None), Some(explicit));
-        // A local path stays at the lowest latency.
-        assert_eq!(auto_buffer(None, None), None);
-        assert_eq!(auto_buffer(None, Some(Duration::from_millis(2))), None);
-        assert_eq!(auto_buffer(None, Some(Duration::from_millis(49))), None);
-        // A long-distance path gets four round-trips, clamped to 150-500 ms.
-        assert_eq!(
-            auto_buffer(None, Some(Duration::from_millis(50))),
-            Some(Duration::from_millis(200))
-        );
-        assert_eq!(
-            auto_buffer(None, Some(Duration::from_millis(80))),
-            Some(Duration::from_millis(320))
-        );
-        assert_eq!(
-            auto_buffer(None, Some(Duration::from_millis(120))),
-            Some(Duration::from_millis(480))
-        );
-        assert_eq!(
-            auto_buffer(None, Some(Duration::from_millis(300))),
-            Some(Duration::from_millis(500))
-        );
-    }
-
-    #[test]
-    fn play_ports_are_even_pairs() {
-        let ports = PlayPorts::new("127.0.0.1:5004".parse().unwrap());
-        assert_eq!((ports.video, ports.audio), (5004, 5006));
-
-        let ports = PlayPorts::new("127.0.0.1:5005".parse().unwrap());
-        assert_eq!((ports.video, ports.audio), (5006, 5008));
-    }
-
-    #[test]
-    fn player_commands_are_low_latency() {
-        let path = Path::new("/tmp/x.sdp");
-        let mpv = Player::Mpv.command(path, None, None, 100, None);
-        assert_eq!(mpv[0], "mpv");
-        assert!(mpv.contains(&"--no-config".to_string()));
-        assert!(mpv.contains(&"--force-window=immediate".to_string()));
-        // `--untimed` plays as fast as it can decode, which drains the cache to
-        // nothing and makes the `speed` control script inert: never pass it.
-        assert!(!mpv.contains(&"--untimed".to_string()));
-        assert!(mpv.contains(&"--profile=low-latency".to_string()));
-        assert!(mpv.contains(&"--audio-buffer=0.5".to_string()), "{mpv:?}");
-        let profile_i = mpv
-            .iter()
-            .position(|a| a == "--profile=low-latency")
-            .unwrap();
-        let abuf_i = mpv.iter().position(|a| a == "--audio-buffer=0.5").unwrap();
-        assert!(abuf_i > profile_i, "audio-buffer must override the profile");
-        assert!(mpv.contains(&"--no-resume-playback".to_string()));
-        assert_eq!(mpv.last().unwrap(), "/tmp/x.sdp");
-
-        // A staged control script is forwarded to mpv, and the SDP stays last so
-        // mpv still gets exactly one input.
-        let mpv = Player::Mpv.command(path, None, None, 100, Some(Path::new("/tmp/bs.lua")));
-        assert!(mpv.contains(&"--script=/tmp/bs.lua".to_string()), "{mpv:?}");
-        assert_eq!(mpv.last().unwrap(), "/tmp/x.sdp");
-
-        assert!(Player::Vlc
-            .command(path, None, None, 100, None)
-            .contains(&"--network-caching=100".to_string()));
-        assert!(Player::Ffplay
-            .command(path, None, None, 100, None)
-            .contains(&"nobuffer".to_string()));
-        // Only mpv runs Lua: the others are never handed a script.
-        for cmd in [
-            Player::Vlc.command(path, None, None, 100, Some(Path::new("/tmp/bs.lua"))),
-            Player::Ffplay.command(path, None, None, 100, Some(Path::new("/tmp/bs.lua"))),
-        ] {
-            assert!(!cmd.iter().any(|a| a.starts_with("--script=")), "{cmd:?}");
-        }
-        assert!(!Player::None.launches());
-        assert!(Player::Mpv.launches());
-    }
-
-    /// Every player can be told where to start: mpv `--volume=N`, ffplay
-    /// `-volume N`, VLC `--gain=N/100` (VLC 3 has no `--volume`). The flag must
-    /// be present whatever the buffering, and the file must stay last.
-    #[test]
-    fn player_commands_carry_the_startup_volume() {
-        let path = Path::new("/tmp/x.sdp");
-        for buffer in [None, Some(Duration::from_millis(250))] {
-            let mpv = Player::Mpv.command(path, buffer, None, 40, None);
-            assert!(mpv.contains(&"--volume=40".to_string()), "{mpv:?}");
-            assert_eq!(mpv.last().unwrap(), "/tmp/x.sdp");
-
-            let ffplay = Player::Ffplay.command(path, buffer, None, 40, None);
-            let i = ffplay
-                .iter()
-                .position(|a| a == "-volume")
-                .unwrap_or_else(|| panic!("no -volume in {ffplay:?}"));
-            // ffplay starts 20 points below the GUI level, so 40 in the GUI is 20
-            // in the command.
-            assert_eq!(ffplay[i + 1], "20");
-            // The offset is saturating: nothing goes negative, and full scale in the
-            // GUI is 80 in the command.
-            let ffplay = Player::Ffplay.command(path, buffer, None, 100, None);
-            let i = ffplay
-                .iter()
-                .position(|a| a == "-volume")
-                .unwrap_or_else(|| panic!("no -volume in {ffplay:?}"));
-            assert_eq!(ffplay[i + 1], "80");
-            for gui in [0, 20] {
-                let ffplay = Player::Ffplay.command(path, buffer, None, gui, None);
-                let i = ffplay
-                    .iter()
-                    .position(|a| a == "-volume")
-                    .unwrap_or_else(|| panic!("no -volume in {ffplay:?}"));
-                assert_eq!(ffplay[i + 1], "0", "gui {gui}");
-            }
-
-            let vlc = Player::Vlc.command(path, buffer, None, 40, None);
-            assert!(vlc.contains(&"--gain=0.40".to_string()), "{vlc:?}");
-            // The legacy name is a warning, not a volume: never pass it.
-            assert!(!vlc.iter().any(|a| a == "--volume=40"));
-
-            // A custom binary keeps its player's volume flag.
-            let mpv = Player::Mpv.command(path, buffer, Some(Path::new("/opt/mpv")), 40, None);
-            assert!(mpv.contains(&"--volume=40".to_string()));
-        }
-    }
-
-    /// Every player is told where and how big to open: a 1280x720 window in the
-    /// top-left corner, the largest window that still fits a small laptop screen
-    /// (1366x768) whole. mpv takes a single `--geometry=WxH+X+Y`; VLC
-    /// `--width`/`--height` plus `--video-x`/`--video-y`; ffplay `-x`/`-y` plus
-    /// `-left`/`-top`. The flags must be present whatever the buffering.
-    #[test]
-    fn player_windows_open_at_720p_in_the_corner() {
-        let path = Path::new("/tmp/x.sdp");
-        for buffer in [None, Some(Duration::from_millis(250))] {
-            let mpv = Player::Mpv.command(path, buffer, None, 60, None);
-            assert!(
-                mpv.contains(&"--geometry=1280x720+0+0".to_string()),
-                "{mpv:?}"
-            );
-            assert_eq!(mpv.last().unwrap(), "/tmp/x.sdp");
-
-            let vlc = Player::Vlc.command(path, buffer, None, 60, None);
-            assert!(vlc.contains(&"--width=1280".to_string()), "{vlc:?}");
-            assert!(vlc.contains(&"--height=720".to_string()), "{vlc:?}");
-            assert!(vlc.contains(&"--video-x=0".to_string()), "{vlc:?}");
-            assert!(vlc.contains(&"--video-y=0".to_string()), "{vlc:?}");
-            assert_eq!(vlc.last().unwrap(), "/tmp/x.sdp");
-
-            let ffplay = Player::Ffplay.command(path, buffer, None, 60, None);
-            // ffplay's window flags are space-separated pairs, so check the pair.
-            let pair = |name: &str, value: &str| {
-                let i = ffplay
-                    .iter()
-                    .position(|a| a == name)
-                    .unwrap_or_else(|| panic!("no {name} in {ffplay:?}"));
-                assert_eq!(ffplay[i + 1], value, "{name}");
-            };
-            pair("-x", "1280");
-            pair("-y", "720");
-            pair("-left", "0");
-            pair("-top", "0");
-            assert_eq!(ffplay.last().unwrap(), "/tmp/x.sdp");
-        }
-    }
-
-    #[test]
-    fn a_player_path_replaces_the_binary_but_keeps_the_flags() {
-        let path = Path::new("/tmp/x.sdp");
-        let bin = Path::new("/opt/mpv");
-        let mpv = Player::Mpv.command(path, None, Some(bin), 100, None);
-        assert_eq!(mpv[0], "/opt/mpv");
-        assert!(mpv.contains(&"--profile=low-latency".to_string()));
-        assert_eq!(mpv.last().unwrap(), "/tmp/x.sdp");
-        // The path is used whatever the player, with that player's flags.
-        let ffplay =
-            Player::Ffplay.command(path, Some(Duration::from_millis(300)), Some(bin), 100, None);
-        assert_eq!(ffplay[0], "/opt/mpv");
-        assert!(ffplay.contains(&"+discardcorrupt".to_string()));
-    }
-
-    #[test]
-    fn a_buffer_switches_the_player_out_of_zero_buffering() {
-        let path = Path::new("/tmp/x.sdp");
-        let ms = Duration::from_millis(300);
-        let mpv = Player::Mpv.command(path, Some(ms), None, 100, None);
-        assert!(!mpv.contains(&"--profile=low-latency".to_string()));
-        assert!(!mpv.contains(&"--no-cache".to_string()));
-        assert!(mpv.contains(&"--cache=yes".to_string()));
-        assert!(mpv.contains(&"--no-resume-playback".to_string()));
-        assert!(mpv.iter().any(|a| a.contains("max_delay=300000")));
-
-        let ffplay = Player::Ffplay.command(path, Some(ms), None, 100, None);
-        assert!(!ffplay.iter().any(|a| a == "nobuffer"));
-        assert!(ffplay.contains(&"+discardcorrupt".to_string()));
-        assert!(ffplay.iter().any(|a| a == "300000"));
-
-        let vlc = Player::Vlc.command(path, Some(ms), None, 100, None);
-        assert!(vlc.contains(&"--network-caching=300".to_string()));
-    }
-
-    #[test]
-    fn sdp_path_honours_explicit_here_and_default() {
-        // A named file wins as-is.
-        let named = sdp_path(Some("/tmp/mine.sdp".into()), false, 5004);
-        assert_eq!(named, std::path::Path::new("/tmp/mine.sdp"));
-        // A bare `--sdp`, or no player, drops the default name in the cwd.
-        let here = sdp_path(None, true, 5004);
-        assert!(here.starts_with(std::env::current_dir().unwrap()));
-        assert_eq!(
-            here.file_name().unwrap().to_str().unwrap(),
-            "streampipe-5004.sdp"
-        );
-        // A launched player with no path keeps it in the temp dir.
-        let tmp = sdp_path(None, false, 5004);
-        assert!(tmp.starts_with(std::env::temp_dir()));
-        assert!(!tmp.starts_with(std::env::current_dir().unwrap()));
-    }
-
-    #[test]
-    fn trickle_candidates_are_parsed() {
-        let c =
-            parse_candidate("1 1 udp 2130706431 192.168.1.10 50000 typ host").expect("candidate");
-        assert_eq!(c.addr().ip().to_string(), "192.168.1.10");
-        assert!(parse_candidate("nonsense").is_none());
-    }
-
-    #[tokio::test]
-    async fn forward_writes_rtp_and_asks_for_a_keyframe_on_a_gap() {
-        let player = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-        let port = player.local_addr().unwrap().port();
-        let sender = Arc::new(UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap());
-        let counters = Arc::new(Counters::default());
-        let (kf_tx, mut kf_rx) = mpsc::channel(8);
-        let mut last = None;
-        let mut last_kf = None;
-
-        let packet = |seq: u16| rtp::serialize_rtp(&info(96, seq), b"frame");
-
-        forward(
-            &sender,
-            &packet(10),
-            port,
-            &counters,
-            &mut last,
-            &mut last_kf,
-            true,
-            &kf_tx,
-        )
-        .await;
-        forward(
-            &sender,
-            &packet(11),
-            port,
-            &counters,
-            &mut last,
-            &mut last_kf,
-            true,
-            &kf_tx,
-        )
-        .await;
-        assert_eq!(counters.forwarded.load(Ordering::Relaxed), 2);
-        assert_eq!(counters.undeliverable.load(Ordering::Relaxed), 0);
-        assert!(kf_rx.try_recv().is_err(), "no gap, no request");
-
-        forward(
-            &sender,
-            &packet(20),
-            port,
-            &counters,
-            &mut last,
-            &mut last_kf,
-            true,
-            &kf_tx,
-        )
-        .await;
-        assert_eq!(kf_rx.try_recv(), Ok(()), "a gap asks for a keyframe");
-
-        // a second gap within the throttle interval does not ask again: on a
-        // lossy path that would be a keyframe storm
-        forward(
-            &sender,
-            &packet(30),
-            port,
-            &counters,
-            &mut last,
-            &mut last_kf,
-            true,
-            &kf_tx,
-        )
-        .await;
-        assert!(kf_rx.try_recv().is_err(), "the second gap is throttled");
-
-        // audio is not a video sequence, its gaps mean nothing here
-        forward(
-            &sender,
-            &packet(40),
-            port,
-            &counters,
-            &mut last,
-            &mut last_kf,
-            false,
-            &kf_tx,
-        )
-        .await;
-        assert!(kf_rx.try_recv().is_err(), "audio gaps are not video gaps");
-
-        // the player must see exactly the bytes we were fed
-        let mut buf = [0u8; 1024];
-        for seq in [10u16, 11, 20, 30, 40] {
-            let (n, _) = player.recv_from(&mut buf).await.unwrap();
-            assert_eq!(&buf[..n], &packet(seq)[..], "packet {seq}");
-        }
-    }
-
-    #[tokio::test]
-    async fn forward_survives_a_player_that_is_not_listening() {
-        // Nothing is bound on port 1. Whether the kernel reports the packet as
-        // undeliverable depends on it having seen the ICMP error before, so
-        // this asserts the invariant, not the split: the packet is accounted
-        // for and the tunnel keeps going.
-        let sender = Arc::new(UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap());
-        let counters = Arc::new(Counters::default());
-        let (kf_tx, mut kf_rx) = mpsc::channel(8);
-        let mut last = None;
-        let mut last_kf = None;
-
-        forward(
-            &sender,
-            &rtp::serialize_rtp(&info(96, 1), b"frame"),
-            1,
-            &counters,
-            &mut last,
-            &mut last_kf,
-            true,
-            &kf_tx,
-        )
-        .await;
-
-        let forwarded = counters.forwarded.load(Ordering::Relaxed);
-        let undeliverable = counters.undeliverable.load(Ordering::Relaxed);
-        assert_eq!(forwarded + undeliverable, 1, "accounted for exactly once");
-        assert!(kf_rx.try_recv().is_err(), "the first packet is no gap");
-
-        forward(
-            &sender,
-            &rtp::serialize_rtp(&info(96, 9), b"frame"),
-            1,
-            &counters,
-            &mut last,
-            &mut last_kf,
-            true,
-            &kf_tx,
-        )
-        .await;
-        assert_eq!(
-            kf_rx.try_recv(),
-            Ok(()),
-            "a gap is a gap whether or not it was delivered"
-        );
-    }
-
-    /// The whole ingest path against a real WebRTC peer.
-    ///
-    /// A second str0m instance does what OBS does: it offers H.264, completes
-    /// ICE and DTLS on loopback, and writes one RTP keyframe. The host has to
-    /// answer, decrypt, and hand the packet to the viewer behind the keyframe
-    /// gate. This is the only test that exercises ICE, DTLS and SRTP at all;
-    /// everything else drives the session through its own seams.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_real_publisher_reaches_a_viewer() {
-        use str0m::{change::SdpAnswer, media::Direction, rtp::RtpWrite};
-
-        let ice = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
-        let ice_addr = ice.local_addr().unwrap();
-        let mut host = Host::new(ice.clone(), ice_addr, false, None);
-        let (tx, mut rx) = mpsc::channel(256);
-        host.on_viewer_event(ViewerEvent::Joined {
-            id: 1,
-            port: 5004,
-            tx,
-        });
-
-        let pub_ice = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let pub_addr = pub_ice.local_addr().unwrap();
-        let mut pub_rtc = Rtc::builder()
-            .set_rtp_mode(true)
-            .clear_codecs()
-            .enable_h264(true)
-            .build(Instant::now());
-        pub_rtc.add_local_candidate(
-            Candidate::host(pub_addr, Protocol::Udp).expect("a host candidate"),
-        );
-
-        let mut api = pub_rtc.sdp_api();
-        let mid = api.add_media(Str0mMediaKind::Video, Direction::SendOnly, None, None, None);
-        let (offer, pending) = api.apply().expect("a change");
-
-        let answer = host
-            .negotiate(&offer.to_sdp_string(), false)
-            .expect("an answer");
-        let answer = SdpAnswer::from_sdp_string(&answer.sdp).expect("a parseable answer");
-        pub_rtc
-            .sdp_api()
-            .accept_answer(pending, answer)
-            .expect("accepting the answer");
-
-        // the payload type the publisher offered and we accepted
-        let video = host
-            .offer
-            .iter()
-            .find(|m| m.kind == MediaKind::Video)
-            .expect("video in the offer");
-        let pt = video.payloads.first().expect("a video payload type");
-        assert_eq!(pt.codec, "H264");
-        let pt = pt.pt;
-
-        let mut host_buf = vec![0u8; ICE_BUF];
-        let mut pub_buf = vec![0u8; ICE_BUF];
-        let keyframe = keyframe();
-        let mut frames: Vec<Frame> = Vec::new();
-        let mut connected = false;
-        let mut written = false;
-        let started = Instant::now();
-
-        loop {
-            assert!(
-                started.elapsed() < Duration::from_secs(20),
-                "the session did not come up, frames so far: {frames:?}"
-            );
-
-            // Drain both engines to their timeout before the next mutation, as
-            // str0m's single mutation invariant demands.
-            let host_deadline = loop {
-                match host.rtc.poll_output().expect("host output") {
-                    Output::Timeout(at) => break at,
-                    Output::Transmit(t) => {
-                        ice.send_to(&t.contents, t.destination).await.unwrap();
-                    }
-                    Output::Event(event) => {
-                        if matches!(event, Event::Connected) {
-                            connected = true;
-                        }
-                        host.on_event(event);
-                    }
-                }
-            };
-            let pub_deadline = loop {
-                match pub_rtc.poll_output().expect("publisher output") {
-                    Output::Timeout(at) => break at,
-                    Output::Transmit(t) => {
-                        pub_ice.send_to(&t.contents, t.destination).await.unwrap();
-                    }
-                    Output::Event(_) => {}
-                }
-            };
-
-            if connected && !written {
-                let mut direct = pub_rtc.direct_api();
-                let stream = direct.stream_tx_by_mid(mid, None).expect("a send stream");
-                stream.write_rtp(
-                    RtpWrite::new(
-                        pt.into(),
-                        1000u64.into(),
-                        90_000,
-                        Instant::now(),
-                        keyframe.clone(),
-                    )
-                    .marker(true),
-                );
-                written = true;
-            }
-
-            while let Ok(frame) = rx.try_recv() {
-                frames.push(frame);
-            }
-            if written && frames.iter().any(|f| matches!(f, Frame::Video(_))) {
-                break;
-            }
-
-            tokio::select! {
-                res = ice.recv_from(&mut host_buf) => {
-                    if let Ok((len, source)) = res {
-                        host.on_ice(&host_buf[..len], source);
-                    }
-                }
-                res = pub_ice.recv_from(&mut pub_buf) => {
-                    if let Ok((len, source)) = res {
-                        let contents = (&pub_buf[..len]).try_into().expect("a packet");
-                        pub_rtc
-                            .handle_input(Input::Receive(
-                                Instant::now(),
-                                Receive {
-                                    proto: Protocol::Udp,
-                                    source,
-                                    destination: pub_addr,
-                                    contents,
-                                },
-                            ))
-                            .expect("publisher input");
-                    }
-                }
-                _ = sleep_until(tokio::time::Instant::from_std(host_deadline)) => host.on_timeout(),
-                _ = sleep_until(tokio::time::Instant::from_std(pub_deadline)) => {
-                    pub_rtc
-                        .handle_input(Input::Timeout(Instant::now()))
-                        .expect("publisher timeout");
-                }
-            }
-        }
-
-        let kinds: Vec<&str> = frames
-            .iter()
-            .map(|f| match f {
-                Frame::Header(_) => "header",
-                Frame::Epoch => "epoch",
-                Frame::Video(_) => "video",
-                Frame::Audio(_) => "audio",
-            })
-            .collect();
-        assert_eq!(kinds.first().copied(), Some("header"), "{kinds:?}");
-        let epoch = kinds.iter().position(|k| *k == "epoch").expect("an epoch");
-        let video = kinds.iter().position(|k| *k == "video").expect("video");
-        assert!(epoch < video, "the epoch precedes the keyframe: {kinds:?}");
-
-        let payload = frames
-            .iter()
-            .find_map(|f| match f {
-                Frame::Video(b) => Some(b.clone()),
-                _ => None,
-            })
-            .expect("video");
-        let (info, start) = rtp::parse_header(&payload).expect("an rtp header");
-        assert_eq!(info.pt, pt, "the payload type is untouched");
-        assert_eq!(info.seq, 1000, "the sequence number is untouched");
-        assert!(info.marker, "the marker bit is untouched");
-        assert_eq!(
-            &payload[start..],
-            &keyframe[..],
-            "the payload survived ice, dtls and srtp"
-        );
-
-        // the header the viewer got before the keyframe must carry the codec
-        // and the parameter sets it saw in band, otherwise its player cannot
-        // start; the first header a viewer gets is the empty one it joined on
-        let header = frames[..epoch]
-            .iter()
-            .rev()
-            .find_map(|f| match f {
-                Frame::Header(b) => Some(String::from_utf8_lossy(b).into_owned()),
-                _ => None,
-            })
-            .expect("a header before the keyframe");
-        assert!(header.contains("H264"), "{header}");
-        assert!(header.contains("video"), "{header}");
-    }
-
-    #[test]
-    fn media_tally_counts_bitrate_frames_and_keyframes() {
-        let start = Instant::now();
-        let mut tally = MediaTally::new(start);
-        // 1250 bytes over exactly one second is 10 kbit/s.
-        tally.bytes = 1250;
-        tally.packets = 5;
-        let one_sec = (tally.kbit_per_second(start + Duration::from_secs(1)) - 10.0).abs();
-        assert!(one_sec < 0.001, "bitrate was {one_sec} off");
-        // A zero length interval must not divide by zero.
-        assert_eq!(tally.kbit_per_second(start), 0.0);
-        assert!(tally.active());
-        tally.restart(start + Duration::from_secs(1));
-        assert_eq!(tally.packets, 0);
-        assert_eq!(tally.bytes, 0);
-        assert!(!tally.active());
-    }
-
-    #[test]
-    fn stream_report_log_resets_the_interval_but_keeps_totals() {
-        let start = Instant::now();
-        let mut report = StreamReport::new(start);
-        // Nothing recorded yet: reporting is a no-op and must not panic.
-        report.log(start + Duration::from_secs(5), 0, false);
-        report.record(MediaKind::Video, start, true, true, 1000);
-        report.record(MediaKind::Audio, start, true, false, 500);
-        assert_eq!(report.video.packets, 1);
-        assert_eq!(report.video.frames, 1);
-        assert_eq!(report.video.keyframes, 1);
-        assert_eq!(report.audio.packets, 1);
-        report.log(start + Duration::from_secs(5), 3, false);
-        // The per interval tallies reset, the running keyframe total does not.
-        assert_eq!(report.video.packets, 0);
-        assert_eq!(report.video.keyframes, 0);
-        assert_eq!(report.video.keyframes_total, 1);
-        assert_eq!(report.audio.packets, 0);
-    }
-
-    #[test]
-    fn human_duration_reads_like_a_stopwatch() {
-        assert_eq!(human_duration(Duration::from_secs(42)), "42s");
-        assert_eq!(human_duration(Duration::from_secs(7 * 60 + 13)), "7m13s");
-        assert_eq!(
-            human_duration(Duration::from_secs(3600 + 2 * 60 + 3)),
-            "1h02m03s"
-        );
-    }
-
-    #[tokio::test]
-    async fn streaming_is_announced_once_per_kind() {
-        let mut h = host().await;
-        h.negotiate(&offer(), false).expect("an answer");
-        let video = sdp::Payload {
-            pt: 96,
-            codec: "H264".into(),
-            clock: 90000,
-            channels: 1,
-            fmtp: String::new(),
-        };
-        h.log_streaming(MediaKind::Video, &video, false);
-        h.log_streaming(MediaKind::Video, &video, true);
-        assert_eq!(h.seen, vec![MediaKind::Video]);
-        h.log_streaming(MediaKind::Audio, &video, false);
-        assert_eq!(h.seen, vec![MediaKind::Video, MediaKind::Audio]);
-    }
-
-    #[tokio::test]
-    async fn wait_until_listening_does_not_hog_the_port() {
-        // Regression: the probe used to hold the RTP port across its sleep, so
-        // the player it was waiting for could never bind it. The port must stay
-        // bindable by the player while we wait, and the wait must end once the
-        // player has it.
-        let probe = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-        let port = probe.local_addr().unwrap().port();
-        drop(probe);
-
-        let wait = tokio::spawn(wait_until_listening(port));
-
-        let mut player = None;
-        for _ in 0..40 {
-            match UdpSocket::bind((Ipv4Addr::LOCALHOST, port)).await {
-                Ok(socket) => {
-                    player = Some(socket);
-                    break;
-                }
-                Err(_) => sleep(Duration::from_millis(25)).await,
-            }
-        }
-        let _player = player.expect("the player never got the port it was waiting for");
-
-        tokio::time::timeout(Duration::from_secs(2), wait)
-            .await
-            .expect("wait_until_listening did not return after the player bound")
-            .unwrap();
-    }
 }
