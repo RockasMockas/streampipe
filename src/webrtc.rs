@@ -1771,6 +1771,10 @@ pub struct ViewerConfig {
     pub volume: u8,
     /// Whether to log periodic counters.
     pub stats: bool,
+    /// Optional mirror of the media gate: `false` while nothing is being forwarded to
+    /// the player (connected, waiting for the broadcaster to start sending), `true`
+    /// once media flows.
+    pub media_state: Option<mpsc::UnboundedSender<bool>>,
 }
 
 /// The local RTP ports the viewer plays out on.
@@ -1852,6 +1856,12 @@ pub async fn connect_whip(endpoint: Endpoint, cfg: ViewerConfig) -> Result<()> {
     // default-size receive buffer. `let _ =` clamps to the OS hard limit.
     let _ = socket2::SockRef::from(&*video).set_send_buffer_size(8 * 1024 * 1024);
     let counters = Arc::new(Counters::default());
+
+    // Nothing is flowing yet: tell the caller the gate is closed, so the Watch tab can
+    // read "waiting for the streamer" from the moment the session is up.
+    if let Some(media_state) = &cfg.media_state {
+        let _ = media_state.send(false);
+    }
 
     let mut player: Option<PlayerHandle> = None;
     let mut written: Option<String> = None;
@@ -2058,6 +2068,11 @@ pub async fn connect_whip(endpoint: Endpoint, cfg: ViewerConfig) -> Result<()> {
                                     video_order.clear();
                                     audio_order.clear();
                                     tracing::info!("streaming from a keyframe");
+                                    // The gate is open: the player now has a stream to
+                                    // show, so the Watch tab can drop the "waiting" label.
+                                    if let Some(media_state) = &cfg.media_state {
+                                        let _ = media_state.send(true);
+                                    }
                                 }
                                 // Tell the forward task to reset its gap baseline:
                                 // a gap right after this keyframe is not a loss and
@@ -2102,6 +2117,10 @@ pub async fn connect_whip(endpoint: Endpoint, cfg: ViewerConfig) -> Result<()> {
                     player = None;
                     launched = String::new();
                     forwarding = false;
+                    // Gate closed again: back to "waiting for the streamer".
+                    if let Some(media_state) = &cfg.media_state {
+                        let _ = media_state.send(false);
+                    }
                 }
                 _ = silence, if forwarding => {
                     tracing::debug!("no media for a while, asking for a keyframe");

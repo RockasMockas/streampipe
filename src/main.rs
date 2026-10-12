@@ -1319,6 +1319,8 @@ async fn connect_whip(args: ConnectWhipArgs) -> Result<()> {
         buffer: args.buffer.map(Duration::from_millis),
         volume: args.volume,
         stats: stats_enabled(args.common.verbosity()),
+        // The CLI has no live status label to drive.
+        media_state: None,
     };
 
     let result = select! {

@@ -2306,8 +2306,7 @@ mod tests {
         {
             let mut g = app.state.lock().unwrap();
             g.watch = Mode::Watching;
-            // Matches what is shown, so the "press Restart" prompt row is suppressed:
-            // this test is about the button row.
+            g.watch_receiving = true;
             g.watch_applied = Some((Player::Mpv, Some(90)));
         }
 

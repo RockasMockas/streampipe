@@ -106,13 +106,11 @@ pub struct SharedState {
     pub(crate) watch_session: Option<JoinHandle<()>>,
     /// What the live watch session was launched with: `(player, buffer_ms)`, or
     /// `None` while no watch session is up.
-    ///
-    /// Written only inside the same lock scope that moves the watch track out of and
-    /// back to `Idle` ([`spawn_watch`], [`stop`], [`stop_all`], [`fail`]), so the
-    /// invariant `watch.active() ⇒ watch_applied.is_some()` holds and the Watch tab's
-    /// "press Restart to apply changes" prompt is total (it can never be shown with no
-    /// record, nor hidden with a stale one).
     pub(crate) watch_applied: Option<(Player, Option<u64>)>,
+    /// Whether the live watch session is currently receiving media from the
+    /// broadcaster: `false` while it is idle, connecting, connected-but-waiting for
+    /// the streamer to begin, or after the stream ends.
+    pub(crate) watch_receiving: bool,
     /// The broadcast track's mode (`Idle` / `Starting` / `Broadcasting`).
     pub(crate) broadcast: Mode,
     /// The watch track's mode (`Idle` / `Starting` / `Watching`).
@@ -149,6 +147,7 @@ impl SharedState {
             broadcast_session: None,
             watch_session: None,
             watch_applied: None,
+            watch_receiving: false,
             broadcast: Mode::Idle,
             watch: Mode::Idle,
             stats: None,
@@ -174,6 +173,10 @@ pub struct UiSnapshot {
     /// What the live watch session was launched with (see
     /// [`SharedState::watch_applied`]); `None` while the watch track is idle.
     pub watch_applied: Option<(Player, Option<u64>)>,
+    /// Whether the live watch session is receiving media, so the tab can tell
+    /// "playing" from "waiting for the streamer" (see
+    /// [`SharedState::watch_receiving`]).
+    pub watch_receiving: bool,
     pub stats: Option<StreamStats>,
     pub video_kbps_history: Vec<f64>,
     pub ticket: Option<String>,
@@ -220,6 +223,7 @@ pub fn snapshot(state: &Arc<Mutex<SharedState>>) -> UiSnapshot {
         // `Copy`, so the record is read under the same brief lock as the mode it
         // belongs to.
         watch_applied: g.watch_applied,
+        watch_receiving: g.watch_receiving,
         stats: g.stats,
         video_kbps_history: g.video_kbps_history.iter().copied().collect(),
         ticket: g.ticket.clone(),
@@ -303,6 +307,7 @@ fn fail(state: &Arc<Mutex<SharedState>>, ctx: &egui::Context, track: Track, msg:
             Track::Watch => {
                 g.watch = Mode::Idle;
                 g.watch_applied = None;
+                g.watch_receiving = false;
                 g.watch_error = Some(msg);
             }
         }
@@ -693,6 +698,12 @@ pub fn spawn_watch(
             g.watch = Mode::Watching;
         }
         ctx.request_repaint();
+        // Mirror the engine's media gate into the shared state, so the tab can read
+        // "waiting for the streamer to begin broadcasting…" while the player has
+        // nothing to show, and "playing in a player window" once media actually flows.
+        // The sender lives in `cfg`, which `connect_whip` owns, so the channel closes
+        // when the session ends and the mirror drains with it.
+        let (media_tx, mut media_rx) = mpsc::unbounded_channel::<bool>();
         let cfg = ViewerConfig {
             addr: params.addr,
             alpn: WEBRTC_ALPN.to_vec(),
@@ -705,14 +716,31 @@ pub fn spawn_watch(
             buffer: params.buffer_ms.map(Duration::from_millis),
             volume: params.volume,
             stats: true,
+            media_state: Some(media_tx),
         };
+        let mirror_state = state.clone();
+        let mirror_ctx = ctx.clone();
+        let mirror = tokio::spawn(async move {
+            while let Some(receiving) = media_rx.recv().await {
+                {
+                    let mut g = mirror_state.lock().unwrap();
+                    g.watch_receiving = receiving;
+                }
+                // The label changed, so repaint now rather than on the next tick.
+                mirror_ctx.request_repaint();
+            }
+        });
         let result = webrtc::connect_whip(endpoint, cfg).await;
+        // The sender went away with `cfg`, so the mirror has already seen the channel
+        // close; the abort is belt-and-braces so nothing outlives the session.
+        mirror.abort();
 
         let mut g = state.lock().unwrap();
         g.watch = Mode::Idle;
         // Same lock scope as the mode flip, so the record never outlives the session
         // it belongs to.
         g.watch_applied = None;
+        g.watch_receiving = false;
         if let Err(e) = result {
             g.watch_error = Some(friendly_watch_error(&format!("{e:#}")).to_string());
         }
@@ -743,6 +771,7 @@ pub fn stop(state: &Arc<Mutex<SharedState>>, ctx: &egui::Context, track: Track) 
             Track::Watch => {
                 g.watch = Mode::Idle;
                 g.watch_applied = None;
+                g.watch_receiving = false;
                 g.watch_session.take()
             }
         }
@@ -761,6 +790,7 @@ pub fn stop_all(state: &Arc<Mutex<SharedState>>, ctx: &egui::Context) {
         g.broadcast = Mode::Idle;
         g.watch = Mode::Idle;
         g.watch_applied = None;
+        g.watch_receiving = false;
         g.stats = None;
         g.video_kbps_history.clear();
         (g.broadcast_session.take(), g.watch_session.take())
@@ -881,6 +911,7 @@ mod tests {
             broadcast,
             watch,
             watch_applied: None,
+            watch_receiving: false,
             stats: None,
             video_kbps_history: Vec::new(),
             ticket: None,

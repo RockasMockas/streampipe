@@ -19,14 +19,12 @@ pub fn parse_buffer_ms(text: &str) -> Option<u64> {
     text.trim().parse::<u64>().ok()
 }
 
-/// The status label shown beside Stop while a watch session is up.
-///
-/// `Starting` reads "connecting…" so the tab never claims a player window exists
-/// before the endpoint is online and the play address has resolved.
-fn watch_action_label(mode: Mode) -> &'static str {
+/// The status label shown under the buttons while a watch session is up.
+fn watch_action_label(mode: Mode, receiving: bool) -> &'static str {
     match mode {
         Mode::Starting => "connecting…",
-        _ => "playing in a player window",
+        _ if receiving => "Playing stream in player window",
+        _ => "Waiting for streamer to begin broadcasting...",
     }
 }
 
@@ -320,7 +318,7 @@ impl App {
                 if starting {
                     spinner(ui, self.pulse.elapsed().as_secs_f32(), WATCH_ACCENT);
                 }
-                ui.label(watch_action_label(snap.watch));
+                ui.label(watch_action_label(snap.watch, snap.watch_receiving));
             });
 
             // Tell the viewer an edit is pending, so they know one click (`Restart`)
@@ -457,11 +455,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn watch_action_label_distinguishes_connecting_from_playing() {
-        assert_eq!(watch_action_label(Mode::Starting), "connecting…");
+    fn watch_action_label_distinguishes_connecting_waiting_from_playing() {
+        assert_eq!(watch_action_label(Mode::Starting, false), "connecting…");
+        // Connecting, with a gate signal already in flight: still "connecting…" — the
+        // session is not up yet, so the live labels must not show.
+        assert_eq!(watch_action_label(Mode::Starting, true), "connecting…");
         assert_eq!(
-            watch_action_label(Mode::Watching),
+            watch_action_label(Mode::Watching, true),
             "playing in a player window"
+        );
+        // Regression: `Watching` used to claim "playing in a player window" even while
+        // the broadcaster had sent nothing, so the tab lied about a blank window.
+        assert_eq!(
+            watch_action_label(Mode::Watching, false),
+            "Waiting for streamer to begin broadcasting..."
         );
     }
 
