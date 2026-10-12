@@ -1665,15 +1665,19 @@ async fn host_loop(
                 let (len, source) = res.std_context("error receiving from the ice socket")?;
                 host.on_ice(&buf[..len], source);
 
-                // Drain the OS UDP receive buffer completely before yielding back to
-                // the Tokio scheduler. A keyframe burst can deliver hundreds of packets
-                // at once; returning through `select!` after every single packet pays
-                // the macro/scheduler overhead and lets the (clamped) kernel buffer
-                // overflow mid-burst, which the viewer sees as RTP loss and a corrupt
-                // P frame. `try_recv_from` returns `WouldBlock` once the socket is
-                // empty, so this loop terminates and we re-enter `select!`.
-                while let Ok((len, source)) = ice.try_recv_from(&mut buf) {
-                    host.on_ice(&buf[..len], source);
+                // Keep pulling packets off a hot socket so a keyframe burst (hundreds
+                // of packets at once) does not overflow the OS receive buffer while we
+                // sit in `select!`. str0m's single-mutation invariant forbids two
+                // back-to-back mutations, so we alternate: drain `poll_output` to
+                // `Timeout` (forwarding decrypted RTP + transmits), then feed the next
+                // packet. `try_recv_from` returns `WouldBlock` once the socket is empty,
+                // which ends the loop and hands control back to the outer `select!`.
+                loop {
+                    drain(&mut host).await?;
+                    match ice.try_recv_from(&mut buf) {
+                        Ok((len, source)) => host.on_ice(&buf[..len], source),
+                        Err(_) => break,
+                    }
                 }
             }
             _ = sleep => host.on_timeout(),
