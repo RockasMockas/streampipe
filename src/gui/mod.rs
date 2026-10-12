@@ -2254,6 +2254,363 @@ mod tests {
         );
     }
 
+    /// Drive the real UI headlessly for `passes` frames and return the last frame's
+    /// output. The app's `Context` is not reachable from outside, so an interactivity
+    /// test has to run its own loop (`render_shapes` builds a throwaway one).
+    fn drive_frames(
+        app: &mut App,
+        ctx: &egui::Context,
+        size: egui::Vec2,
+        passes: usize,
+    ) -> egui::FullOutput {
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), size)),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(raw.clone(), |ui| app.draw(ui));
+        out.textures_delta.clear();
+        for _ in 1..passes {
+            let next = ctx.run_ui(raw.clone(), |ui| app.draw(ui));
+            out.textures_delta.clear();
+            out = next;
+        }
+        out
+    }
+
+    /// A real, parseable watch ticket for a fresh (throwaway) endpoint identity.
+    ///
+    /// A junk string like `"abc"` makes `start_watch` bail with an inline "invalid
+    /// ticket" error and spawn nothing, which would make every click-through assertion
+    /// vacuous — so anything that clicks a start control mints a real one.
+    fn real_ticket() -> String {
+        streampipe::EndpointTicket::new(iroh::EndpointAddr::new(SecretKey::generate().public()))
+            .to_string()
+    }
+
+    /// AC1/AC2/AC4: with a watch session live the tab shows two half-width buttons
+    /// side by side (`Restart` left, `■  Stop` right) filling the panel with a 12 px
+    /// gap, the status text on its own row *underneath* them, and the Player combo
+    /// and Buffer field still interactive.
+    ///
+    /// Driven at the real minimum window size (560×630, `mod.rs` `run`), not the
+    /// 420 of `watch_tab_renders_at_min_size` — that one only checks `clip_rect`,
+    /// which is always in-bounds and so cannot see an overflowing row.
+    #[test]
+    fn the_live_watch_tab_shows_restart_and_stop_side_by_side() {
+        let (mut app, _rt) = test_app();
+        app.tab = Tab::Watch;
+        // A real ticket so the "no ticket yet?" hint row is not painted (it would add
+        // a row above the buttons and skew the vertical comparisons).
+        app.watch_ticket = real_ticket();
+        app.watch_buffer = "90".into();
+        {
+            let mut g = app.state.lock().unwrap();
+            g.watch = Mode::Watching;
+            // Matches what is shown, so the "press Restart" prompt row is suppressed:
+            // this test is about the button row.
+            g.watch_applied = Some((Player::Mpv, Some(90)));
+        }
+
+        let ctx = egui::Context::default();
+        let size = egui::vec2(560.0, 630.0);
+        let out = drive_frames(&mut app, &ctx, size, 3);
+        let rects = ctx.interactive_rects_last_pass();
+
+        // AC1: exactly two interactive rects the height of the buttons (36 tall).
+        // The band excludes the tab strip (32), the labels (~19/15), the combo (19)
+        // and the buffer field (23.4); the count is the whole point — "two buttons",
+        // not "one button plus clutter".
+        let mut band: Vec<egui::Rect> = rects
+            .iter()
+            .copied()
+            .filter(|r| (34.0..=38.0).contains(&r.height()))
+            .collect();
+        assert_eq!(
+            band.len(),
+            2,
+            "expected exactly two ~36-tall interactive rects (Restart + Stop), got \
+             {band:#?} (all rects: {rects:#?})"
+        );
+        band.sort_by(|a, b| a.min.x.total_cmp(&b.min.x));
+        let (restart, stop) = (band[0], band[1]);
+
+        // Equal halves, 12 px apart, filling the panel: content width is the window
+        // minus the panel's 2×16 side margins, so 2*half + 12 == 528.
+        assert!(
+            (restart.width() - stop.width()).abs() < 1.0,
+            "the two buttons should be the same width, got {restart:?} vs {stop:?}"
+        );
+        assert!(
+            (stop.min.x - restart.max.x - 12.0).abs() < 1.0,
+            "the gap should be 12 px, got {restart:?} vs {stop:?}"
+        );
+        assert!(
+            (restart.width() - (560.0 - 32.0 - 12.0) / 2.0).abs() < 1.0,
+            "each button should be half the panel (258), got {restart:?}"
+        );
+        // Both fully inside the window at the minimum size.
+        assert!(
+            restart.min.x > 0.0,
+            "Restart is off the left edge: {restart:?}"
+        );
+        assert!(stop.max.x < size.x, "Stop escapes the right edge: {stop:?}");
+        assert!(
+            stop.max.y < size.y,
+            "the button row escapes the bottom: {stop:?}"
+        );
+
+        // AC2: the status text sits on its own row underneath the button row.
+        let status = out
+            .shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                egui::epaint::Shape::Text(t) if t.galley.text() == "playing in a player window" => {
+                    Some(egui::Rect::from_min_size(t.pos, t.galley.rect.size()))
+                }
+                _ => None,
+            })
+            .expect("the live status label should be painted");
+        assert!(
+            status.min.y > restart.max.y,
+            "the status text should be on its own row below the buttons, got {status:?} \
+             vs {restart:?} / {stop:?}"
+        );
+
+        // AC4: the Player combo and the Buffer field are interactive while live.
+        // Identified by the labels they sit immediately right of.
+        let label_rect = |want: &str| {
+            out.shapes
+                .iter()
+                .find_map(|s| match &s.shape {
+                    egui::epaint::Shape::Text(t) if t.galley.text() == want => {
+                        Some(egui::Rect::from_min_size(t.pos, t.galley.rect.size()))
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("the {want:?} label should be painted"))
+        };
+        let player = label_rect("Player");
+        let buffer = label_rect("Buffer (ms)");
+        let probe = egui::pos2(player.max.x + 10.0, player.center().y);
+        assert!(
+            rects.iter().any(|r| r.contains(probe)),
+            "the Player combo should be interactive while live (probing {probe:?} of \
+             {player:?}; rects: {rects:?})"
+        );
+        let field = rects
+            .iter()
+            .copied()
+            .filter(|r| (r.width() - 90.0).abs() < 1.0 && r.min.x > buffer.max.x)
+            .max_by(|a, b| a.min.y.total_cmp(&b.min.y))
+            .expect("the 90-wide buffer field should be interactive while live");
+        assert!(
+            field.min.y > buffer.min.y - 5.0 && field.min.y < player.max.y + 20.0,
+            "the buffer field should be on the Player/Buffer row, got {field:?}"
+        );
+    }
+
+    /// AC5: the exact prompt line appears iff a session is live *and* the shown
+    /// player/buffer differ from what the live session was launched with.
+    #[test]
+    fn the_watch_tab_prompts_to_restart_only_for_a_pending_edit() {
+        const PROMPT: &str = "Press 'Restart' button to apply changes.";
+        let shows_prompt =
+            |watch: Mode, applied: Option<(Player, Option<u64>)>, player: Player, buffer: &str| {
+                let (mut app, _rt) = test_app();
+                app.tab = Tab::Watch;
+                app.watch_ticket = real_ticket();
+                app.watch_player = player;
+                app.watch_buffer = buffer.to_string();
+                {
+                    let mut g = app.state.lock().unwrap();
+                    g.watch = watch;
+                    g.watch_applied = applied;
+                }
+                let shapes = render_shapes(&mut app, egui::vec2(760.0, 560.0));
+                shapes.iter().any(|s| match &s.shape {
+                    egui::epaint::Shape::Text(t) => t.galley.text() == PROMPT,
+                    _ => false,
+                })
+            };
+
+        // Idle with an edited buffer: nothing to restart into, so no prompt.
+        assert!(
+            !shows_prompt(Mode::Idle, None, Player::Mpv, "120"),
+            "an idle tab must not prompt"
+        );
+        // Live and in sync: nothing pending, so no prompt.
+        assert!(
+            !shows_prompt(
+                Mode::Watching,
+                Some((Player::Mpv, Some(90))),
+                Player::Mpv,
+                "90"
+            ),
+            "a live tab with matching player/buffer must not prompt"
+        );
+        // Live with an edited buffer: prompt.
+        assert!(
+            shows_prompt(
+                Mode::Watching,
+                Some((Player::Mpv, Some(90))),
+                Player::Mpv,
+                "120"
+            ),
+            "an edited buffer should raise the prompt"
+        );
+        // Live with a switched player: prompt.
+        assert!(
+            shows_prompt(
+                Mode::Watching,
+                Some((Player::Mpv, Some(90))),
+                Player::Vlc,
+                "90"
+            ),
+            "a switched player should raise the prompt"
+        );
+        // Live and coming up with nothing recorded yet (defensive: the invariant says
+        // this cannot happen, the condition must still be total).
+        assert!(
+            shows_prompt(Mode::Starting, None, Player::Mpv, ""),
+            "a live session with no record and a shown value should prompt"
+        );
+    }
+
+    /// AC3 (UI level): clicking `Restart` tears the previous session down before the
+    /// new one is brought up — the old handle finishes, a different handle takes its
+    /// place, and the record moves to what is shown on screen.
+    #[test]
+    fn clicking_restart_replaces_the_live_watch_session() {
+        // The click below writes the config (`start_watch` → `config.save()`), so
+        // redirect the config dir into a temp folder, serialized with the other
+        // config-dir tests by the same mutex.
+        let _guard = config::CONFIG_ENV.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", dir.path());
+
+        let (mut app, rt) = test_app();
+        app.tab = Tab::Watch;
+        app.watch_ticket = real_ticket();
+        app.watch_buffer = "120".into();
+        // `Player::None` never launches a process, so nothing is spawned in CI, and
+        // the shown pair is visibly stale (live = Mpv, shown = None).
+        app.watch_player = Player::None;
+
+        // A stand-in for the live session: one long sleep, so no network work happens
+        // behind it, plus a drop-flag the abort trips. `JoinHandle` is not `Clone`
+        // and the handle is moved into `spawn_watch`, so the flag — not the handle —
+        // is what the test observes.
+        let torn_down = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = torn_down.clone();
+        let previous = rt.spawn(async move {
+            struct Flag(Arc<std::sync::atomic::AtomicBool>);
+            impl Drop for Flag {
+                fn drop(&mut self) {
+                    self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+            let _flag = Flag(flag);
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        });
+        {
+            let mut g = app.state.lock().unwrap();
+            g.watch = Mode::Watching;
+            g.watch_session = Some(previous);
+            g.watch_applied = Some((Player::Mpv, None));
+        }
+
+        let ctx = egui::Context::default();
+        let size = egui::vec2(560.0, 630.0);
+        let out = drive_frames(&mut app, &ctx, size, 3);
+        // The leftmost of the two ~36-tall rects is `Restart` (clicking Stop would
+        // abort and go idle, which the assertions below would catch).
+        let mut band: Vec<egui::Rect> = ctx
+            .interactive_rects_last_pass()
+            .into_iter()
+            .filter(|r| (34.0..=38.0).contains(&r.height()))
+            .collect();
+        assert_eq!(band.len(), 2, "expected Restart + Stop, got {band:?}");
+        band.sort_by(|a, b| a.min.x.total_cmp(&b.min.x));
+        let restart = band[0];
+
+        // The previous session must still be live right up to the click.
+        assert!(
+            !torn_down.load(std::sync::atomic::Ordering::SeqCst),
+            "the stand-in session must be live before the click"
+        );
+
+        click_at(&mut app, &ctx, restart.center(), size);
+
+        // Asserted on the release frame: `start_watch` runs synchronously inside it.
+        let g = app.state.lock().unwrap();
+        assert_eq!(
+            g.watch_applied,
+            Some((Player::None, Some(120))),
+            "the record moves to the player/buffer shown on screen"
+        );
+        let session = g
+            .watch_session
+            .as_ref()
+            .expect("a session handle replaces the old one");
+        assert!(
+            !session.is_finished(),
+            "the new session has just been spawned and must still be running"
+        );
+        drop(g);
+
+        // The previous session must be torn down, never left running alongside the new
+        // one (at most one watch session is live at any moment). Bounded polling only.
+        let mut polls = 0;
+        while !torn_down.load(std::sync::atomic::Ordering::SeqCst) && polls < 200 {
+            std::thread::sleep(Duration::from_millis(10));
+            polls += 1;
+        }
+        assert!(
+            torn_down.load(std::sync::atomic::Ordering::SeqCst),
+            "the previous session was never torn down ({} polls)",
+            polls
+        );
+        assert!(
+            !out.shapes.is_empty(),
+            "the Watch tab painted nothing before the click"
+        );
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+    }
+
+    /// A click is a press frame then a release frame on the same point. Driven by a
+    /// nested `fn` (not a closure) so it only borrows the app while it runs, leaving
+    /// the flags below readable between the two clicks.
+    fn click_at(app: &mut App, ctx: &egui::Context, at: egui::Pos2, size: egui::Vec2) {
+        let press = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), size)),
+            events: vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::PointerButton {
+                    button: egui::PointerButton::Primary,
+                    pos: at,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            ..Default::default()
+        };
+        let release = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), size)),
+            events: vec![egui::Event::PointerButton {
+                button: egui::PointerButton::Primary,
+                pos: at,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(press, |ui| app.draw(ui));
+        out.textures_delta.clear();
+        let mut out = ctx.run_ui(release, |ui| app.draw(ui));
+        out.textures_delta.clear();
+    }
+
     /// A focused, window-keyboard-focused raw input at the default window size.
     fn focused_raw(events: Vec<egui::Event>) -> egui::RawInput {
         egui::RawInput {

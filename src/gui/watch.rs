@@ -144,38 +144,38 @@ impl App {
         let box_h = big * 1.3;
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("Player").size(big));
-            ui.add_enabled_ui(!busy, |ui| {
-                egui::ComboBox::from_id_salt("watch_player")
-                    .selected_text(egui::RichText::new(player_key(self.watch_player)).size(big))
-                    .show_ui(ui, |ui| {
-                        for player in PLAYERS {
-                            ui.selectable_value(&mut self.watch_player, player, player_key(player));
-                        }
-                    });
-            });
+            // Deliberately NOT gated on `!busy`: the viewer picks a player mid-session
+            // and presses `Restart` to apply it, so retuning playback is one click
+            // instead of stop-edit-restart. A stable id keeps the focus ring working.
+            egui::ComboBox::from_id_salt("watch_player")
+                .selected_text(egui::RichText::new(player_key(self.watch_player)).size(big))
+                .show_ui(ui, |ui| {
+                    for player in PLAYERS {
+                        ui.selectable_value(&mut self.watch_player, player, player_key(player));
+                    }
+                });
             ui.add_space(12.0);
             ui.label(egui::RichText::new("Buffer (ms)").size(big));
             // A stable id, so the buffer field's focus can be read (for the focus
             // glow below) the same way the ticket box's is.
             let buffer_id = egui::Id::new("watch_buffer_input");
-            let buffer_resp = ui.add_enabled_ui(!busy, |ui| {
-                ui.add_sized(
-                    [90.0, box_h],
-                    egui::TextEdit::singleline(&mut self.watch_buffer)
-                        .id(buffer_id)
-                        .hint_text(egui::RichText::new("auto").size(big))
-                        .font(prop.clone())
-                        .vertical_align(egui::Align::Center),
-                )
-            });
+            // Also live while a session is up: edit the buffer, press `Restart`, and the
+            // new session launches with it (the prompt under the buttons says so).
+            let buffer_resp = ui.add_sized(
+                [90.0, box_h],
+                egui::TextEdit::singleline(&mut self.watch_buffer)
+                    .id(buffer_id)
+                    .hint_text(egui::RichText::new("auto").size(big))
+                    .font(prop.clone())
+                    .vertical_align(egui::Align::Center),
+            );
             // A soft accent glow around the focused buffer field (the same halo
             // language as the ticket box's focus ring), so the active input reads as
-            // lit by the accent. A disabled (busy) field can never be focused, so the
-            // glow recedes on its own while a session is up.
+            // lit by the accent.
             if ui.ctx().memory(|m| m.has_focus(buffer_id)) {
                 soft_glow(
                     ui.painter(),
-                    buffer_resp.inner.rect,
+                    buffer_resp.rect,
                     ui.style().visuals.widgets.inactive.corner_radius,
                     ACCENT,
                 );
@@ -231,27 +231,108 @@ impl App {
 
         ui.add_space(12.0);
         if watching || starting {
-            ui.horizontal(|ui| {
+            // Two half-width actions side by side — `Restart` (left) and `■  Stop`
+            // (right) — with the status text on its own row underneath.
+            //
+            // `half` is computed BEFORE the child `Ui`: the panel's content width is
+            // the window width minus its 2×16 side margins, and `available_width()`
+            // here is exactly that. Each button is `add_sized` to `half` and the row's
+            // `item_spacing.x` is 12, so `2 * half + 12` fills the panel exactly.
+            // (`add_space` is *in addition to* `item_spacing`, so it must not be used
+            // between the two buttons, and the spacing is mutated on the child, which
+            // scopes it to this row.)
+            let half = ((ui.available_width() - 12.0) / 2.0).max(1.0);
+            let resp = ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 12.0;
+                // `Restart` brings a new session up with the player/buffer currently
+                // shown, tearing the previous one down first (`start_watch` hands the
+                // old handle to `spawn_watch`, which aborts and drains it).
+                let restart_rect =
+                    egui::Rect::from_min_size(ui.cursor().min, egui::vec2(half, 36.0));
+                let hovered = pointer_over(ui, restart_rect);
+                let pressed = pointer_pressed_over(ui, restart_rect);
+                primary_button_glow(ui.painter(), restart_rect, ACCENT, hovered, pressed);
+                let restart = ui.add_sized(
+                    [half, 36.0],
+                    egui::Button::new("Restart")
+                        .fill(ACCENT.gamma_multiply(if pressed {
+                            0.20
+                        } else if hovered {
+                            0.26
+                        } else {
+                            0.18
+                        }))
+                        .stroke(egui::Stroke::new(
+                            1.0,
+                            ACCENT.gamma_multiply(if pressed {
+                                0.50
+                            } else if hovered {
+                                0.75
+                            } else {
+                                0.55
+                            }),
+                        )),
+                );
+
                 // A subtle red halo behind the Stop button, matching the Broadcast
                 // tab, so the one control that stops a watch reads as a "stop" action.
                 // The halo also contracts on press, so the stop reads as pressed in.
-                let stop_rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(140.0, 30.0));
+                // The halo rect is re-read from the cursor, which has advanced past the
+                // Restart button and its spacing.
+                let stop_rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(half, 36.0));
                 let hovered = pointer_over(ui, stop_rect);
                 let pressed = pointer_pressed_over(ui, stop_rect);
                 primary_button_glow(ui.painter(), stop_rect, ERROR, hovered, pressed);
-                if ui
-                    .add(egui::Button::new("■  Stop").min_size(egui::vec2(140.0, 30.0)))
-                    .clicked()
-                {
-                    state::stop(&self.state, ui.ctx(), state::Track::Watch);
-                }
-                // While connecting, a small rotating arc beside the hint gives the
-                // wait visible progress; once playing it is dropped.
+                let stop = ui.add_sized(
+                    [half, 36.0],
+                    egui::Button::new("■  Stop")
+                        .fill(ERROR.gamma_multiply(if pressed {
+                            0.20
+                        } else if hovered {
+                            0.26
+                        } else {
+                            0.18
+                        }))
+                        .stroke(egui::Stroke::new(
+                            1.0,
+                            ERROR.gamma_multiply(if pressed {
+                                0.50
+                            } else if hovered {
+                                0.75
+                            } else {
+                                0.55
+                            }),
+                        )),
+                );
+                (restart, stop)
+            });
+            if resp.inner.0.clicked() {
+                self.start_watch(ui.ctx());
+            }
+            if resp.inner.1.clicked() {
+                state::stop(&self.state, ui.ctx(), state::Track::Watch);
+            }
+
+            ui.add_space(6.0);
+            // The status text on its own row under the buttons, with the connecting
+            // spinner paired to it (dropped once playing).
+            ui.horizontal(|ui| {
                 if starting {
                     spinner(ui, self.pulse.elapsed().as_secs_f32(), WATCH_ACCENT);
                 }
                 ui.label(watch_action_label(snap.watch));
             });
+
+            // Tell the viewer an edit is pending, so they know one click (`Restart`)
+            // applies it. Compares the *parsed* buffer, so `" 90 "`, `"90"` and
+            // unparseable input each collapse to one value and cannot flicker the line.
+            if busy
+                && snap.watch_applied
+                    != Some((self.watch_player, parse_buffer_ms(&self.watch_buffer)))
+            {
+                ui.add_space(4.0);
+                ui.weak("Press 'Restart' button to apply changes.");
+            }
         } else {
             // Full-width primary action, matching the Broadcast tab's Start button.
             let can_start = watch_can_start(busy, &self.watch_ticket);
@@ -335,10 +416,17 @@ impl App {
         self.config.note_ticket(&ticket_text);
         self.config.save();
 
+        // A `Restart` while a session is live hands the previous handle to
+        // `spawn_watch`, which aborts it and drains it (bounded) before bringing the
+        // new session up — so at most one watch session is ever live, and the new
+        // one launches with the player/buffer currently shown. Three sequential lock
+        // acquisitions here (take, spawn's own, store); no `.await` between them.
+        let previous = self.state.lock().unwrap().watch_session.take();
         let handle = state::spawn_watch(
             self.state.clone(),
             self.handle.clone(),
             ctx.clone(),
+            previous,
             WatchParams {
                 addr,
                 player: self.watch_player,

@@ -38,6 +38,16 @@ use crate::{udp, CommonArgs, ONLINE_TIMEOUT};
 /// At the 5-second stats tick that is a two-minute window.
 const MAX_KBPS_SAMPLES: usize = 24;
 
+/// How long a restarted watch session waits for the session it replaces to unwind
+/// before bringing the new one up.
+///
+/// A `Restart` click aborts the previous task, and the new task drains that handle
+/// first so the old player's kill has been signalled (its `PlayerHandle` drops,
+/// which fires the watcher's `stop_rx.recv()` arm) before a new player is launched
+/// onto the same UDP ports. The ceiling exists so a wedged old task can never block
+/// the new one: past two seconds we proceed regardless.
+const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// What the GUI is currently doing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -94,6 +104,15 @@ pub struct SharedState {
     /// sessions that may run at the same time (watch your own broadcast, or a
     /// friend's, while you are live), so each track owns its own handle.
     pub(crate) watch_session: Option<JoinHandle<()>>,
+    /// What the live watch session was launched with: `(player, buffer_ms)`, or
+    /// `None` while no watch session is up.
+    ///
+    /// Written only inside the same lock scope that moves the watch track out of and
+    /// back to `Idle` ([`spawn_watch`], [`stop`], [`stop_all`], [`fail`]), so the
+    /// invariant `watch.active() ⇒ watch_applied.is_some()` holds and the Watch tab's
+    /// "press Restart to apply changes" prompt is total (it can never be shown with no
+    /// record, nor hidden with a stale one).
+    pub(crate) watch_applied: Option<(Player, Option<u64>)>,
     /// The broadcast track's mode (`Idle` / `Starting` / `Broadcasting`).
     pub(crate) broadcast: Mode,
     /// The watch track's mode (`Idle` / `Starting` / `Watching`).
@@ -129,6 +148,7 @@ impl SharedState {
             bind: BindAddrs::default(),
             broadcast_session: None,
             watch_session: None,
+            watch_applied: None,
             broadcast: Mode::Idle,
             watch: Mode::Idle,
             stats: None,
@@ -151,6 +171,9 @@ impl SharedState {
 pub struct UiSnapshot {
     pub broadcast: Mode,
     pub watch: Mode,
+    /// What the live watch session was launched with (see
+    /// [`SharedState::watch_applied`]); `None` while the watch track is idle.
+    pub watch_applied: Option<(Player, Option<u64>)>,
     pub stats: Option<StreamStats>,
     pub video_kbps_history: Vec<f64>,
     pub ticket: Option<String>,
@@ -194,6 +217,9 @@ pub fn snapshot(state: &Arc<Mutex<SharedState>>) -> UiSnapshot {
     UiSnapshot {
         broadcast: g.broadcast,
         watch: g.watch,
+        // `Copy`, so the record is read under the same brief lock as the mode it
+        // belongs to.
+        watch_applied: g.watch_applied,
         stats: g.stats,
         video_kbps_history: g.video_kbps_history.iter().copied().collect(),
         ticket: g.ticket.clone(),
@@ -276,6 +302,7 @@ fn fail(state: &Arc<Mutex<SharedState>>, ctx: &egui::Context, track: Track, msg:
             }
             Track::Watch => {
                 g.watch = Mode::Idle;
+                g.watch_applied = None;
                 g.watch_error = Some(msg);
             }
         }
@@ -573,19 +600,44 @@ fn friendly_watch_error(raw: &str) -> &str {
 /// The throwaway endpoint is never written to `config.secret_hex` nor stored in
 /// `SharedState::endpoint`; it drops when the task ends (normally, on error, or
 /// when aborted by [`stop`]).
+///
+/// `previous` is the handle of the watch session this one replaces, if any (a
+/// `Restart` click). It is aborted in the same lock scope that arms `Starting` and
+/// records `watch_applied`, and the new task then waits (bounded by
+/// [`TEARDOWN_TIMEOUT`]) for it to unwind before doing any endpoint work — so the
+/// old player's kill has been signalled before a new player is launched onto the
+/// same UDP ports, and at most one watch session is ever live.
 pub fn spawn_watch(
     state: Arc<Mutex<SharedState>>,
     handle: Handle,
     ctx: egui::Context,
+    previous: Option<JoinHandle<()>>,
     params: WatchParams,
 ) -> JoinHandle<()> {
     {
+        // One lock: mode flip, the record the prompt compares against, and the
+        // abort of the session being replaced all happen atomically, so the UI can
+        // never show a live track with no record (or the reverse).
         let mut g = state.lock().unwrap();
         g.watch = Mode::Starting;
         g.watch_error = None;
+        g.watch_applied = Some((params.player, params.buffer_ms));
+        if let Some(previous) = &previous {
+            previous.abort();
+        }
     }
     ctx.request_repaint();
     handle.spawn(async move {
+        // Let the session we replace unwind first, outside every lock scope (the
+        // module's rule is that the lock is never held across an `.await`). Aborting
+        // it drops its `PlayerHandle`, whose sole `stop_tx` sender closing fires the
+        // watcher's `stop_rx.recv()` arm, i.e. the player's kill is signalled; the
+        // bounded wait gives that watcher time to finish. A finished handle returns
+        // immediately, and a wedged one is cut off at the ceiling — never blocked
+        // forever.
+        if let Some(previous) = previous {
+            let _ = timeout(TEARDOWN_TIMEOUT, previous).await;
+        }
         // Read the live identity once, releasing the lock before any `.await`, purely
         // to log a self-watch clearly; the endpoint is throwaway either way.
         let is_self = is_self_watch(&params.addr, &state.lock().unwrap().secret);
@@ -658,6 +710,9 @@ pub fn spawn_watch(
 
         let mut g = state.lock().unwrap();
         g.watch = Mode::Idle;
+        // Same lock scope as the mode flip, so the record never outlives the session
+        // it belongs to.
+        g.watch_applied = None;
         if let Err(e) = result {
             g.watch_error = Some(friendly_watch_error(&format!("{e:#}")).to_string());
         }
@@ -687,6 +742,7 @@ pub fn stop(state: &Arc<Mutex<SharedState>>, ctx: &egui::Context, track: Track) 
             }
             Track::Watch => {
                 g.watch = Mode::Idle;
+                g.watch_applied = None;
                 g.watch_session.take()
             }
         }
@@ -704,6 +760,7 @@ pub fn stop_all(state: &Arc<Mutex<SharedState>>, ctx: &egui::Context) {
         let mut g = state.lock().unwrap();
         g.broadcast = Mode::Idle;
         g.watch = Mode::Idle;
+        g.watch_applied = None;
         g.stats = None;
         g.video_kbps_history.clear();
         (g.broadcast_session.take(), g.watch_session.take())
@@ -771,6 +828,7 @@ mod tests {
             state.clone(),
             rt.handle().clone(),
             egui::Context::default(),
+            None,
             WatchParams {
                 addr: EndpointAddr::new(secret.public()),
                 player: Player::default(),
@@ -822,6 +880,7 @@ mod tests {
         let snap = |broadcast: Mode, watch: Mode| UiSnapshot {
             broadcast,
             watch,
+            watch_applied: None,
             stats: None,
             video_kbps_history: Vec::new(),
             ticket: None,
@@ -1020,5 +1079,101 @@ mod tests {
         ] {
             assert_eq!(friendly_watch_error(raw), raw, "{raw} must pass through");
         }
+    }
+
+    /// AC3 (state level): a restart hands the previous session to `spawn_watch`,
+    /// which aborts it and drains it (bounded) before bringing the new one up — so
+    /// at most one watch session is live at any moment, the record moves to the new
+    /// pair, and `stop` clears both the handle and the record.
+    ///
+    /// This proves the previous *future* unwound, i.e. the player's kill was
+    /// *signalled* (dropping its `PlayerHandle` closes the sole `stop_tx` sender,
+    /// which fires the watcher's `stop_rx.recv()` arm). It does not prove the child
+    /// process is gone, nor that the UDP play ports are free — the manual run covers
+    /// that. Complementary, not redundant.
+    #[test]
+    fn restarting_a_watch_tears_the_previous_session_down_first() {
+        // A `current_thread` runtime, driven by `block_on` so the sleeps (and the
+        // `timeout` in the drain) have a live time driver.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let secret = SecretKey::generate();
+        let state = Arc::new(Mutex::new(SharedState::new(
+            secret.clone(),
+            whip_url("127.0.0.1", 8080),
+        )));
+        let ctx = egui::Context::default();
+
+        // Session A: a stand-in that only sleeps, so nothing touches the network and
+        // the abort is observable. `JoinHandle` is not `Clone` and is moved into the
+        // state, so a drop-flag is what the test can watch from outside.
+        let torn_down = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = torn_down.clone();
+        let a = rt.spawn(async move {
+            struct Flag(Arc<std::sync::atomic::AtomicBool>);
+            impl Drop for Flag {
+                fn drop(&mut self) {
+                    self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+            let _flag = Flag(flag);
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        });
+        // Drive the runtime so A is up and running before the restart. The sleep
+        // future must be built *inside* `block_on`, where the time driver's context
+        // is live.
+        rt.block_on(async { tokio::time::sleep(Duration::from_millis(50)).await });
+        assert!(
+            !torn_down.load(std::sync::atomic::Ordering::SeqCst),
+            "A must still be live before the restart"
+        );
+
+        // Restart: A goes in as `previous`, and the new session is armed with a
+        // different player/buffer pair.
+        let b = spawn_watch(
+            state.clone(),
+            rt.handle().clone(),
+            ctx.clone(),
+            Some(a),
+            WatchParams {
+                addr: EndpointAddr::new(secret.public()),
+                player: Player::Vlc,
+                player_path: None,
+                play_addr: "127.0.0.1:0".into(),
+                buffer_ms: Some(120),
+                volume: DEFAULT_VOLUME,
+            },
+        );
+        {
+            let g = state.lock().unwrap();
+            assert_eq!(g.watch, Mode::Starting, "the restart arms `Starting`");
+            assert_eq!(
+                g.watch_applied,
+                Some((Player::Vlc, Some(120))),
+                "the record moves to the pair the new session was launched with"
+            );
+        }
+
+        // Drive again: A must be torn down, and B must still be live (it is draining
+        // `previous`, bounded by `TEARDOWN_TIMEOUT`).
+        rt.block_on(async { tokio::time::sleep(Duration::from_millis(50)).await });
+        assert!(
+            torn_down.load(std::sync::atomic::Ordering::SeqCst),
+            "the previous session was never torn down"
+        );
+        assert!(
+            !b.is_finished(),
+            "the new session must still be running while the old one is torn down"
+        );
+
+        // `stop` returns the track to idle and clears both the handle and the record,
+        // so the prompt can never be shown against a dead session.
+        stop(&state, &ctx, Track::Watch);
+        let g = state.lock().unwrap();
+        assert_eq!(g.watch, Mode::Idle, "stop returns the track to idle");
+        assert!(g.watch_session.is_none(), "stop clears the session handle");
+        assert_eq!(g.watch_applied, None, "stop clears the record");
     }
 }
