@@ -158,12 +158,19 @@ impl Player {
     /// Every player is also told where and how big to open: a [`WINDOW_WIDTH`] x
     /// [`WINDOW_HEIGHT`] (720p) window in the top-left corner, which is the largest
     /// window that still fits a small laptop screen whole.
+    ///
+    /// `script` is a staged mpv Lua script, forwarded as `--script=<path>` on the
+    /// mpv launch only. It is loaded alongside `--no-config` (files explicitly
+    /// requested on the command line are still loaded), and it must come before the
+    /// SDP so the description stays the last argument. VLC, ffplay and `None`
+    /// ignore it.
     pub fn command(
         &self,
         sdp: &Path,
         buffer: Option<Duration>,
         path: Option<&std::path::Path>,
         volume: u8,
+        script: Option<&Path>,
     ) -> Vec<String> {
         let file = sdp.display().to_string();
         // The custom path replaces the binary name, the flags stay the player's.
@@ -189,9 +196,6 @@ impl Player {
                     // A live stream must start at the live edge, never resume a
                     // watched position from a previous run.
                     "--no-resume-playback".to_string(),
-                    // Play as fast as the stream arrives, not on a wall clock, so
-                    // late-started frames are caught up instead of queued.
-                    "--untimed".to_string(),
                 ];
                 match buffer {
                     Some(ms) => {
@@ -208,6 +212,11 @@ impl Player {
                 // Enlarge the RTP/UDP receive socket buffer that lavf opens for
                 // the SDP. mpv's default is the OS default (~200 KB)
                 cmd.push("--demuxer-lavf-o=buffer_size=4194304".into());
+                // The buffer-drain control script, staged on disk by `launch()`.
+                // It goes before the SDP, which must stay the last argument.
+                if let Some(script) = script {
+                    cmd.push(format!("--script={}", script.display()));
+                }
                 cmd.push(file);
                 cmd
             }
@@ -2192,6 +2201,29 @@ async fn write_sdp(path: &std::path::Path, sdp: &str) -> Result<()> {
     Ok(())
 }
 
+/// Stage the mpv buffer-drain control script on disk for `--script=`.
+///
+/// mpv takes a script *path*, never inline source, so the Lua (embedded at
+/// compile time, so it works from any install layout) is written out to a fixed
+/// file in the system temp dir. `launch()` runs again when the media
+/// renegotiates, which rewrites the same bytes to the same path: idempotent,
+/// and the previous player has been stopped by then, so nothing accumulates.
+/// Only mpv runs Lua, so no other player stages anything. If the write fails
+/// the player is still launched, just without the control script.
+async fn stage_mpv_script(player: Player) -> Option<std::path::PathBuf> {
+    if player != Player::Mpv {
+        return None;
+    }
+    let path = std::env::temp_dir().join("streampipe-buffer-speed.lua");
+    match tokio::fs::write(&path, include_str!("../scripts/buffer_speed.lua")).await {
+        Ok(()) => Some(path),
+        Err(e) => {
+            tracing::warn!("could not stage the mpv control script: {e}");
+            None
+        }
+    }
+}
+
 /// Launch the player and ask the host for a keyframe once it is listening.
 ///
 /// `buffer` is the jitter buffer for this path, see [`auto_buffer`].
@@ -2213,17 +2245,31 @@ async fn launch(
         return Ok(None);
     }
     if cfg.no_launch {
+        // Stage the mpv control script before printing, so the printed command
+        // refers to a file that already exists.
+        let script = stage_mpv_script(cfg.player).await;
         tracing::info!(
             "not launching a player, play with: {}",
             cfg.player
-                .command(sdp_path, buffer, cfg.player_path.as_deref(), cfg.volume)
+                .command(
+                    sdp_path,
+                    buffer,
+                    cfg.player_path.as_deref(),
+                    cfg.volume,
+                    script.as_deref(),
+                )
                 .join(" ")
         );
         return Ok(None);
     }
-    let command = cfg
-        .player
-        .command(sdp_path, buffer, cfg.player_path.as_deref(), cfg.volume);
+    let script = stage_mpv_script(cfg.player).await;
+    let command = cfg.player.command(
+        sdp_path,
+        buffer,
+        cfg.player_path.as_deref(),
+        cfg.volume,
+        script.as_deref(),
+    );
     let mut child = Command::new(&command[0])
         .args(&command[1..])
         .spawn()
@@ -2617,20 +2663,36 @@ mod tests {
     #[test]
     fn player_commands_are_low_latency() {
         let path = Path::new("/tmp/x.sdp");
-        let mpv = Player::Mpv.command(path, None, None, 100);
+        let mpv = Player::Mpv.command(path, None, None, 100, None);
         assert_eq!(mpv[0], "mpv");
         assert!(mpv.contains(&"--no-config".to_string()));
         assert!(mpv.contains(&"--force-window=immediate".to_string()));
-        assert!(mpv.contains(&"--untimed".to_string()));
+        // `--untimed` plays as fast as it can decode, which drains the cache to
+        // nothing and makes the `speed` control script inert: never pass it.
+        assert!(!mpv.contains(&"--untimed".to_string()));
         assert!(mpv.contains(&"--profile=low-latency".to_string()));
         assert!(mpv.contains(&"--no-resume-playback".to_string()));
         assert_eq!(mpv.last().unwrap(), "/tmp/x.sdp");
+
+        // A staged control script is forwarded to mpv, and the SDP stays last so
+        // mpv still gets exactly one input.
+        let mpv = Player::Mpv.command(path, None, None, 100, Some(Path::new("/tmp/bs.lua")));
+        assert!(mpv.contains(&"--script=/tmp/bs.lua".to_string()), "{mpv:?}");
+        assert_eq!(mpv.last().unwrap(), "/tmp/x.sdp");
+
         assert!(Player::Vlc
-            .command(path, None, None, 100)
+            .command(path, None, None, 100, None)
             .contains(&"--network-caching=100".to_string()));
         assert!(Player::Ffplay
-            .command(path, None, None, 100)
+            .command(path, None, None, 100, None)
             .contains(&"nobuffer".to_string()));
+        // Only mpv runs Lua: the others are never handed a script.
+        for cmd in [
+            Player::Vlc.command(path, None, None, 100, Some(Path::new("/tmp/bs.lua"))),
+            Player::Ffplay.command(path, None, None, 100, Some(Path::new("/tmp/bs.lua"))),
+        ] {
+            assert!(!cmd.iter().any(|a| a.starts_with("--script=")), "{cmd:?}");
+        }
         assert!(!Player::None.launches());
         assert!(Player::Mpv.launches());
     }
@@ -2642,11 +2704,11 @@ mod tests {
     fn player_commands_carry_the_startup_volume() {
         let path = Path::new("/tmp/x.sdp");
         for buffer in [None, Some(Duration::from_millis(250))] {
-            let mpv = Player::Mpv.command(path, buffer, None, 40);
+            let mpv = Player::Mpv.command(path, buffer, None, 40, None);
             assert!(mpv.contains(&"--volume=40".to_string()), "{mpv:?}");
             assert_eq!(mpv.last().unwrap(), "/tmp/x.sdp");
 
-            let ffplay = Player::Ffplay.command(path, buffer, None, 40);
+            let ffplay = Player::Ffplay.command(path, buffer, None, 40, None);
             let i = ffplay
                 .iter()
                 .position(|a| a == "-volume")
@@ -2656,14 +2718,14 @@ mod tests {
             assert_eq!(ffplay[i + 1], "20");
             // The offset is saturating: nothing goes negative, and full scale in the
             // GUI is 80 in the command.
-            let ffplay = Player::Ffplay.command(path, buffer, None, 100);
+            let ffplay = Player::Ffplay.command(path, buffer, None, 100, None);
             let i = ffplay
                 .iter()
                 .position(|a| a == "-volume")
                 .unwrap_or_else(|| panic!("no -volume in {ffplay:?}"));
             assert_eq!(ffplay[i + 1], "80");
             for gui in [0, 20] {
-                let ffplay = Player::Ffplay.command(path, buffer, None, gui);
+                let ffplay = Player::Ffplay.command(path, buffer, None, gui, None);
                 let i = ffplay
                     .iter()
                     .position(|a| a == "-volume")
@@ -2671,13 +2733,13 @@ mod tests {
                 assert_eq!(ffplay[i + 1], "0", "gui {gui}");
             }
 
-            let vlc = Player::Vlc.command(path, buffer, None, 40);
+            let vlc = Player::Vlc.command(path, buffer, None, 40, None);
             assert!(vlc.contains(&"--gain=0.40".to_string()), "{vlc:?}");
             // The legacy name is a warning, not a volume: never pass it.
             assert!(!vlc.iter().any(|a| a == "--volume=40"));
 
             // A custom binary keeps its player's volume flag.
-            let mpv = Player::Mpv.command(path, buffer, Some(Path::new("/opt/mpv")), 40);
+            let mpv = Player::Mpv.command(path, buffer, Some(Path::new("/opt/mpv")), 40, None);
             assert!(mpv.contains(&"--volume=40".to_string()));
         }
     }
@@ -2691,21 +2753,21 @@ mod tests {
     fn player_windows_open_at_720p_in_the_corner() {
         let path = Path::new("/tmp/x.sdp");
         for buffer in [None, Some(Duration::from_millis(250))] {
-            let mpv = Player::Mpv.command(path, buffer, None, 60);
+            let mpv = Player::Mpv.command(path, buffer, None, 60, None);
             assert!(
                 mpv.contains(&"--geometry=1280x720+0+0".to_string()),
                 "{mpv:?}"
             );
             assert_eq!(mpv.last().unwrap(), "/tmp/x.sdp");
 
-            let vlc = Player::Vlc.command(path, buffer, None, 60);
+            let vlc = Player::Vlc.command(path, buffer, None, 60, None);
             assert!(vlc.contains(&"--width=1280".to_string()), "{vlc:?}");
             assert!(vlc.contains(&"--height=720".to_string()), "{vlc:?}");
             assert!(vlc.contains(&"--video-x=0".to_string()), "{vlc:?}");
             assert!(vlc.contains(&"--video-y=0".to_string()), "{vlc:?}");
             assert_eq!(vlc.last().unwrap(), "/tmp/x.sdp");
 
-            let ffplay = Player::Ffplay.command(path, buffer, None, 60);
+            let ffplay = Player::Ffplay.command(path, buffer, None, 60, None);
             // ffplay's window flags are space-separated pairs, so check the pair.
             let pair = |name: &str, value: &str| {
                 let i = ffplay
@@ -2726,12 +2788,13 @@ mod tests {
     fn a_player_path_replaces_the_binary_but_keeps_the_flags() {
         let path = Path::new("/tmp/x.sdp");
         let bin = Path::new("/opt/mpv");
-        let mpv = Player::Mpv.command(path, None, Some(bin), 100);
+        let mpv = Player::Mpv.command(path, None, Some(bin), 100, None);
         assert_eq!(mpv[0], "/opt/mpv");
         assert!(mpv.contains(&"--profile=low-latency".to_string()));
         assert_eq!(mpv.last().unwrap(), "/tmp/x.sdp");
         // The path is used whatever the player, with that player's flags.
-        let ffplay = Player::Ffplay.command(path, Some(Duration::from_millis(300)), Some(bin), 100);
+        let ffplay =
+            Player::Ffplay.command(path, Some(Duration::from_millis(300)), Some(bin), 100, None);
         assert_eq!(ffplay[0], "/opt/mpv");
         assert!(ffplay.contains(&"+discardcorrupt".to_string()));
     }
@@ -2740,19 +2803,19 @@ mod tests {
     fn a_buffer_switches_the_player_out_of_zero_buffering() {
         let path = Path::new("/tmp/x.sdp");
         let ms = Duration::from_millis(300);
-        let mpv = Player::Mpv.command(path, Some(ms), None, 100);
+        let mpv = Player::Mpv.command(path, Some(ms), None, 100, None);
         assert!(!mpv.contains(&"--profile=low-latency".to_string()));
         assert!(!mpv.contains(&"--no-cache".to_string()));
         assert!(mpv.contains(&"--cache=yes".to_string()));
         assert!(mpv.contains(&"--no-resume-playback".to_string()));
         assert!(mpv.iter().any(|a| a.contains("max_delay=300000")));
 
-        let ffplay = Player::Ffplay.command(path, Some(ms), None, 100);
+        let ffplay = Player::Ffplay.command(path, Some(ms), None, 100, None);
         assert!(!ffplay.iter().any(|a| a == "nobuffer"));
         assert!(ffplay.contains(&"+discardcorrupt".to_string()));
         assert!(ffplay.iter().any(|a| a == "300000"));
 
-        let vlc = Player::Vlc.command(path, Some(ms), None, 100);
+        let vlc = Player::Vlc.command(path, Some(ms), None, 100, None);
         assert!(vlc.contains(&"--network-caching=300".to_string()));
     }
 

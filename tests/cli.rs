@@ -7,8 +7,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use streampipe::EndpointTicket;
 use rand::RngExt;
+use streampipe::EndpointTicket;
 
 // binary path
 fn streampipe_bin() -> &'static str {

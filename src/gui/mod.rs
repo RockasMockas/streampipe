@@ -3170,7 +3170,7 @@ mod tests {
         click_at(&mut app, &ctx, save.center(), size);
         assert_eq!(
             app.toast.as_ref().map(|(msg, _)| msg.as_str()),
-            Some("Saved"),
+            Some("Saved ✓"),
             "Save raises the confirmation toast"
         );
         assert!(
