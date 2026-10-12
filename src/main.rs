@@ -57,6 +57,7 @@ const COPY_BUF: usize = 8 * 1024;
 /// You can also specify a port for the endpoint. If you don't, a random one
 /// will be chosen.
 #[derive(Parser, Debug)]
+#[command(version)]
 pub struct Args {
     #[clap(subcommand)]
     pub command: Commands,
