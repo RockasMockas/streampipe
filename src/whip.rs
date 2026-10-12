@@ -2,7 +2,7 @@
 //!
 //! OBS Studio 30 and newer has a built-in WHIP output: service "WHIP", server
 //! URL and bearer token. This server answers the SDP offer OBS posts with the
-//! SDP answer of a [`crate::webrtc`] session, which then receives the media
+//! SDP answer of a [`crate::stream`] session, which then receives the media
 //! over ICE/DTLS-SRTP on the local network.
 //!
 //! Only what OBS actually uses is implemented:

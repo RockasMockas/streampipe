@@ -15,10 +15,10 @@ use iroh::{endpoint::Accepting, Endpoint, EndpointAddr, SecretKey};
 use n0_error::{bail_any, ensure_any, AnyError, Result, StdResultExt};
 use streampipe::{
     common::{
-        create_endpoint, log_level, stats_enabled, udp_alpn, webrtc_alpn, CommonArgs,
+        create_endpoint, log_level, stats_enabled, stream_alpn, udp_alpn, CommonArgs,
         ONLINE_TIMEOUT,
     },
-    gui, udp, webrtc, EndpointTicket,
+    gui, stream, udp, EndpointTicket,
 };
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
@@ -294,7 +294,7 @@ pub struct ListenWhipArgs {
     ///
     /// To accept WHIP from other machines on the local network, use
     /// 0.0.0.0:8080 and set --ice-addr to the address OBS can reach.
-    #[clap(long, default_value = webrtc::DEFAULT_WHIP_ADDR)]
+    #[clap(long, default_value = stream::DEFAULT_WHIP_ADDR)]
     pub listen: String,
 
     /// The bearer token OBS has to present.
@@ -325,7 +325,7 @@ pub struct ConnectWhipArgs {
     ///
     /// RTP is delivered to the even port of this address, RTCP to the port
     /// above it, and audio to the next pair, so 5004 needs 5004 to 5007 free.
-    #[clap(long, default_value = webrtc::DEFAULT_PLAY_ADDR)]
+    #[clap(long, default_value = stream::DEFAULT_PLAY_ADDR)]
     pub addr: String,
 
     /// Where to write the SDP file that describes the stream to the player.
@@ -342,8 +342,8 @@ pub struct ConnectWhipArgs {
     /// mpv is the default and was verified to work, together with ffplay. VLC
     /// is offered as an alternative but could not be made to accept a plain RTP
     /// SDP on the 3.0.x build this was tested with, so use it with care.
-    #[clap(long, value_enum, default_value_t = webrtc::Player::Mpv)]
-    pub player: webrtc::Player,
+    #[clap(long, value_enum, default_value_t = stream::Player::Mpv)]
+    pub player: stream::Player,
 
     /// The path to the player binary, for a player that is not on `PATH`.
     ///
@@ -1063,7 +1063,7 @@ fn create_short_ticket(addr: &EndpointAddr) -> EndpointTicket {
 async fn listen_whip(args: ListenWhipArgs) -> Result<()> {
     let listen = udp::resolve(&args.listen)?;
     let secret_key = get_or_create_secret()?;
-    let alpn = webrtc_alpn(&args.common)?;
+    let alpn = stream_alpn(&args.common)?;
     let endpoint = create_endpoint(secret_key, &args.common, vec![alpn.clone()]).await?;
     // wait for the endpoint to figure out its address before making a ticket
     if (timeout(ONLINE_TIMEOUT, endpoint.online()).await).is_err() {
@@ -1090,14 +1090,14 @@ async fn listen_whip(args: ListenWhipArgs) -> Result<()> {
         hex::encode(&alpn)
     );
 
-    let cfg = webrtc::WhipConfig {
+    let cfg = stream::WhipConfig {
         listen,
         bearer_token: args.bearer_token.clone(),
         ice_addr: args.ice_addr,
         stats: stats_enabled(args.common.verbosity()),
         stats_tx: None,
     };
-    webrtc::listen_whip(endpoint, cfg).await
+    stream::listen_whip(endpoint, cfg).await
 }
 
 /// Connect to a WHIP host and play the stream in a local media player.
@@ -1113,7 +1113,7 @@ async fn connect_whip(args: ConnectWhipArgs) -> Result<()> {
         eprintln!("Warning: Failed to connect to the home relay");
     }
 
-    let alpn = webrtc_alpn(&args.common)?;
+    let alpn = stream_alpn(&args.common)?;
     let remote_addr = args.ticket.endpoint_addr();
     tracing::debug!(
         "dialing {} with alpn {} (hex {})",
@@ -1127,10 +1127,10 @@ async fn connect_whip(args: ConnectWhipArgs) -> Result<()> {
     let (sdp, sdp_here) = match args.sdp.clone() {
         Some(Some(p)) => (Some(p), false),
         Some(None) => (None, true),
-        None => (None, args.player == webrtc::Player::None),
+        None => (None, args.player == stream::Player::None),
     };
 
-    let cfg = webrtc::ViewerConfig {
+    let cfg = stream::ViewerConfig {
         addr: remote_addr.clone(),
         alpn,
         play,
@@ -1147,7 +1147,7 @@ async fn connect_whip(args: ConnectWhipArgs) -> Result<()> {
     };
 
     let result = select! {
-        res = webrtc::connect_whip(endpoint.clone(), cfg) => {
+        res = stream::connect_whip(endpoint.clone(), cfg) => {
             res
         }
         _ = tokio::signal::ctrl_c() => {

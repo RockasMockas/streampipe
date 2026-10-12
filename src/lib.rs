@@ -2,21 +2,17 @@
 pub const ALPN: &[u8] = b"DUMBPIPEV0";
 
 /// The handshake sent on an opened bidi stream.
-///
-/// The side that calls `open_bi()` sends it, the side that calls `accept_bi()`
-/// consumes it.
 pub const HANDSHAKE: [u8; 5] = *b"hello";
 
-/// The ALPN for the WebRTC subcommands, deliberately distinct from [`ALPN`] so a
-/// WebRTC viewer can never be mistaken for a pipe connector.
-pub const WEBRTC_ALPN: &[u8] = b"STREAMPIPE_WEBRTC_V0";
+/// The ALPN for the WHIP/RTP subcommands (`listen-whip` / `connect-whip`),
+pub const STREAM_ALPN: &[u8] = b"STREAMPIPE_WEBRTC_V0";
 
 pub mod common;
 pub mod gui;
 pub mod rtp;
 pub mod sdp;
+pub mod stream;
 pub mod udp;
-pub mod webrtc;
 pub mod whip;
 
 pub use iroh_tickets::endpoint::EndpointTicket;
@@ -35,7 +31,7 @@ mod tests {
 
     #[test]
     fn new_features_use_streampipe_alpn() {
-        assert_eq!(WEBRTC_ALPN, b"STREAMPIPE_WEBRTC_V0");
+        assert_eq!(STREAM_ALPN, b"STREAMPIPE_WEBRTC_V0");
         assert_eq!(udp::ALPN, b"STREAMPIPE_UDP_V0");
     }
 }

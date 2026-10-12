@@ -1,29 +1,20 @@
-//! WebRTC ingest and playback over an iroh connection.
+//! WHIP ingest and RTP playback over an iroh connection.
 //!
-//! Neither mpv nor VLC is a WebRTC client: they have no ICE, no DTLS and no
-//! way to negotiate a stream. Streampipe therefore terminates WebRTC on both
-//! ends and hands the viewer plain RTP plus a generated SDP file:
-//!
-//! ```text
-//! OBS --WHIP/HTTP--> [ host: str0m ] --iroh datagrams--> [ viewer ] --udp--> mpv
-//! ```
+//! The only WebRTC on this path is the ingest leg: OBS speaks WHIP (the
+//! WebRTC-HTTP ingestion protocol) to a small HTTP server, str0m terminates that
+//! one peer connection (ICE, DTLS, SRTP) on the host, and everything downstream
+//! is plain RTP. 
 //!
 //! The host is the *media authority*. It knows what the publisher offered and
 //! which payload types it actually sends, so it can tell a viewer everything it
 //! needs to write a playable SDP ([`crate::sdp::SessionHeader`]), and it gates
 //! the media it forwards per viewer so that a viewer that joins in the middle of
-//! a GOP starts at a keyframe. Without that, a player joined mid-GOP with no
-//! parameter sets shows a grey or corrupt picture until the next IDR, and mpv
-//! logs `non-existing PPS` for every packet.
+//! a GOP starts at a keyframe. 
 //!
 //! The media path is unbuffered: every RTP packet is forwarded as one QUIC
 //! datagram as soon as it arrives, so there is no head-of-line blocking. A
 //! packet larger than the connection's `max_datagram_size()` is fragmented into
-//! several datagrams and reassembled by the viewer, never dropped: on a local
-//! network nothing fragments, but across a continent the QUIC datagram limit
-//! sits near 1100 bytes and full-size RTP packets would otherwise be lost on
-//! every frame.
-
+//! several datagrams and reassembled by the viewer.
 use std::{
     io,
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -131,19 +122,7 @@ pub enum Player {
 }
 
 impl Player {
-    /// The command line used to play the SDP file at `sdp`.
-    ///
-    /// With `buffer` unset the lowest-latency flags are used (right on a local
-    /// network); across a continent the path jitters and reorders, so `buffer` gives
-    /// the player time to absorb that.
-    ///
-    /// `path` overrides the player binary, for a player not on `PATH`.
-    ///
-    /// `volume` is the startup volume in percent (0-100) as the GUI set it. mpv
-    /// takes `--volume=<0-100>`; VLC takes the audio-output `--gain` multiplier
-    /// (VLC 3 dropped `--volume`); ffplay takes `-volume <0-100>` shifted 20 points
-    /// down by `FFPLAY_VOLUME_OFFSET` (its scale is louder per point). 100 is unity
-    /// in all three.
+    /// Used to play the SDP file.
     pub fn command(
         &self,
         sdp: &Path,
@@ -320,7 +299,7 @@ impl Counters {
 
     fn log_periodic(&self) {
         tracing::debug!(
-            "webrtc tunnel stats: {} packets / {} bytes forwarded, \
+            "media tunnel stats: {} packets / {} bytes forwarded, \
              {} fragmented, {} oversized dropped, {} unwanted payload types dropped, \
              {} undeliverable, {} keyframe requests",
             self.get(&self.forwarded),
@@ -335,7 +314,7 @@ impl Counters {
 
     fn log_final(&self) {
         tracing::info!(
-            "webrtc tunnel closed: {} packets / {} bytes forwarded, \
+            "media tunnel closed: {} packets / {} bytes forwarded, \
              {} fragmented, {} oversized dropped, {} unwanted payload types dropped, \
              {} undeliverable, {} keyframe requests",
             self.get(&self.forwarded),
@@ -681,7 +660,7 @@ pub async fn listen_whip(endpoint: Endpoint, cfg: WhipConfig) -> Result<()> {
     let ice_addr = ice
         .local_addr()
         .std_context("error getting the ice socket address")?;
-    tracing::info!("webrtc ice candidate is udp://{ice_addr}");
+    tracing::info!("ice candidate is udp://{ice_addr}");
 
     let (req_tx, req_rx) = mpsc::channel::<WhipRequest>(16);
     let (viewer_tx, viewer_rx) = mpsc::channel::<ViewerEvent>(32);

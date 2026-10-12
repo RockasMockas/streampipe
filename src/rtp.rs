@@ -1,6 +1,6 @@
-//! RTP framing for the webrtc tunnel.
+//! RTP framing for the media tunnel.
 //!
-//! The host side of [`crate::webrtc`] receives parsed RTP packets from str0m
+//! The host side of [`crate::stream`] receives parsed RTP packets from str0m
 //! (`Event::RtpPacket` hands out a parsed header and a headerless payload) and
 //! forwards them verbatim to viewers over QUIC datagrams, so a viewer is a
 //! plain UDP forwarder towards a local media player.

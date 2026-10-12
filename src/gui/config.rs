@@ -13,7 +13,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::webrtc::Player;
+use crate::stream::Player;
 use iroh::SecretKey;
 use serde::{Deserialize, Serialize};
 
@@ -140,7 +140,7 @@ impl Default for Config {
             player_paths: PlayerPaths::default(),
             buffer_ms: None,
             volume: DEFAULT_VOLUME,
-            play_addr: crate::webrtc::DEFAULT_PLAY_ADDR.to_string(),
+            play_addr: crate::stream::DEFAULT_PLAY_ADDR.to_string(),
             broadcast_host: "127.0.0.1".to_string(),
             broadcast_port: 8080,
             bearer_token: None,

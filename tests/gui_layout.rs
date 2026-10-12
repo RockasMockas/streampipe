@@ -16,7 +16,7 @@ use streampipe::{
         state::Mode,
         Tab, ACCENT,
     },
-    webrtc::{Player, StreamStats},
+    stream::{Player, StreamStats},
 };
 
 use common::{

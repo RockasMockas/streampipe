@@ -3,7 +3,7 @@
 //! The eframe event loop runs on the main thread; async work runs on two tokio
 //! runtimes. The primary one hosts the UI's async work (the stats consumer that
 //! requests repaints); a dedicated `streampipe-engine` runtime runs every media
-//! session, so nothing in the WebRTC hot path shares a thread with rendering.
+//! session, so nothing in the streaming hot path shares a thread with rendering.
 //! See [`state`] for the threading contract.
 
 pub mod broadcast;
@@ -18,7 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::webrtc::{Player, StreamStats};
+use crate::stream::{Player, StreamStats};
 use eframe::egui::{self, Ui};
 use tokio::{runtime::Handle, sync::mpsc};
 

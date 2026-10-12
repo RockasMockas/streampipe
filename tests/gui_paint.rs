@@ -14,7 +14,7 @@ use streampipe::{
         error_callout, log, log_line_color, section_tick, soft_glow, sonar_pulse, spinner,
         state::Mode, Tab, ACCENT, ERROR, WARN_AMBER, WATCH_ACCENT,
     },
-    webrtc::StreamStats,
+    stream::StreamStats,
 };
 
 use common::{live_dot_present, render_shapes, test_app};

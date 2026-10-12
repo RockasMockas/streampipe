@@ -103,12 +103,11 @@ pub fn parse_alpn(alpn: &str) -> Result<Vec<u8>> {
     })
 }
 
-/// The ALPN for a WebRTC tunnel — dedicated, so a viewer can never be mistaken
-/// for a stream or udp connector.
-pub fn webrtc_alpn(common: &CommonArgs) -> Result<Vec<u8>> {
+/// The ALPN for a WHIP/RTP media tunnel
+pub fn stream_alpn(common: &CommonArgs) -> Result<Vec<u8>> {
     Ok(match &common.custom_alpn {
         Some(alpn) => parse_alpn(alpn)?,
-        None => crate::WEBRTC_ALPN.to_vec(),
+        None => crate::STREAM_ALPN.to_vec(),
     })
 }
 

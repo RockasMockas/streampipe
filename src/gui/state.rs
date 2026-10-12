@@ -27,10 +27,9 @@ use iroh::{Endpoint, EndpointAddr, SecretKey};
 use tokio::{runtime::Handle, sync::mpsc, task::JoinHandle, time::timeout};
 
 use crate::{
-    common::{create_endpoint, webrtc_alpn, CommonArgs, ONLINE_TIMEOUT},
-    udp,
-    webrtc::{self, Player, StreamStats, ViewerConfig, WhipConfig},
-    EndpointTicket, WEBRTC_ALPN,
+    common::{create_endpoint, stream_alpn, CommonArgs, ONLINE_TIMEOUT},
+    stream::{self, Player, StreamStats, ViewerConfig, WhipConfig},
+    udp, EndpointTicket, STREAM_ALPN,
 };
 
 /// How many video-bitrate samples the stats sparkline keeps (oldest first). At the
@@ -262,7 +261,7 @@ async fn ensure_endpoint(
         verbose: 1,
         verbose_max: 3,
     };
-    let alpn = webrtc_alpn(&common)?;
+    let alpn = stream_alpn(&common)?;
     let endpoint = create_endpoint(secret, &common, vec![alpn]).await?;
     let mut g = state.lock().unwrap();
     g.endpoint = Some(endpoint.clone());
@@ -320,7 +319,7 @@ pub struct BroadcastParams {
 ///
 /// Sets the mode to `Starting` synchronously, then brings the endpoint online, mints a
 /// fresh ticket from the live endpoint address (exactly like the CLI `listen-whip`) and
-/// runs [`webrtc::listen_whip`] until it returns or is aborted.
+/// runs [`stream::listen_whip`] until it returns or is aborted.
 pub fn spawn_broadcast(
     state: Arc<Mutex<SharedState>>,
     handle: Handle,
@@ -390,7 +389,7 @@ pub fn spawn_broadcast(
             stats: true,
             stats_tx: Some(stats_tx),
         };
-        let result = webrtc::listen_whip(endpoint, cfg).await;
+        let result = stream::listen_whip(endpoint, cfg).await;
 
         let mut g = state.lock().unwrap();
         g.broadcast = Mode::Idle;
@@ -540,7 +539,7 @@ fn is_self_watch(addr: &EndpointAddr, secret: &SecretKey) -> bool {
 const STREAM_STOPPED: &str = "Broadcaster has stopped streaming.";
 
 /// The engine's wording for "the viewer's datagram read failed", as built by
-/// `webrtc::connect_whip` when `Connection::read_datagram` returns an error.
+/// `stream::connect_whip` when `Connection::read_datagram` returns an error.
 const DATAGRAM_READ_FAILED: &str = "error reading datagrams from the host:";
 
 /// Map a raw watch-session failure to the text the Watch tab shows.
@@ -685,7 +684,7 @@ pub fn spawn_watch(
         let (media_tx, mut media_rx) = mpsc::unbounded_channel::<bool>();
         let cfg = ViewerConfig {
             addr: params.addr,
-            alpn: WEBRTC_ALPN.to_vec(),
+            alpn: STREAM_ALPN.to_vec(),
             play,
             sdp: None,
             sdp_here: false,
@@ -709,7 +708,7 @@ pub fn spawn_watch(
                 mirror_ctx.request_repaint();
             }
         });
-        let result = webrtc::connect_whip(endpoint, cfg).await;
+        let result = stream::connect_whip(endpoint, cfg).await;
         // The sender went away with `cfg`, so the mirror has already seen the channel
         // close; the abort is belt-and-braces so nothing outlives the session.
         mirror.abort();

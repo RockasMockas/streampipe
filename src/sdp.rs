@@ -1,4 +1,4 @@
-//! SDP handling for the webrtc tunnel.
+//! SDP handling for the WHIP ingest / RTP playback path.
 //!
 //! The host is the media authority: it knows what the publisher (OBS) actually
 //! offered and which payload types it actually sends, and it tells the viewer
