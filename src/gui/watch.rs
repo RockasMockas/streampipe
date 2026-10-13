@@ -75,10 +75,15 @@ impl App {
             );
             ui.label(egui::RichText::new("Stream ticket").strong().size(head));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // "Select Contact" opens the Contacts overlay; 28 tall, flush right.
+                // "Select Contact" opens the Contacts overlay; 22 tall, flush right and
+                // vertically centred within the heading row.
+                let row_h = ui.available_height().max(22.0);
                 let rect = egui::Rect::from_min_size(
-                    egui::pos2(ui.cursor().max.x - 140.0, ui.cursor().min.y),
-                    egui::vec2(140.0, 28.0),
+                    egui::pos2(
+                        ui.cursor().max.x - 140.0,
+                        ui.cursor().min.y + (row_h - 22.0) * 0.5,
+                    ),
+                    egui::vec2(140.0, 22.0),
                 );
                 let hovered = pointer_over(ui, rect);
                 let pressed = pointer_pressed_over(ui, rect);
@@ -101,7 +106,7 @@ impl App {
                             0.55
                         }),
                     ));
-                if ui.add_sized([140.0, 28.0], button).clicked() {
+                if ui.add_sized([140.0, 22.0], button).clicked() {
                     self.show_contacts = true;
                     // A click schedules its own repaint; this lands the overlay on the very
                     // next frame even when the window has fallen asleep.

@@ -113,6 +113,9 @@ pub struct App {
     pub copied: Option<(&'static str, Instant)>,
     /// A transient action-complete toast (e.g. "Relay refreshed ✓") and when raised.
     pub toast: Option<(String, Instant)>,
+    /// When true, the live [`Self::toast`] is drawn in the error colour (e.g. a contact
+    /// whose ticket failed to parse and could not be saved).
+    pub toast_error: bool,
     /// Clock origin for the pulse animations, so they advance between repaints.
     pub pulse: Instant,
     /// Whether the next window-focused frame should autofocus the active tab's primary
@@ -201,6 +204,7 @@ impl App {
             watch_volume,
             copied: None,
             toast: None,
+            toast_error: false,
             pulse: Instant::now(),
             focus_primary: true,
             tab_slide: 0.0,
@@ -590,9 +594,17 @@ impl App {
         let alpha = (1.0 - elapsed.as_secs_f32() / TOAST.as_secs_f32()).clamp(0.0, 1.0);
         let enter = (elapsed.as_secs_f32() / 0.2).clamp(0.0, 1.0);
         let rise = (1.0 - enter * enter) * 8.0;
+        // An error toast inverts to the red palette; everything else stays green. A
+        // "Copied" toast (which takes precedence over `toast`) is always green.
+        let is_error = self.toast_error && self.copied.is_none();
+        let (fill_rgb, tint) = if is_error {
+            ((44, 30, 32), ERROR)
+        } else {
+            ((30, 42, 36), ACCENT)
+        };
         let frame = egui::Frame::popup(ui.style())
-            .fill(egui::Color32::from_rgb(30, 42, 36).gamma_multiply(alpha))
-            .stroke(egui::Stroke::new(1.0, ACCENT.gamma_multiply(alpha)))
+            .fill(egui::Color32::from_rgb(fill_rgb.0, fill_rgb.1, fill_rgb.2).gamma_multiply(alpha))
+            .stroke(egui::Stroke::new(1.0, tint.gamma_multiply(alpha)))
             .inner_margin(egui::Margin::symmetric(14, 6));
         egui::Area::new(egui::Id::new("copy_toast"))
             .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -24.0 + rise])
@@ -603,7 +615,7 @@ impl App {
                     ui.label(
                         egui::RichText::new(text)
                             .strong()
-                            .color(ACCENT.gamma_multiply(alpha)),
+                            .color(tint.gamma_multiply(alpha)),
                     );
                 });
             });

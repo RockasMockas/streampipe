@@ -226,13 +226,13 @@ fn watch_tab_renders_at_min_size() {
     }
 
     // The "Select Contact" button is painted, on the heading row above the ticket box,
-    // right-aligned, and 28 tall (never the 30-tall footer size).
+    // right-aligned, and 22 tall (never the 30-tall footer size).
     let btn = shapes
         .iter()
         .find_map(|s| match &s.shape {
             egui::epaint::Shape::Rect(r)
                 if r.fill == WATCH_ACCENT.gamma_multiply(0.18)
-                    && (26.0..=30.0).contains(&r.rect.height()) =>
+                    && (20.0..=24.0).contains(&r.rect.height()) =>
             {
                 Some(r.rect)
             }

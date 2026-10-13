@@ -340,13 +340,19 @@ fn contacts_can_be_added_edited_and_removed() {
     );
 
     // The row's "Save" (the first match — the footer's is below it) writes the list,
-    // raises the confirmation pill, and returns the row to view mode.
+    // raises the confirmation pill, and returns the row to view mode. Fill a parseable
+    // ticket first: an empty/invalid ticket is now refused with a red error toast.
+    app.config.contacts[0].ticket = real_ticket();
     let save = text_rect(&out.shapes, "Save").expect("the row's 'Save' button is painted");
     click_at(&mut app, &ctx, save.center(), SIZE);
     assert_eq!(
         app.toast.as_ref().map(|(m, _)| m.as_str()),
         Some("Saved ✓"),
         "Save raises the confirmation toast"
+    );
+    assert!(
+        !app.toast_error,
+        "a valid ticket saves without the error toast"
     );
     let written = std::fs::read_to_string(dir.path().join("streampipe").join("config.json"))
         .expect("Save wrote the redirected config");
@@ -406,6 +412,49 @@ fn contacts_can_be_added_edited_and_removed() {
     assert!(app.config.contacts.is_empty(), "confirming removes the row");
     assert_eq!(app.editing_contact, None, "the row left edit mode");
     assert_eq!(app.contact_edit_prev, None, "nothing animates out");
+
+    std::env::remove_var("XDG_CONFIG_HOME");
+}
+
+/// An invalid (here, empty) ticket is refused on Save: a red error toast rises, the row
+/// stays in edit mode, and nothing is written to disk.
+#[test]
+fn saving_an_invalid_ticket_is_refused_with_an_error_toast() {
+    let _guard = streampipe::gui::config::CONFIG_ENV.lock().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    std::env::set_var("XDG_CONFIG_HOME", dir.path());
+
+    let (mut app, _rt) = test_app();
+    app.show_contacts = true;
+    let ctx = egui::Context::default();
+
+    // Add a row (opens in edit mode, empty ticket), settle, then hit "Save".
+    let out = drive_frames(&mut app, &ctx, SIZE, 3);
+    let add = text_rect(&out.shapes, "+  Add contact").expect("the add button is painted");
+    click_at(&mut app, &ctx, add.center(), SIZE);
+    drive_until_settled(&mut app, &ctx, SIZE, 1.0);
+    let out = drive_frames(&mut app, &ctx, SIZE, 1);
+
+    let save = text_rect(&out.shapes, "Save").expect("the row's 'Save' button is painted");
+    click_at(&mut app, &ctx, save.center(), SIZE);
+
+    assert!(
+        app.toast_error,
+        "the refusal raises the toast in the error colour"
+    );
+    assert!(
+        app.toast.as_ref().map(|(m, _)| m.as_str()) == Some("Invalid ticket — check and try again"),
+        "the error toast explains the refusal: {:?}",
+        app.toast
+    );
+    assert!(
+        app.editing_contact.is_some(),
+        "the row stays open for correction after a refused save"
+    );
+    assert!(
+        !dir.path().join("streampipe").join("config.json").exists(),
+        "a refused save writes nothing to disk"
+    );
 
     std::env::remove_var("XDG_CONFIG_HOME");
 }

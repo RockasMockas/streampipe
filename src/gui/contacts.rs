@@ -20,7 +20,7 @@ use std::time::Instant;
 use eframe::egui::{self, Context, Ui};
 
 use super::{
-    config::Contact, options::CLOSE_GREY, contact_chip, pointer_over, pointer_pressed_over,
+    config::{Contact, ticket_is_valid}, options::CLOSE_GREY, contact_chip, pointer_over, pointer_pressed_over,
     soft_glow, top_bevel, App, Tab, ACCENT, ERROR, WATCH_ACCENT,
 };
 
@@ -759,13 +759,21 @@ impl App {
             self.focus_contact_row = Some(i);
             ui.ctx().request_repaint();
         }
-        if save_idx.is_some() {
+        if let Some(i) = save_idx {
             // Row "Save" writes the config now, raises the toast, and returns the row
-            // to view mode.
-            self.config.save();
-            dirty = false;
-            self.set_editing(None);
-            self.toast = Some(("Saved ✓".to_string(), Instant::now()));
+            // to view mode — but only if the ticket parses. A malformed ticket would
+            // never dial, so refuse the save, flag the field with a red toast, and
+            // leave the row open for correction.
+            if ticket_is_valid(&self.config.contacts[i].ticket) {
+                self.config.save();
+                dirty = false;
+                self.set_editing(None);
+                self.toast_error = false;
+                self.toast = Some(("Saved ✓".to_string(), Instant::now()));
+            } else {
+                self.toast_error = true;
+                self.toast = Some(("Invalid ticket — check and try again".to_string(), Instant::now()));
+            }
             ui.ctx().request_repaint();
         }
         // A "Delete" click only *requests* removal — the row is deleted from the
