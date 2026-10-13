@@ -21,7 +21,7 @@ use eframe::egui::{self, Context, Ui};
 
 use super::{
     config::Contact, options::CLOSE_GREY, pointer_over, pointer_pressed_over, primary_button_glow,
-    soft_glow, truncate, App, ACCENT, ERROR, WATCH_ACCENT,
+    soft_glow, top_bevel, truncate, App, ACCENT, ERROR, WATCH_ACCENT,
 };
 
 /// The footer pair's box — the same size and painted language as Settings' Save/Close.
@@ -319,6 +319,10 @@ impl App {
                             stroke,
                             egui::StrokeKind::Inside,
                         );
+                        // A faint "light catch" along the top edge, so the card reads as
+                        // lit from above — the same depth cue the central panel's ground
+                        // and the error callout use.
+                        top_bevel(ui.painter(), row_rect, 7);
 
                         // Inset the initials avatar from the card's left edge.
                         ui.add_space(8.0);
@@ -327,19 +331,32 @@ impl App {
                             egui::Sense::hover(),
                         );
                         let (initials, hue) = avatar_for(&contact.name);
+                        // The avatar eases from 90% to full size as the row opens (`p`),
+                        // so the contact's face "wakes up" when its row goes into edit
+                        // mode. `p` is already an ease-out, so a linear mix in `p`
+                        // arrives quickly and settles gently — no extra clock needed.
+                        let av_scale = 0.9 + 0.1 * p;
+                        let av_r = (AVATAR_D * 0.5 - 1.0) * av_scale;
                         let [ar, ag, ab, _aa] =
                             egui::epaint::Hsva::new(hue, 0.42, 0.5, 1.0).to_srgba_unmultiplied();
                         let av_bg = egui::Color32::from_rgba_unmultiplied(ar, ag, ab, 255);
-                        ui.painter().circle_filled(
+                        ui.painter().circle_filled(avatar_rect.center(), av_r, av_bg);
+                        // A 1px ring in a brighter shade of the same hue gives each
+                        // contact a distinct, polished face — the app's stroked-pill
+                        // language, applied to a circle.
+                        let [rr, rg, rb, _ra] =
+                            egui::epaint::Hsva::new(hue, 0.42, 0.74, 1.0).to_srgba_unmultiplied();
+                        let ring = egui::Color32::from_rgba_unmultiplied(rr, rg, rb, 140);
+                        ui.painter().circle_stroke(
                             avatar_rect.center(),
-                            AVATAR_D * 0.5 - 1.0,
-                            av_bg,
+                            av_r,
+                            egui::Stroke::new(1.0, ring),
                         );
                         ui.painter().text(
                             avatar_rect.center(),
                             egui::Align2::CENTER_CENTER,
                             &initials,
-                            egui::FontId::proportional(11.0),
+                            egui::FontId::proportional(11.0 * av_scale),
                             egui::Color32::from_rgb(245, 245, 250),
                         );
                         ui.add_space(4.0);
@@ -382,7 +399,25 @@ impl App {
 
                             // "Load" is the row's primary action (accent-filled); the
                             // loaded row reads "In the box" and leaves the interactive
-                            // set.
+                            // set. The soft halo matches every other primary button in
+                            // the app, so the row's main action reads as first-class.
+                            // It fades with the row's crossfade and recedes entirely on
+                            // a loaded (non-interactive) row.
+                            let load_rect = egui::Rect::from_min_size(
+                                ui.cursor().min,
+                                egui::vec2(LOAD_W, 24.0),
+                            );
+                            let load_hovered = pointer_over(ui, load_rect);
+                            let load_pressed = pointer_pressed_over(ui, load_rect);
+                            if !active {
+                                primary_button_glow(
+                                    ui.painter(),
+                                    load_rect,
+                                    ACCENT.gamma_multiply(a),
+                                    load_hovered,
+                                    load_pressed,
+                                );
+                            }
                             let load = egui::Button::new(
                                 egui::RichText::new(if active { "In the box" } else { "Load" })
                                     .color(if active {

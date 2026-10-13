@@ -9,7 +9,7 @@ mod common;
 use eframe::egui;
 use streampipe::gui::{
     config::{Config, Contact},
-    Tab,
+    Tab, ACCENT,
 };
 
 use common::{
@@ -696,5 +696,117 @@ fn the_contacts_overlay_fits_the_min_window() {
     assert!(
         text_present(&out.shapes, "Save") && text_present(&out.shapes, "Close"),
         "the footer is painted inside the scroll-free area"
+    );
+}
+
+/// Each contact row's card paints a faint top light-catch bevel (white alpha 24), so
+/// the card reads as lit from above — the same depth cue the copy box and error
+/// callout use. Two rows paint two bevels.
+#[test]
+fn contact_rows_paint_a_top_light_catch_bevel() {
+    let (mut app, _rt) = test_app_with(Config {
+        contacts: vec![
+            Contact {
+                name: "Alice".into(),
+                ticket: "alice-ticket".into(),
+            },
+            Contact {
+                name: "Bob".into(),
+                ticket: "bob-ticket".into(),
+            },
+        ],
+        ..Config::default()
+    });
+    app.show_contacts = true;
+    let out = drive_frames(&mut app, &egui::Context::default(), SIZE, 3);
+    // A horizontal line in the bevel's exact colour. The status bar hairline is
+    // alpha 16, so it cannot be mistaken for a bevel.
+    let bevels = out
+        .shapes
+        .iter()
+        .filter(|s| match &s.shape {
+            egui::epaint::Shape::LineSegment { points, stroke } => {
+                (points[0].y - points[1].y).abs() < 0.5
+                    && stroke.color == egui::Color32::from_white_alpha(24)
+            }
+            _ => false,
+        })
+        .count();
+    assert!(
+        bevels >= 2,
+        "each contact row should paint its top light-catch bevel, got {bevels}"
+    );
+}
+
+/// Each contact's avatar paints a 1px ring in a brighter shade of its hue, so each
+/// contact reads as a distinct, polished face. A ring is a circle with a transparent
+/// fill and a non-trivial stroke (the filled avatar disc has no stroke).
+#[test]
+fn contact_avatars_paint_a_hue_ring() {
+    let (mut app, _rt) = test_app_with(Config {
+        contacts: vec![
+            Contact {
+                name: "Alice".into(),
+                ticket: "alice-ticket".into(),
+            },
+            Contact {
+                name: "Bob".into(),
+                ticket: "bob-ticket".into(),
+            },
+        ],
+        ..Config::default()
+    });
+    app.show_contacts = true;
+    let out = drive_frames(&mut app, &egui::Context::default(), SIZE, 3);
+    let rings = out
+        .shapes
+        .iter()
+        .filter(|s| match &s.shape {
+            egui::epaint::Shape::Circle(c) => {
+                c.fill == egui::Color32::TRANSPARENT && c.stroke.width > 0.0
+            }
+            _ => false,
+        })
+        .count();
+    assert!(
+        rings >= 2,
+        "each contact avatar should paint a hue ring, got {rings}"
+    );
+}
+
+/// The "Load" button — the row's primary action — paints the same 3-layer accent halo
+/// as every other primary button in the app, so it reads as first-class. The probe is
+/// positioned on the "Load" text so the footer's own Save halo (also accent) is not
+/// counted.
+#[test]
+fn the_load_button_paints_a_soft_accent_halo() {
+    let (mut app, _rt) = test_app_with(Config {
+        contacts: vec![Contact {
+            name: "Alice".into(),
+            ticket: "alice-ticket".into(),
+        }],
+        ..Config::default()
+    });
+    app.show_contacts = true;
+    let out = drive_frames(&mut app, &egui::Context::default(), SIZE, 3);
+    let load = text_rect(&out.shapes, "Load").expect("the row paints 'Load'");
+    let halo_alphas = [0.02, 0.05, 0.09];
+    // The halo rects are all centred on the Load button, which centres the "Load"
+    // text — so a tight box around the text isolates them from the footer's halo.
+    let count = out
+        .shapes
+        .iter()
+        .filter(|s| match &s.shape {
+            egui::epaint::Shape::Rect(r) => halo_alphas
+                .iter()
+                .any(|&a| r.fill == ACCENT.gamma_multiply(a))
+                && (r.rect.center().x - load.center().x).abs() < 60.0
+                && (r.rect.center().y - load.center().y).abs() < 20.0,
+            _ => false,
+        })
+        .count();
+    assert_eq!(
+        count, 3,
+        "the Load button should paint a 3-layer accent halo"
     );
 }
