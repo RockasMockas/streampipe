@@ -8,7 +8,7 @@ use eframe::egui::{self, Context, Ui};
 use super::{
     config::{player_key, PLAYERS},
     contact_chip, error_callout, pointer_over, pointer_pressed_over, primary_button_glow,
-    section_tick, soft_glow, spinner,
+    soft_glow, spinner,
     state::{self, Mode, WatchParams},
     truncate, App, ACCENT, ERROR, WATCH_ACCENT,
 };
@@ -60,15 +60,59 @@ impl App {
             .map(|c| truncate(&c.name, 28))
             .filter(|n| !n.trim().is_empty());
 
+        // Heading row: the "Stream ticket" label (enlarged to the tab's "big" scale so
+        // its line height matches the button beside it) on the left, with the contact
+        // chip and the "Select Contact" button flush right — the entry point to the
+        // picker now sits right where you read the heading, not under the box.
+        let head = ui.style().text_styles[&egui::TextStyle::Body].size * 1.3;
         ui.horizontal(|ui| {
-            section_tick(ui, "Stream ticket", WATCH_ACCENT);
-            // The name rides the far end of the heading row: a quiet pill, well clear of
-            // both the label and the ticket box below it.
-            if let Some(name) = &active_name {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            let (bar, _) = ui.allocate_exact_size(egui::vec2(3.0, 16.0), egui::Sense::hover());
+            ui.painter().rect_filled(
+                bar.translate(egui::vec2(0.0, 1.0)),
+                egui::CornerRadius::same(1),
+                WATCH_ACCENT,
+            );
+            ui.label(egui::RichText::new("Stream ticket").strong().size(head));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // "Select Contact" opens the Contacts overlay; 28 tall, flush right.
+                let rect = egui::Rect::from_min_size(
+                    egui::pos2(ui.cursor().max.x - 140.0, ui.cursor().min.y),
+                    egui::vec2(140.0, 28.0),
+                );
+                let hovered = pointer_over(ui, rect);
+                let pressed = pointer_pressed_over(ui, rect);
+                primary_button_glow(ui.painter(), rect, WATCH_ACCENT, hovered, pressed);
+                let button = egui::Button::new("Select Contact")
+                    .fill(WATCH_ACCENT.gamma_multiply(if pressed {
+                        0.20
+                    } else if hovered {
+                        0.26
+                    } else {
+                        0.18
+                    }))
+                    .stroke(egui::Stroke::new(
+                        1.0,
+                        WATCH_ACCENT.gamma_multiply(if pressed {
+                            0.50
+                        } else if hovered {
+                            0.75
+                        } else {
+                            0.55
+                        }),
+                    ));
+                if ui.add_sized([140.0, 28.0], button).clicked() {
+                    self.show_contacts = true;
+                    // A click schedules its own repaint; this lands the overlay on the very
+                    // next frame even when the window has fallen asleep.
+                    ui.ctx().request_repaint();
+                }
+                // The chosen contact's name rides just left of the button, well clear of
+                // both the heading and the ticket box below it.
+                if let Some(name) = &active_name {
                     contact_chip(ui, name, WATCH_ACCENT);
-                });
-            }
+                }
+            });
         });
 
         // Read input BEFORE rendering the ticket box, so a key consumed by the widget
@@ -138,53 +182,6 @@ impl App {
         // The ticket box remembers the last-used ticket (seeded from
         // `config.last_ticket` at startup, updated on each watch), so no separate
         // history picker is needed.
-
-        // "Select Contact" opens the Contacts overlay, where the list is picked and
-        // managed. It sits on one row under the ticket box: the "where do I get a
-        // ticket?" hint leads on the left while the box is empty, the button rides the
-        // right edge. Same halo language as the hero buttons; 28 tall, so it never reads
-        // as the 30-tall Save/Close pair in the overlay footer.
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            if self.watch_ticket.trim().is_empty() {
-                ui.weak("No ticket yet? Start a broadcast, or ask a friend to share theirs.");
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                // In a right-to-left layout the child `Ui` spans all the remaining width,
-                // so the button's rect runs back from the right edge of that span.
-                let rect = egui::Rect::from_min_size(
-                    egui::pos2(ui.cursor().max.x - 140.0, ui.cursor().min.y),
-                    egui::vec2(140.0, 28.0),
-                );
-                let hovered = pointer_over(ui, rect);
-                let pressed = pointer_pressed_over(ui, rect);
-                primary_button_glow(ui.painter(), rect, WATCH_ACCENT, hovered, pressed);
-                let button = egui::Button::new("Select Contact")
-                    .fill(WATCH_ACCENT.gamma_multiply(if pressed {
-                        0.20
-                    } else if hovered {
-                        0.26
-                    } else {
-                        0.18
-                    }))
-                    .stroke(egui::Stroke::new(
-                        1.0,
-                        WATCH_ACCENT.gamma_multiply(if pressed {
-                            0.50
-                        } else if hovered {
-                            0.75
-                        } else {
-                            0.55
-                        }),
-                    ));
-                if ui.add_sized([140.0, 28.0], button).clicked() {
-                    self.show_contacts = true;
-                    // A click schedules its own repaint; this lands the overlay on the very
-                    // next frame even when the window has fallen asleep.
-                    ui.ctx().request_repaint();
-                }
-            });
-        });
 
         ui.add_space(8.0);
         // Match the Broadcast tab's "Advanced settings" sizing: larger (1.3×)

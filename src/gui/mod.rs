@@ -277,7 +277,7 @@ impl App {
             }
             // A dim shortcut hint so the (otherwise hidden) shortcuts are discoverable.
             // Only shown when it fits, so it never overflows a narrow window.
-            let hint = "Ctrl+L log · Ctrl+, settings";
+            let hint = "Ctrl+L log · Ctrl+, settings · Ctrl+T contacts";
             let hint_w = ui
                 .painter()
                 .layout_no_wrap(
@@ -751,6 +751,19 @@ impl App {
                 || i.consume_key(egui::Modifiers::COMMAND, egui::Key::L)
         }) {
             self.log_open = !self.log_open;
+            ctx.request_repaint();
+        } else if ctx.input_mut(|i| {
+            i.consume_key(egui::Modifiers::CTRL, egui::Key::T)
+                || i.consume_key(egui::Modifiers::COMMAND, egui::Key::T)
+        }) {
+            // Ctrl/Cmd+T toggles the Contacts overlay. It shares the panels with
+            // Settings, so opening it takes Settings down; closing flushes edits.
+            if self.show_contacts {
+                self.close_contacts();
+            } else {
+                self.show_contacts = true;
+                self.show_options = false;
+            }
             ctx.request_repaint();
         } else if !self.show_options
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab))

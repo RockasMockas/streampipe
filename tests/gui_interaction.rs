@@ -118,9 +118,13 @@ fn hovering_a_tab_raises_the_pointing_hand_cursor() {
         .shapes
         .iter()
         .filter_map(|s| match &s.shape {
-            // The two tab surfaces are the only ~32-tall filled rects up top.
+            // The two tab surfaces are the only wide (~half-window), ~32-tall filled
+            // rects up top — the heading's "Select Contact" button and its halo are
+            // much narrower, so width separates them cleanly.
             egui::epaint::Shape::Rect(r)
-                if (30.0..34.0).contains(&r.rect.height()) && r.rect.min.y < 120.0 =>
+                if (30.0..34.0).contains(&r.rect.height())
+                    && r.rect.min.y < 120.0
+                    && r.rect.width() > 200.0 =>
             {
                 Some(r.rect)
             }

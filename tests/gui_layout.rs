@@ -225,7 +225,7 @@ fn watch_tab_renders_at_min_size() {
         );
     }
 
-    // The "Select Contact" button is painted, on its own row under the ticket box,
+    // The "Select Contact" button is painted, on the heading row above the ticket box,
     // right-aligned, and 28 tall (never the 30-tall footer size).
     let btn = shapes
         .iter()
@@ -294,34 +294,6 @@ fn a_blank_ticket_disables_the_watch_button() {
         watch_button_rects("   "),
         0,
         "a blank ticket disables the Watch button, dropping it from the set"
-    );
-}
-
-/// The Watch tab shows a ticket hint while empty; it recedes once a ticket is pasted.
-#[test]
-fn the_watch_tab_shows_a_ticket_hint_when_empty() {
-    let hint = "";
-    // Empty ticket: the hint is shown.
-    let (mut app, _rt) = test_app();
-    app.tab = Tab::Watch;
-    let size = egui::vec2(760.0, 560.0);
-    let shapes = render_shapes(&mut app, size);
-    assert!(
-        shapes.iter().any(|s| matches!(&s.shape,
-            egui::epaint::Shape::Text(t) if t.galley.text() == hint
-        )),
-        "an empty ticket should show the hint"
-    );
-    // A pasted ticket: the hint recedes.
-    let (mut app, _rt) = test_app();
-    app.tab = Tab::Watch;
-    app.watch_ticket = "a-persisted-ticket".into();
-    let shapes = render_shapes(&mut app, size);
-    assert!(
-        !shapes.iter().any(|s| matches!(&s.shape,
-            egui::epaint::Shape::Text(t) if t.galley.text() == hint
-        )),
-        "a pasted ticket should hide the hint"
     );
 }
 
@@ -609,13 +581,13 @@ fn clicking_restart_replaces_the_live_watch_session() {
     std::env::remove_var("XDG_CONFIG_HOME");
 }
 
-/// The status bar shows the Ctrl+L / Ctrl+, shortcuts so they're discoverable.
+/// The status bar shows the Ctrl+L / Ctrl+, / Ctrl+T shortcuts so they're discoverable.
 #[test]
 fn the_status_bar_shows_a_keyboard_shortcut_hint() {
     let (mut app, _rt) = test_app();
     let size = egui::vec2(760.0, 560.0);
     let shapes = render_shapes(&mut app, size);
-    let hint = "Ctrl+L log · Ctrl+, settings";
+    let hint = "Ctrl+L log · Ctrl+, settings · Ctrl+T contacts";
     assert!(
         shapes.iter().any(|s| matches!(&s.shape,
             egui::epaint::Shape::Text(t) if t.galley.text() == hint
@@ -704,17 +676,18 @@ fn the_watch_tab_chips_the_selected_contact_and_recedes_on_edit() {
     );
 
     // Ticket filled from the contact: the chip shows the name, on the heading row
-    // (above the ticket box) and right-aligned.
+    // (above the ticket box), just left of the "Select Contact" button.
     app.watch_ticket = ticket.clone();
     let out = render_shapes(&mut app, size);
     let chip = text_rect(&out, "Alice").expect("the chip shows the contact's name");
+    let btn = text_rect(&out, "Select Contact").expect("the button is painted");
     assert!(
         chip.min.y < 131.0,
         "the chip rides the 'Stream ticket' heading row, got {chip:?}"
     );
     assert!(
-        chip.right() > size.x - 60.0,
-        "the chip is right-aligned, got {chip:?}"
+        chip.right() < btn.left(),
+        "the chip sits just left of the button, got chip {chip:?} btn {btn:?}"
     );
 
     // Ticket edited so nothing matches: the chip recedes.

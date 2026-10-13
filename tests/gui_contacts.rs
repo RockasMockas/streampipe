@@ -209,16 +209,22 @@ fn loading_a_contact_fills_the_ticket_and_chips_the_name() {
     assert_eq!(app.watch_ticket, ticket, "'Load' fills the ticket box");
     assert!(!app.show_contacts, "'Load' closes the overlay");
 
-    // The chip appears on the heading row, right-aligned, and the ticket is watchable.
+    // The chip appears on the heading row, just left of the "Select Contact" button,
+    // and the ticket is watchable.
     let out = drive_frames(&mut app, &ctx, SIZE, 2);
     let chip = text_rect(&out.shapes, "Alice").expect("the chip shows the name");
+    let btn = text_rect(&out.shapes, "Select Contact").expect("the button is painted");
     assert!(
         chip.min.y < 140.0,
         "the chip rides the 'Stream ticket' heading row, got {chip:?}"
     );
     assert!(
-        chip.right() > SIZE.x - 60.0,
-        "the chip is right-aligned, got {chip:?}"
+        chip.max.y > btn.min.y - 20.0 && chip.min.y < btn.max.y + 20.0,
+        "the chip shares the button's heading row, got chip {chip:?} btn {btn:?}"
+    );
+    assert!(
+        chip.right() < btn.left(),
+        "the chip sits just left of the button, got chip {chip:?} btn {btn:?}"
     );
     assert!(
         streampipe::EndpointTicket::from_str(&app.watch_ticket).is_ok(),
@@ -416,17 +422,16 @@ fn closing_the_panel_flushes_staged_edits() {
     app.show_contacts = true;
     let ctx = egui::Context::default();
 
-    // Add a row (it opens in edit mode), let the row settle, then close: the panel
-    // is gone and the config on disk carries it.
+    // Add a row (it opens in edit mode), let the row settle, then close via the
+    // title-bar "×" path (`close_contacts`): the panel is gone and the config on disk
+    // carries it.
     let out = drive_frames(&mut app, &ctx, SIZE, 3);
     let add = text_rect(&out.shapes, "+  Add contact").expect("the add button is painted");
     click_at(&mut app, &ctx, add.center(), SIZE);
     drive_until_settled(&mut app, &ctx, SIZE, 1.0);
-    let out = drive_frames(&mut app, &ctx, SIZE, 1);
-    let close = text_rect(&out.shapes, "Close").expect("the 'Close' button is painted");
-    click_at(&mut app, &ctx, close.center(), SIZE);
+    app.close_contacts();
 
-    assert!(!app.show_contacts, "Close dismisses the panel");
+    assert!(!app.show_contacts, "closing dismisses the panel");
     assert!(!app.contacts_dirty, "the staged edit was flushed");
     assert_eq!(app.editing_contact, None, "edit mode was exited on close");
     let written = std::fs::read_to_string(dir.path().join("streampipe").join("config.json"))
@@ -496,16 +501,16 @@ fn only_one_row_edits_at_a_time() {
     app.show_contacts = true;
     let ctx = egui::Context::default();
 
-    // View mode: both rows offer "Load"/"Edit"; no delete affordance, only the
-    // footer's "Save".
+    // View mode: both rows offer "Load"/"Edit"; no delete affordance, and no "Save"
+    // at all (saving is per-row, so the footer carries only "Close").
     let out = drive_frames(&mut app, &ctx, SIZE, 3);
     assert_eq!(count_text(&out.shapes, "Edit"), 2, "both rows offer 'Edit'");
     assert_eq!(count_text(&out.shapes, "Load"), 2, "both rows offer 'Load'");
     assert_eq!(count_text(&out.shapes, "Delete"), 0);
     assert_eq!(
         count_text(&out.shapes, "Save"),
-        1,
-        "only the footer paints 'Save'"
+        0,
+        "no whole-list 'Save' in view mode"
     );
 
     // Open the top row (the first "Edit" match).
@@ -530,8 +535,8 @@ fn only_one_row_edits_at_a_time() {
     );
     assert_eq!(
         count_text(&out.shapes, "Save"),
-        2,
-        "the row's green Save plus the footer's"
+        1,
+        "only the editing row's green Save paints"
     );
 
     // Open the idle row via the only remaining "Edit": the first row animates
@@ -692,10 +697,11 @@ fn the_contacts_overlay_fits_the_min_window() {
             shape.clip_rect
         );
     }
-    // Six rows into a 248-tall scroll area: they scroll, so the footer stays on screen.
+    // Six rows into a 248-tall scroll area: they scroll, and the add button below
+    // them stays on screen.
     assert!(
-        text_present(&out.shapes, "Save") && text_present(&out.shapes, "Close"),
-        "the footer is painted inside the scroll-free area"
+        text_present(&out.shapes, "+  Add contact"),
+        "the add button stays painted inside the window"
     );
 }
 
@@ -774,12 +780,11 @@ fn contact_avatars_paint_a_hue_ring() {
     );
 }
 
-/// The "Load" button — the row's primary action — paints the same 3-layer accent halo
-/// as every other primary button in the app, so it reads as first-class. The probe is
-/// positioned on the "Load" text so the footer's own Save halo (also accent) is not
-/// counted.
+/// The "Load" button is flat — no halo layers behind it — and its fill brightens a
+/// touch on hover (and dims on press) so the pointer state is still legible. The
+/// probe is centred on the "Load" text, isolating the row's pill from the footer's.
 #[test]
-fn the_load_button_paints_a_soft_accent_halo() {
+fn the_load_button_is_flat_and_brightens_on_hover() {
     let (mut app, _rt) = test_app_with(Config {
         contacts: vec![Contact {
             name: "Alice".into(),
@@ -788,25 +793,105 @@ fn the_load_button_paints_a_soft_accent_halo() {
         ..Config::default()
     });
     app.show_contacts = true;
-    let out = drive_frames(&mut app, &egui::Context::default(), SIZE, 3);
+    let ctx = egui::Context::default();
+    let out = drive_frames(&mut app, &ctx, SIZE, 3);
     let load = text_rect(&out.shapes, "Load").expect("the row paints 'Load'");
+
+    // Resting: no halo — none of the 3-layer glow rects sit around the button.
     let halo_alphas = [0.02, 0.05, 0.09];
-    // The halo rects are all centred on the Load button, which centres the "Load"
-    // text — so a tight box around the text isolates them from the footer's halo.
-    let count = out
+    let halos = out
         .shapes
         .iter()
         .filter(|s| match &s.shape {
             egui::epaint::Shape::Rect(r) => halo_alphas
                 .iter()
                 .any(|&a| r.fill == ACCENT.gamma_multiply(a))
-                && (r.rect.center().x - load.center().x).abs() < 60.0
-                && (r.rect.center().y - load.center().y).abs() < 20.0,
+                && (r.rect.center() - load.center()).length() < 80.0,
             _ => false,
         })
         .count();
-    assert_eq!(
-        count, 3,
-        "the Load button should paint a 3-layer accent halo"
+    assert_eq!(halos, 0, "the Load button should paint no halo");
+
+    // The resting pill itself is painted with the dim accent fill.
+    let fill_of = |shapes: &[egui::epaint::ClippedShape], alpha: f32| {
+        shapes.iter().any(|s| {
+            match &s.shape {
+                egui::epaint::Shape::Rect(r) => {
+                    r.fill == ACCENT.gamma_multiply(alpha)
+                        && (r.rect.center() - load.center()).length() < 20.0
+                }
+                _ => false,
+            }
+        })
+    };
+    assert!(
+        fill_of(&out.shapes, 0.24),
+        "the resting Load pill paints the 0.24 accent fill"
     );
+
+    // Hover: move the pointer onto the pill — its fill brightens a touch.
+    frame(
+        &ctx,
+        &mut app,
+        focused_raw(vec![egui::Event::PointerMoved(load.center())]),
+    );
+    let out = drive_frames(&mut app, &ctx, SIZE, 2);
+    assert!(
+        fill_of(&out.shapes, 0.34),
+        "hovering the Load pill brightens its fill to 0.34"
+    );
+}
+
+/// A Ctrl+T key press event (the global "open Contacts" shortcut).
+fn ctrl_t() -> egui::Event {
+    egui::Event::Key {
+        key: egui::Key::T,
+        physical_key: Some(egui::Key::T),
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::CTRL,
+    }
+}
+
+/// Ctrl+T opens the Contacts overlay, and (sharing the panels with Settings) takes
+/// Settings down if it was up.
+#[test]
+fn ctrl_t_opens_the_contacts_overlay() {
+    let (mut app, _rt) = test_app_with(Config {
+        contacts: vec![Contact {
+            name: "Alice".into(),
+            ticket: "alice-ticket".into(),
+        }],
+        ..Config::default()
+    });
+    let ctx = egui::Context::default();
+    drive_frames(&mut app, &ctx, SIZE, 2);
+    assert!(!app.show_contacts, "the overlay starts closed");
+
+    frame(&ctx, &mut app, focused_raw(vec![ctrl_t()]));
+    assert!(app.show_contacts, "Ctrl+T opens the overlay");
+    assert!(!app.show_options, "opening Contacts takes Settings down");
+}
+
+/// Loading a contact while the Broadcast tab is showing jumps back to the Watch tab —
+/// loading is a watch-side gesture, so the filled box is revealed where it is usable.
+#[test]
+fn loading_a_contact_from_the_broadcast_tab_jumps_to_watch() {
+    let (mut app, _rt) = test_app_with(Config {
+        contacts: vec![Contact {
+            name: "Alice".into(),
+            ticket: "alice-ticket".into(),
+        }],
+        ..Config::default()
+    });
+    app.tab = Tab::Broadcast;
+    app.show_contacts = true;
+    let ctx = egui::Context::default();
+    let out = drive_frames(&mut app, &ctx, SIZE, 2);
+    assert_eq!(app.tab, Tab::Broadcast, "starts on the Broadcast tab");
+
+    let load = text_rect(&out.shapes, "Load").expect("the row's 'Load' button is painted");
+    click_at(&mut app, &ctx, load.center(), SIZE);
+    assert_eq!(app.watch_ticket, "alice-ticket", "'Load' fills the ticket box");
+    assert_eq!(app.tab, Tab::Watch, "'Load' jumps back to the Watch tab");
 }

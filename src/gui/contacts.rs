@@ -21,7 +21,7 @@ use eframe::egui::{self, Context, Ui};
 
 use super::{
     config::Contact, options::CLOSE_GREY, contact_chip, pointer_over, pointer_pressed_over,
-    primary_button_glow, soft_glow, top_bevel, App, ACCENT, ERROR, WATCH_ACCENT,
+    soft_glow, top_bevel, App, Tab, ACCENT, ERROR, WATCH_ACCENT,
 };
 
 /// The row's name type. A touch over body size and bold, so a card reads as *name first,
@@ -31,8 +31,6 @@ const NAME_SIZE: f32 = 14.0;
 /// competes with the name.
 const TICKET_SIZE: f32 = 11.5;
 
-/// The footer pair's box — the same size and painted language as Settings' Save/Close.
-const BUTTON: egui::Vec2 = egui::vec2(90.0, 30.0);
 /// The per-row action widths, so the fields can split what is left exactly.
 const LOAD_W: f32 = 74.0;
 /// The view-mode "Edit" pill.
@@ -44,9 +42,9 @@ const DELETE_W: f32 = 74.0;
 /// The per-row action pills' height — one size for "Load"/"Edit"/"Save"/"Delete", so the
 /// actions line up whether a row is read or open.
 const PILL_H: f32 = 24.0;
-/// Below this a fading element's halo is skipped: at that alpha the glow is sub-pixel and
-/// only adds shapes to a frame that is nearly gone.
-const GLOW_MIN: f32 = 0.06;
+/// Quiet margin between the action pills and the card's right edge, in every state
+/// (view and edit), so the pills ride the edge without touching the rounded corner.
+const RIGHT_PAD: f32 = 10.0;
 /// The list stops growing here and scrolls, so the footer always stays on screen.
 const LIST_MAX_H: f32 = 248.0;
 /// The per-row card's height (avatar, fields and actions all sit inside it).
@@ -101,7 +99,7 @@ impl App {
             ctx.request_repaint();
         }
 
-        // "×", Escape and the footer "Close" all funnel through `close_contacts`, so the
+        // The title-bar "×" and Escape both funnel through `close_contacts`, so the
         // staged edits are flushed whichever way the panel goes away. The modal consumes
         // Escape while it is up, so closing the dialog leaves the panel standing.
         if !open || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -343,24 +341,22 @@ impl App {
                     let show_edit = p > 0.02;
 
                     ui.horizontal(|ui| {
-                        // The card: a rounded surface spanning the row — brighter on
-                        // hover, tinted watch-accent when its ticket is loaded, lifting
-                        // toward the accent (with a soft glow) as the edit state opens.
-                        // Painted first (from the row's full width) so widgets sit on
-                        // top of it.
+                        // The card: a rounded surface spanning the row — tinted
+                        // watch-accent when its ticket is loaded, lifting toward the
+                        // accent (with a soft glow) as the edit state opens. Painted
+                        // first (from the row's full width) so widgets sit on top of
+                        // it. No hover brightening: hovering the row lights up the
+                        // whole card and washes out the pills' own hover feedback.
                         let avail = ui.available_width();
                         let row_rect = egui::Rect::from_min_size(
                             ui.cursor().min,
                             egui::vec2(avail, ROW_H + ROW_GROW * p),
                         );
-                        let hovered = pointer_over(ui, row_rect);
                         let fill = if active {
                             WATCH_ACCENT.gamma_multiply(0.12)
                         } else if p > 0.02 {
                             egui::Color32::from_white_alpha(5)
                                 .lerp_to_gamma(ACCENT.gamma_multiply(0.10), p)
-                        } else if hovered {
-                            egui::Color32::from_white_alpha(14)
                         } else {
                             egui::Color32::from_white_alpha(5)
                         };
@@ -374,14 +370,10 @@ impl App {
                             )
                         };
                         let corner = egui::CornerRadius::same(7);
-                        // Haloes go down *before* the card, so only the rim shows: the
-                        // accent glow while the row opens, a neutral lift on hover. The
-                        // hover halo is what makes a card feel it is rising off the panel
-                        // — a fill swap alone reads as a colour change, not movement.
+                        // The accent halo goes down *before* the card, so only the rim
+                        // shows — it marks the edit state opening, not pointer hover.
                         if p > 0.02 {
                             soft_glow(ui.painter(), row_rect, corner, ACCENT.gamma_multiply(p));
-                        } else if hovered && !active {
-                            soft_glow(ui.painter(), row_rect, corner, egui::Color32::WHITE);
                         }
                         ui.painter().rect_filled(row_rect, corner, fill);
                         ui.painter().rect_stroke(
@@ -409,6 +401,16 @@ impl App {
                             );
                         }
 
+                        // A zero-width, full-card-height spacer: a horizontal row is
+                        // only as tall as its tallest child (the 24px pills), so
+                        // without it every widget rides the card's top edge. Claiming
+                        // the full height puts the row's centre line in the middle of
+                        // the card, and everything centers inside it with a clean
+                        // margin above and below.
+                        ui.allocate_exact_size(
+                            egui::vec2(0.0, ROW_H + ROW_GROW * p),
+                            egui::Sense::hover(),
+                        );
                         // Inset the initials avatar from the card's left edge.
                         ui.add_space(8.0);
                         let (avatar_rect, _resp) = ui.allocate_exact_size(
@@ -453,21 +455,26 @@ impl App {
                         );
                         ui.add_space(4.0);
 
-                        // Split the row explicitly: fields, then actions. The pills are
-                        // held back *before* the fields are laid out and the fields are
-                        // truncated to the pixels that remain. Left to their natural width
-                        // the labels ran past the card on a real (long) ticket, shoving
-                        // "Load"/"Edit" off the panel's edge — and egui feeds that
-                        // overflow back into `available_width()`, so every row grew the
-                        // next one and the whole list drifted right.
+                        // Split the row explicitly: fields flush left, action pills
+                        // flush right. The pills are held back *before* the fields are
+                        // laid out and the fields are truncated to the pixels that
+                        // remain; a spacer (the slack the labels did not use) then
+                        // pushes "Load"/"Edit" and "Save"/"Delete" onto the card's
+                        // right margin. Left to their natural width the labels ran past
+                        // the card on a real (long) ticket, shoving the pills off the
+                        // panel's edge — and egui feeds that overflow back into
+                        // `available_width()`, so every row grew the next one and the
+                        // whole list drifted right.
                         let gap = ui.spacing().item_spacing.x;
                         let actions_w = (if show_view { LOAD_W + EDIT_W } else { 0.0 })
                             + (if show_edit { SAVE_W + DELETE_W } else { 0.0 });
                         let n_actions = 2.0 * ((show_view as usize + show_edit as usize) as f32);
                         // Read what is left *now*, with the avatar already placed, then
-                        // hold back the pills and the gaps that flank them.
+                        // hold back the pills, the gaps between them, and the quiet
+                        // right margin.
                         let fields =
-                            (ui.available_width() - actions_w - gap * n_actions - 2.0).max(64.0);
+                            (ui.available_width() - actions_w - gap * n_actions - RIGHT_PAD)
+                                .max(64.0);
                         let name_font = egui::FontId::proportional(NAME_SIZE);
                         let ticket_font = egui::FontId::monospace(TICKET_SIZE);
                         // A name caps at 42% of the budget: the ticket is the string that
@@ -513,28 +520,26 @@ impl App {
                                 ticket_resp.on_hover_text(&contact.ticket);
                             }
 
+                            // The spacer between the labels and the pills: exactly the
+                            // slack the labels did not use, so "Edit" lands flush with
+                            // the card's right margin.
+                            let pad = (row_rect.max.x - RIGHT_PAD
+                                - (LOAD_W + EDIT_W + gap)
+                                - ui.cursor().min.x)
+                                .max(0.0);
+                            ui.add_space(pad);
+
                             // "Load" is the row's primary action (accent-filled); the
                             // loaded row reads "In the box" and leaves the interactive
-                            // set. The soft halo matches every other primary button in
-                            // the app, so the row's main action reads as first-class.
-                            // Halo, fill and stroke all ride the row's alpha `a`, so the
-                            // pill fades as one object rather than text dissolving inside
-                            // a fully-painted box.
+                            // set. Flat paint, no halo — the fill and stroke just
+                            // brighten a touch on hover, dim on press, riding the row's
+                            // alpha `a` so the pill fades as one object.
                             let load_rect = egui::Rect::from_min_size(
-                                ui.cursor().min,
+                                egui::pos2(ui.cursor().min.x, row_rect.center().y - PILL_H * 0.5),
                                 egui::vec2(LOAD_W, PILL_H),
                             );
                             let load_hovered = pointer_over(ui, load_rect);
                             let load_pressed = pointer_pressed_over(ui, load_rect);
-                            if !active && a > GLOW_MIN {
-                                primary_button_glow(
-                                    ui.painter(),
-                                    load_rect,
-                                    ACCENT.gamma_multiply(a),
-                                    load_hovered,
-                                    load_pressed,
-                                );
-                            }
                             let load = egui::Button::new(
                                 egui::RichText::new(if active { "In the box" } else { "Load" })
                                     .color(if active {
@@ -546,6 +551,10 @@ impl App {
                             .min_size(egui::vec2(LOAD_W, PILL_H))
                             .fill(if active {
                                 WATCH_ACCENT.gamma_multiply(0.16 * a)
+                            } else if load_pressed {
+                                ACCENT.gamma_multiply(0.40 * a)
+                            } else if load_hovered {
+                                ACCENT.gamma_multiply(0.34 * a)
                             } else {
                                 ACCENT.gamma_multiply(0.24 * a)
                             })
@@ -553,6 +562,10 @@ impl App {
                                 1.0,
                                 if active {
                                     WATCH_ACCENT.gamma_multiply(0.5 * a)
+                                } else if load_pressed {
+                                    ACCENT.gamma_multiply(0.55 * a)
+                                } else if load_hovered {
+                                    ACCENT.gamma_multiply(0.95 * a)
                                 } else {
                                     ACCENT.gamma_multiply(0.7 * a)
                                 },
@@ -562,23 +575,14 @@ impl App {
                             }
 
                             // "Edit" opens this row's edit state (one row at a time);
-                            // the grey pill sits right of "Load". Its whole treatment
-                            // fades with the row, matching "Load" above.
+                            // the grey pill sits right of "Load". Flat paint, no halo;
+                            // its whole treatment fades with the row, matching "Load".
                             let edit_rect = egui::Rect::from_min_size(
-                                ui.cursor().min,
+                                egui::pos2(ui.cursor().min.x, row_rect.center().y - PILL_H * 0.5),
                                 egui::vec2(EDIT_W, PILL_H),
                             );
                             let edit_hovered = pointer_over(ui, edit_rect);
                             let edit_pressed = pointer_pressed_over(ui, edit_rect);
-                            if a > GLOW_MIN {
-                                primary_button_glow(
-                                    ui.painter(),
-                                    edit_rect,
-                                    CLOSE_GREY.gamma_multiply(a),
-                                    edit_hovered,
-                                    edit_pressed,
-                                );
-                            }
                             let edit = egui::Button::new(
                                 egui::RichText::new("Edit").color(CLOSE_GREY.gamma_multiply(a)),
                             )
@@ -649,38 +653,39 @@ impl App {
                                 self.focus_contact_row = None;
                             }
 
+                            // Same spacer as the view pair: push "Save"/"Delete" onto
+                            // the card's right margin, off the rounded corner.
+                            let pad = (row_rect.max.x - RIGHT_PAD
+                                - (SAVE_W + DELETE_W + gap)
+                                - ui.cursor().min.x)
+                                .max(0.0);
+                            ui.add_space(pad);
+
                             // Green "Save": persists immediately, raises the toast, and
                             // drops the row back to view mode.
                             let save_rect = egui::Rect::from_min_size(
-                                ui.cursor().min,
+                                egui::pos2(ui.cursor().min.x, row_rect.center().y - 12.0),
                                 egui::vec2(SAVE_W, 24.0),
                             );
                             let save_hovered = pointer_over(ui, save_rect);
                             let save_pressed = pointer_pressed_over(ui, save_rect);
-                            primary_button_glow(
-                                ui.painter(),
-                                save_rect,
-                                ACCENT,
-                                save_hovered,
-                                save_pressed,
-                            );
                             let save = egui::Button::new(
                                 egui::RichText::new("Save").color(ACCENT.gamma_multiply(p)),
                             )
                             .min_size(egui::vec2(SAVE_W, 24.0))
                             .fill(ACCENT.gamma_multiply(if save_pressed {
-                                0.20
+                                0.40
                             } else if save_hovered {
-                                0.26
+                                0.34
                             } else {
                                 0.24
                             }))
                             .stroke(egui::Stroke::new(
                                 1.0,
                                 ACCENT.gamma_multiply(if save_pressed {
-                                    0.50
+                                    0.55
                                 } else if save_hovered {
-                                    0.75
+                                    0.95
                                 } else {
                                     0.70
                                 }),
@@ -693,35 +698,28 @@ impl App {
                             // can never delete a contact. The row keeps editing behind
                             // the dialog.
                             let del_rect = egui::Rect::from_min_size(
-                                ui.cursor().min,
+                                egui::pos2(ui.cursor().min.x, row_rect.center().y - 12.0),
                                 egui::vec2(DELETE_W, 24.0),
                             );
                             let del_hovered = pointer_over(ui, del_rect);
                             let del_pressed = pointer_pressed_over(ui, del_rect);
-                            primary_button_glow(
-                                ui.painter(),
-                                del_rect,
-                                ERROR,
-                                del_hovered,
-                                del_pressed,
-                            );
                             let delete = egui::Button::new(
                                 egui::RichText::new("Delete").color(ERROR.gamma_multiply(p)),
                             )
                             .min_size(egui::vec2(DELETE_W, 24.0))
                             .fill(ERROR.gamma_multiply(if del_pressed {
-                                0.10
+                                0.40
                             } else if del_hovered {
-                                0.18
+                                0.34
                             } else {
                                 0.16
                             }))
                             .stroke(egui::Stroke::new(
                                 1.0,
                                 ERROR.gamma_multiply(if del_pressed {
-                                    0.35
+                                    0.55
                                 } else if del_hovered {
-                                    0.60
+                                    0.95
                                 } else {
                                     0.50
                                 }),
@@ -738,6 +736,7 @@ impl App {
 
         ui.add_space(2.0);
         let add_btn = egui::Button::new(egui::RichText::new("+  Add contact").color(ACCENT))
+            .min_size(egui::vec2(0.0, PILL_H))
             .fill(ACCENT.gamma_multiply(0.14))
             .stroke(egui::Stroke::new(1.0, ACCENT.gamma_multiply(0.45)));
         if ui.add(add_btn).clicked() {
@@ -778,13 +777,16 @@ impl App {
         }
         if let Some(i) = load_idx {
             // Fill the Watch tab's ticket box and drop the panel, so the filled box and
-            // its new name chip are revealed on the very next frame.
+            // its new name chip are revealed on the very next frame. Loading is a
+            // watch-side gesture, so a contact loaded from the Broadcast tab jumps back
+            // to Watch.
             self.watch_ticket = self.config.contacts[i].ticket.clone();
             self.show_contacts = false;
             self.focus_contact_row = None;
             self.editing_contact = None;
             self.contact_edit_prev = None;
             self.confirm_remove_contact = None;
+            self.switch_tab(Tab::Watch);
             if dirty {
                 self.config.save();
             }
@@ -793,75 +795,6 @@ impl App {
             return;
         }
         self.contacts_dirty = dirty;
-
-        // Footer: the same matched Save/Close pair as the Settings overlay, so the two
-        // panels read as one set.
-        ui.add_space(10.0);
-        ui.separator();
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            let save_rect = egui::Rect::from_min_size(ui.cursor().min, BUTTON);
-            let hovered = pointer_over(ui, save_rect);
-            let pressed = pointer_pressed_over(ui, save_rect);
-            primary_button_glow(ui.painter(), save_rect, ACCENT, hovered, pressed);
-            let save = egui::Button::new("Save")
-                .fill(ACCENT.gamma_multiply(if pressed {
-                    0.20
-                } else if hovered {
-                    0.26
-                } else {
-                    0.18
-                }))
-                .stroke(egui::Stroke::new(
-                    1.0,
-                    ACCENT.gamma_multiply(if pressed {
-                        0.50
-                    } else if hovered {
-                        0.75
-                    } else {
-                        0.55
-                    }),
-                ));
-            if ui.add_sized(BUTTON, save).clicked() {
-                self.config.save();
-                self.contacts_dirty = false;
-                self.toast = Some(("Saved ✓".to_string(), Instant::now()));
-                ui.ctx().request_repaint();
-            }
-
-            let close_rect = egui::Rect::from_min_size(ui.cursor().min, BUTTON);
-            let close_hovered = pointer_over(ui, close_rect);
-            let close_pressed = pointer_pressed_over(ui, close_rect);
-            primary_button_glow(
-                ui.painter(),
-                close_rect,
-                CLOSE_GREY,
-                close_hovered,
-                close_pressed,
-            );
-            let close = egui::Button::new("Close")
-                .fill(CLOSE_GREY.gamma_multiply(if close_pressed {
-                    0.14
-                } else if hovered {
-                    0.20
-                } else {
-                    0.12
-                }))
-                .stroke(egui::Stroke::new(
-                    1.0,
-                    CLOSE_GREY.gamma_multiply(if close_pressed {
-                        0.35
-                    } else if hovered {
-                        0.55
-                    } else {
-                        0.40
-                    }),
-                ));
-            if ui.add_sized(BUTTON, close).clicked() {
-                self.close_contacts();
-                ui.ctx().request_repaint();
-            }
-        });
     }
 }
 
