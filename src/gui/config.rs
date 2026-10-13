@@ -50,6 +50,21 @@ pub fn player_from_key(key: &str) -> Player {
     }
 }
 
+/// A saved contact: a friendly name paired with the ticket to watch.
+///
+/// Picked from the Options overlay ("Use") to fill the Watch tab's ticket box, so a
+/// viewer who regularly watches the same friends never pastes a ticket again. The
+/// Watch tab shows the matching contact's name as a chip, derived by comparing
+/// [`Contact::ticket`] against the box.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Contact {
+    /// The display name, shown on the Watch tab's chip.
+    pub name: String,
+    /// The ticket to fill into the Watch tab.
+    pub ticket: String,
+}
+
 /// The persisted configuration of the GUI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -61,6 +76,10 @@ pub struct Config {
     pub last_ticket: String,
     /// Recently used tickets, newest first, for a quick history dropdown.
     pub ticket_history: Vec<String>,
+    /// Saved contacts (name + ticket), pickable from the Options overlay to fill the
+    /// Watch tab. Struct-level `#[serde(default)]` means a config predating this loads
+    /// as an empty list.
+    pub contacts: Vec<Contact>,
     /// The default media player, selected on the Watch tab at open.
     pub default_player: String,
     /// Optional explicit path per player, so users can prefill their installs.
@@ -136,6 +155,7 @@ impl Default for Config {
             secret_hex: None,
             last_ticket: String::new(),
             ticket_history: Vec::new(),
+            contacts: Vec::new(),
             default_player: player_key(Player::Mpv).to_string(),
             player_paths: PlayerPaths::default(),
             buffer_ms: None,

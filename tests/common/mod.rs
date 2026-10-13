@@ -218,6 +218,23 @@ pub fn options_interactive_rects(mode: Mode) -> usize {
     ctx.interactive_rects_last_pass().len()
 }
 
+/// The rect a text shape with exactly this text was painted into. Takes the shape slice
+/// (a `FullOutput`'s `shapes` field derefs to one) so it works for any frame output.
+/// Used to locate a button by its label before `click_at`ing it.
+pub fn text_rect(shapes: &[egui::epaint::ClippedShape], text: &str) -> Option<egui::Rect> {
+    shapes.iter().find_map(|s| match &s.shape {
+        egui::epaint::Shape::Text(t) if t.galley.text() == text => {
+            Some(egui::Rect::from_min_size(t.pos, t.galley.rect.size()))
+        }
+        _ => None,
+    })
+}
+
+/// True if a text shape with exactly this text was painted.
+pub fn text_present(shapes: &[egui::epaint::ClippedShape], text: &str) -> bool {
+    text_rect(shapes, text).is_some()
+}
+
 /// Interactive rects the size of the full-width "Watch Stream" button (36 tall; the
 /// tab strip buttons are 32 and the ticket box ~70, so a 34..=38 band isolates it).
 /// A blank ticket disables the button, so it drops out of the set.

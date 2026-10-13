@@ -7,10 +7,10 @@ use eframe::egui::{self, Context, Ui};
 
 use super::{
     config::{player_key, PLAYERS},
-    error_callout, pointer_over, pointer_pressed_over, primary_button_glow, section_tick,
-    soft_glow, spinner,
+    contact_chip, error_callout, pointer_over, pointer_pressed_over, primary_button_glow,
+    section_tick, soft_glow, spinner,
     state::{self, Mode, WatchParams},
-    App, ACCENT, ERROR, WATCH_ACCENT,
+    truncate, App, ACCENT, ERROR, WATCH_ACCENT,
 };
 
 /// Parse a buffer field (milliseconds) into an option; blank or invalid is `None`
@@ -48,7 +48,28 @@ impl App {
         let watching = snap.watch == Mode::Watching;
         let starting = snap.watch == Mode::Starting;
 
-        section_tick(ui, "Stream ticket", WATCH_ACCENT);
+        // The chosen contact's name, *derived* by matching the ticket in the box. Not
+        // stored: editing the ticket makes the lookup miss, so the chip can never claim a
+        // contact whose ticket is no longer there. Cloned to an owned `Option<String>` so
+        // the row closure borrows nothing of `self`.
+        let active_name: Option<String> = self
+            .config
+            .contacts
+            .iter()
+            .find(|c| !c.ticket.is_empty() && c.ticket == self.watch_ticket)
+            .map(|c| truncate(&c.name, 28))
+            .filter(|n| !n.trim().is_empty());
+
+        ui.horizontal(|ui| {
+            section_tick(ui, "Stream ticket", WATCH_ACCENT);
+            // The name rides the far end of the heading row: a quiet pill, well clear of
+            // both the label and the ticket box below it.
+            if let Some(name) = &active_name {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    contact_chip(ui, name, WATCH_ACCENT);
+                });
+            }
+        });
 
         // Read input BEFORE rendering the ticket box, so a key consumed by the widget
         // later in this frame cannot defeat Enter-to-start.
@@ -118,14 +139,52 @@ impl App {
         // `config.last_ticket` at startup, updated on each watch), so no separate
         // history picker is needed.
 
-        // A "where do I get a ticket?" hint below the box while it is empty, so a
-        // first-time viewer knows what to do. The box's own hint text only says "paste
-        // a ticket here", not where one comes from. Weak and dim so it reads as a
-        // gentle nudge; recedes once a ticket is pasted.
-        if self.watch_ticket.trim().is_empty() {
-            ui.add_space(4.0);
-            ui.weak("No ticket yet? Start a broadcast, or ask a friend to share theirs.");
-        }
+        // "Select Contact" opens the Contacts overlay, where the list is picked and
+        // managed. It sits on one row under the ticket box: the "where do I get a
+        // ticket?" hint leads on the left while the box is empty, the button rides the
+        // right edge. Same halo language as the hero buttons; 28 tall, so it never reads
+        // as the 30-tall Save/Close pair in the overlay footer.
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            if self.watch_ticket.trim().is_empty() {
+                ui.weak("No ticket yet? Start a broadcast, or ask a friend to share theirs.");
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                // In a right-to-left layout the child `Ui` spans all the remaining width,
+                // so the button's rect runs back from the right edge of that span.
+                let rect = egui::Rect::from_min_size(
+                    egui::pos2(ui.cursor().max.x - 140.0, ui.cursor().min.y),
+                    egui::vec2(140.0, 28.0),
+                );
+                let hovered = pointer_over(ui, rect);
+                let pressed = pointer_pressed_over(ui, rect);
+                primary_button_glow(ui.painter(), rect, WATCH_ACCENT, hovered, pressed);
+                let button = egui::Button::new("Select Contact")
+                    .fill(WATCH_ACCENT.gamma_multiply(if pressed {
+                        0.20
+                    } else if hovered {
+                        0.26
+                    } else {
+                        0.18
+                    }))
+                    .stroke(egui::Stroke::new(
+                        1.0,
+                        WATCH_ACCENT.gamma_multiply(if pressed {
+                            0.50
+                        } else if hovered {
+                            0.75
+                        } else {
+                            0.55
+                        }),
+                    ));
+                if ui.add_sized([140.0, 28.0], button).clicked() {
+                    self.show_contacts = true;
+                    // A click schedules its own repaint; this lands the overlay on the very
+                    // next frame even when the window has fallen asleep.
+                    ui.ctx().request_repaint();
+                }
+            });
+        });
 
         ui.add_space(8.0);
         // Match the Broadcast tab's "Advanced settings" sizing: larger (1.3×)

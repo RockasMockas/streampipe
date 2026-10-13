@@ -11,17 +11,17 @@ use std::{
 use eframe::egui;
 use streampipe::{
     gui::{
-        config::{Config, DEFAULT_VOLUME},
+        config::{Config, Contact, DEFAULT_VOLUME},
         options::CLOSE_GREY,
         state::Mode,
-        Tab, ACCENT,
+        Tab, ACCENT, WATCH_ACCENT,
     },
     stream::{Player, StreamStats},
 };
 
 use common::{
     click_at, drive_frames, options_interactive_rects, real_ticket, render_shapes, test_app,
-    test_app_with, watch_button_rects, watch_button_rects_with,
+    test_app_with, text_present, text_rect, watch_button_rects, watch_button_rects_with,
 };
 
 /// The Watch tab has a full-width volume slider on its own row under the
@@ -167,7 +167,8 @@ fn broadcast_tab_renders_at_min_size() {
 
 /// Render the Watch tab at the minimum window size and assert nothing escapes. It has
 /// a multiline ticket box, two combo boxes and a buffer field, so it's checked
-/// separately from the broadcast tab.
+/// separately from the broadcast tab. Also checks the "Select Contact" button is
+/// painted, right-aligned, and fits inside the min window.
 #[test]
 fn watch_tab_renders_at_min_size() {
     let (mut app, _rt) = test_app();
@@ -184,6 +185,33 @@ fn watch_tab_renders_at_min_size() {
             shape.clip_rect
         );
     }
+
+    // The "Select Contact" button is painted, on its own row under the ticket box,
+    // right-aligned, and 28 tall (never the 30-tall footer size).
+    let btn = shapes
+        .iter()
+        .find_map(|s| match &s.shape {
+            egui::epaint::Shape::Rect(r)
+                if r.fill == WATCH_ACCENT.gamma_multiply(0.18)
+                    && (26.0..=30.0).contains(&r.rect.height()) =>
+            {
+                Some(r.rect)
+            }
+            _ => None,
+        })
+        .expect("the 'Select Contact' button should be painted at min size");
+    assert!(
+        window.contains_rect(btn),
+        "the 'Select Contact' button escapes the min window: {btn:?}"
+    );
+    assert!(
+        btn.right() >= min.x - 24.0,
+        "the button should sit against the right edge, got {btn:?}"
+    );
+    assert!(
+        text_present(&shapes, "Select Contact"),
+        "the button's label should be painted"
+    );
 }
 
 /// The Options "Streaming" inputs must leave the interactive set while a session is
@@ -615,4 +643,46 @@ fn the_settings_footer_is_a_matched_pair_and_save_raises_a_toast() {
     assert!(!app.show_options, "Close dismisses the panel");
 
     std::env::remove_var("XDG_CONFIG_HOME");
+}
+#[test]
+fn the_watch_tab_chips_the_selected_contact_and_recedes_on_edit() {
+    let ticket = real_ticket();
+    let (mut app, _rt) = test_app_with(Config {
+        contacts: vec![Contact {
+            name: "Alice".into(),
+            ticket: ticket.clone(),
+        }],
+        ..Config::default()
+    });
+    app.tab = Tab::Watch;
+    let size = egui::vec2(760.0, 560.0);
+
+    // Empty box: no chip.
+    let out = render_shapes(&mut app, size);
+    assert!(
+        !text_present(&out, "Alice"),
+        "an empty box claims no contact"
+    );
+
+    // Ticket filled from the contact: the chip shows the name, on the heading row
+    // (above the ticket box) and right-aligned.
+    app.watch_ticket = ticket.clone();
+    let out = render_shapes(&mut app, size);
+    let chip = text_rect(&out, "Alice").expect("the chip shows the contact's name");
+    assert!(
+        chip.min.y < 131.0,
+        "the chip rides the 'Stream ticket' heading row, got {chip:?}"
+    );
+    assert!(
+        chip.right() > size.x - 60.0,
+        "the chip is right-aligned, got {chip:?}"
+    );
+
+    // Ticket edited so nothing matches: the chip recedes.
+    app.watch_ticket = "tampered-with".into();
+    let out = render_shapes(&mut app, size);
+    assert!(
+        !text_present(&out, "Alice"),
+        "the chip recedes when the ticket no longer matches a contact"
+    );
 }

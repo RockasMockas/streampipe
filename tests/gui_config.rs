@@ -6,7 +6,7 @@
 use std::fs;
 use std::sync::Mutex;
 
-use streampipe::gui::config::{config_path, Config, DEFAULT_VOLUME};
+use streampipe::gui::config::{config_path, Config, Contact, DEFAULT_VOLUME};
 use streampipe::stream::Player;
 
 /// Serialises the tests that mutate the environment / config dir.
@@ -68,8 +68,10 @@ fn volume_survives_a_restart() {
     assert_eq!(Config::load().volume, DEFAULT_VOLUME);
 
     // The user drags to 37 % and the app persists it.
-    let mut cfg = Config::default();
-    cfg.volume = 37;
+    let cfg = Config {
+        volume: 37,
+        ..Config::default()
+    };
     cfg.save();
     assert!(path.exists(), "the config was written");
 
@@ -131,6 +133,56 @@ fn old_config_without_ticket_fields_still_loads() {
     .unwrap();
     assert_eq!(back.broadcast_port, 9001);
     assert!(back.broadcast_ticket.is_none());
+}
+
+/// Saved contacts (name + ticket) round-trip through JSON, and a config predating the
+/// feature (no `contacts` key, e.g. `{}`) loads as an empty list.
+#[test]
+fn contacts_round_trip_and_default_to_empty() {
+    let cfg = Config {
+        contacts: vec![
+            Contact {
+                name: "Alice".into(),
+                ticket: "ticket-alice".into(),
+            },
+            Contact {
+                name: "Bob".into(),
+                ticket: "ticket-bob".into(),
+            },
+        ],
+        ..Config::default()
+    };
+    let back = serde_json::from_str::<Config>(&serde_json::to_string(&cfg).unwrap()).unwrap();
+    assert_eq!(back.contacts.len(), 2, "both contacts survive");
+    assert_eq!(back.contacts[0].name, "Alice");
+    assert_eq!(back.contacts[0].ticket, "ticket-alice");
+    assert_eq!(back.contacts[1].name, "Bob");
+    assert_eq!(back.contacts[1].ticket, "ticket-bob");
+
+    // An old config (no `contacts` key) loads empty — no migration needed.
+    let old = serde_json::from_str::<Config>("{}").unwrap();
+    assert!(
+        old.contacts.is_empty(),
+        "a config predating contacts is empty"
+    );
+
+    // And a partial entry fills in from `serde(default)`.
+    let partial = serde_json::from_str::<Config>("{\"contacts\":[{\"name\":\"Solo\"}]}").unwrap();
+    assert_eq!(partial.contacts.len(), 1);
+    assert_eq!(partial.contacts[0].name, "Solo");
+    assert!(partial.contacts[0].ticket.is_empty());
+
+    // Round-trips through disk, not just the in-memory JSON.
+    let _guard = CONFIG_ENV.lock().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    std::env::set_var("XDG_CONFIG_HOME", dir.path());
+    cfg.save();
+    let reloaded = Config::load();
+    assert_eq!(
+        reloaded.contacts, cfg.contacts,
+        "contacts survive a restart"
+    );
+    std::env::remove_var("XDG_CONFIG_HOME");
 }
 
 #[test]

@@ -8,6 +8,7 @@
 
 pub mod broadcast;
 pub mod config;
+pub mod contacts;
 pub mod log;
 pub mod options;
 pub mod state;
@@ -69,6 +70,15 @@ pub struct App {
     pub tab: Tab,
     /// Whether the options panel is open.
     pub show_options: bool,
+    /// Whether the Contacts overlay is open. Mutually exclusive with `show_options` —
+    /// both are anchored over the panels, so only one is ever on screen.
+    pub show_contacts: bool,
+    /// Whether the Contacts list has edits staged for the next flush (written when the
+    /// overlay closes, never per keystroke).
+    pub contacts_dirty: bool,
+    /// The contact row whose name field should take keyboard focus next frame — armed by
+    /// "Add contact" so typing starts in the new row, cleared once consumed.
+    pub focus_contact_row: Option<usize>,
     /// Whether the bottom log panel is expanded.
     pub log_open: bool,
     /// Whether the WHIP bearer token is shown in cleartext. Masked by default so a
@@ -146,6 +156,9 @@ impl App {
             stats_tx,
             tab: Tab::Watch,
             show_options: false,
+            show_contacts: false,
+            contacts_dirty: false,
+            focus_contact_row: None,
             log_open: false,
             show_bearer: false,
             watch_player,
@@ -175,9 +188,16 @@ impl App {
         // Read before the closure: it mutably borrows `self` for the pulse clock.
         let secs = self.pulse.elapsed().as_secs_f32();
         egui::menu::MenuBar::new().ui(ui, |ui| {
-            // Open the settings panel directly — no intermediate dropdown.
+            // Open the panels directly — no intermediate dropdown. They occupy the same
+            // space over the panels, so opening one always dismisses the other.
             if ui.button("Settings").clicked() {
                 self.show_options = !self.show_options;
+                if self.show_options {
+                    self.show_contacts = false;
+                }
+            }
+            if ui.button("Contacts").clicked() {
+                self.toggle_contacts();
             }
             ui.separator();
             let base = if snap.broadcast == Mode::Broadcasting {
@@ -651,6 +671,10 @@ impl App {
         let ctx = ui.ctx();
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Comma)) {
             self.show_options = !self.show_options;
+            // The two overlays share the same space over the panels — never both.
+            if self.show_options {
+                self.show_contacts = false;
+            }
             ctx.request_repaint();
         } else if ctx.input_mut(|i| {
             i.consume_key(egui::Modifiers::CTRL, egui::Key::L)
@@ -708,6 +732,9 @@ impl App {
             });
         if self.show_options {
             self.options_window(ui.ctx());
+        }
+        if self.show_contacts {
+            self.contacts_window(ui.ctx());
         }
         self.log_panel(ui);
         // A subtle vertical gradient is the central panel's ground, so the surface reads
@@ -1043,6 +1070,37 @@ fn live_badge(ui: &mut Ui, color: egui::Color32, breath: f32) {
     let text_pos = egui::pos2(rect.center().x - tw * 0.5, rect.center().y - th * 0.5);
     ui.painter()
         .galley(text_pos, galley, color.gamma_multiply(breath.max(0.8)));
+}
+
+/// A compact named pill (e.g. the selected contact) beside a section heading: an
+/// outlined rounded box in the given accent with the label centred. Unlike
+/// [`live_badge`] it is static — a name is a fact, not a live signal — and it takes an
+/// arbitrary label, which is why the "LIVE" badge above cannot be reused for it.
+pub fn contact_chip(ui: &mut Ui, label: &str, color: egui::Color32) {
+    let font_id = egui::FontId::proportional(10.5);
+    let galley =
+        ui.painter()
+            .layout_no_wrap(label.to_string(), font_id, egui::Color32::PLACEHOLDER);
+    let tw = galley.rect.width();
+    let th = galley.rect.height();
+    let pad_x = 6.0;
+    let pad_y = 2.0;
+    let (rect, _resp) = ui.allocate_exact_size(
+        egui::vec2(tw + pad_x * 2.0, th + pad_y * 2.0),
+        egui::Sense::hover(),
+    );
+    let corner = egui::CornerRadius::same(5);
+    ui.painter()
+        .rect_filled(rect, corner, color.gamma_multiply(0.12));
+    ui.painter().rect_stroke(
+        rect,
+        corner,
+        egui::Stroke::new(1.0, color.gamma_multiply(0.55)),
+        egui::StrokeKind::Inside,
+    );
+    let text_pos = egui::pos2(rect.center().x - tw * 0.5, rect.center().y - th * 0.5);
+    ui.painter()
+        .galley(text_pos, galley, color.gamma_multiply(0.92));
 }
 
 /// A section heading: a small accent bar beside a bold label.
