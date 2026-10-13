@@ -82,6 +82,15 @@ pub struct App {
     /// The contact row whose deletion is awaiting confirmation in the modal. `Some(i)`
     /// opens the "Remove …?" dialog; confirming removes row `i`, cancelling clears it.
     pub confirm_remove_contact: Option<usize>,
+    /// The contact row in edit mode — exactly one at a time. `None` means every row
+    /// paints its read-only view (avatar, labels, "Load", "Edit").
+    pub editing_contact: Option<usize>,
+    /// The row animating out of edit mode (its progress is `1 - contact_edit_anim`),
+    /// so closes play instead of snapping. Cleared once the tween settles at 1.
+    pub contact_edit_prev: Option<usize>,
+    /// The shared 0↔1 row-edit tween, stepped once per frame in `draw()` (single
+    /// owner) so every row reads the same clock.
+    pub contact_edit_anim: f32,
     /// Whether the bottom log panel is expanded.
     pub log_open: bool,
     /// Whether the WHIP bearer token is shown in cleartext. Masked by default so a
@@ -163,6 +172,9 @@ impl App {
             contacts_dirty: false,
             focus_contact_row: None,
             confirm_remove_contact: None,
+            editing_contact: None,
+            contact_edit_prev: None,
+            contact_edit_anim: 0.0,
             log_open: false,
             show_bearer: false,
             watch_player,
@@ -198,6 +210,7 @@ impl App {
                 self.show_options = !self.show_options;
                 if self.show_options {
                     self.show_contacts = false;
+                    self.confirm_remove_contact = None;
                 }
             }
             // A hairline between the two panel toggles, so the pair reads as distinct
@@ -624,6 +637,21 @@ impl App {
             self.tab_fade = eased;
             self.tab_fade_active = !settled;
         }
+        // The contact-row edit tween: one shared clock, stepped here (single owner) so
+        // every row reads the same `p`. It runs 0→1 only while a row is opening
+        // (`editing_contact`) or closing (`contact_edit_prev`) — never at rest, so an
+        // open idle panel sleeps. The opened row paints at `p = anim`, the closing row
+        // at `p = 1 - anim`; when the tween settles, the closing row is released so no
+        // row keeps a dead `p` (a standing `prev` would pin its row expanded).
+        let contact_edit_active =
+            self.editing_contact.is_some() || self.contact_edit_prev.is_some();
+        let contact_edit_moving = contact_edit_active && self.contact_edit_anim < 0.998;
+        if contact_edit_moving {
+            self.contact_edit_anim = tab_slide_step(self.contact_edit_anim, 1.0, dt);
+        }
+        if contact_edit_active && !contact_edit_moving {
+            self.contact_edit_prev = None;
+        }
         // Persist a ticket minted while idle (Refresh Relay / Reset Ticket) so the
         // "current ticket" survives restarts. Guarded to a real change so we never
         // rewrite config.json every frame; the broadcasting path persists its own.
@@ -656,6 +684,11 @@ impl App {
         if self.tab_fade_active {
             ui.ctx().request_repaint();
         }
+        // The contact-row edit tween wants display-rate frames while in flight —
+        // only while the panel is open (closed, it must not keep the window awake).
+        if self.show_contacts && contact_edit_moving {
+            ui.ctx().request_repaint();
+        }
         // Only the visible tab's spinner matters — the other tab's `Starting` track is
         // not drawn, so it must not keep the window awake.
         let spinner_visible = match self.tab {
@@ -681,6 +714,9 @@ impl App {
             // The two overlays share the same space over the panels — never both.
             if self.show_options {
                 self.show_contacts = false;
+                self.editing_contact = None;
+                self.contact_edit_prev = None;
+                self.confirm_remove_contact = None;
             }
             ctx.request_repaint();
         } else if ctx.input_mut(|i| {

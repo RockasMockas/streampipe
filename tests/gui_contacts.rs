@@ -13,8 +13,8 @@ use streampipe::gui::{
 };
 
 use common::{
-    click_at, drive_frames, focused_raw, frame, real_ticket, render_shapes, test_app,
-    test_app_with, text_present, text_rect,
+    click_at, drive_frames, drive_until_settled, focused_raw, frame, real_ticket, render_shapes,
+    test_app, test_app_with, text_present, text_rect,
 };
 
 /// The size these tests drive the window at.
@@ -29,6 +29,15 @@ fn escape_key() -> egui::Event {
         repeat: false,
         modifiers: egui::Modifiers::NONE,
     }
+}
+
+/// Count the painted text shapes with exactly this text (a fn, so it works on any
+/// frame's shapes — a closure capturing `out` would outlive the shadowed rebinding).
+fn count_text(shapes: &[egui::epaint::ClippedShape], needle: &str) -> usize {
+    shapes
+        .iter()
+        .filter(|s| matches!(&s.shape, egui::epaint::Shape::Text(t) if t.galley.text() == needle))
+        .count()
 }
 
 /// The footer bar's "Contacts" button sits immediately to the right of "Settings", both
@@ -279,8 +288,9 @@ fn the_loaded_row_reads_in_the_box_and_the_others_stay_loadable() {
     );
 }
 
-/// Add a row, type into it, close (which flushes), reopen: the contact survived. Then
-/// remove it and it is gone.
+/// Add a row (it opens in edit mode), save it (persist + toast, back to view mode),
+/// edit it again, delete it through the modal. Rows are read-only by default — the
+/// fields, "Save" and "Delete" only exist while a row edits.
 #[test]
 fn contacts_can_be_added_edited_and_removed() {
     // These clicks write config; redirect the config dir (the mutex serialises them).
@@ -307,20 +317,25 @@ fn contacts_can_be_added_edited_and_removed() {
         "the new row's name field is armed for typing"
     );
 
-    // The hint recedes, and the row carries the two fields, a "Load" action and a
-    // small "✕" remove.
-    let out = drive_frames(&mut app, &ctx, SIZE, 3);
+    // The new row opens (animated) in edit mode: the hint recedes, the row carries
+    // the two fields, a green "Save" and a red "Delete"; "Load" fades out.
+    drive_until_settled(&mut app, &ctx, SIZE, 1.0);
+    let out = drive_frames(&mut app, &ctx, SIZE, 1);
     assert!(
         !text_present(&out.shapes, hint),
         "the empty-list hint recedes once there is a row"
     );
     assert!(text_present(&out.shapes, "Name"));
     assert!(text_present(&out.shapes, "Paste their ticket here"));
-    assert!(text_present(&out.shapes, "Load"));
-    assert!(text_present(&out.shapes, "✕"));
+    assert!(text_present(&out.shapes, "Delete"));
+    assert!(
+        !text_present(&out.shapes, "Load"),
+        "'Load' is gone while the row edits"
+    );
 
-    // "Save" writes the list, with the confirmation pill.
-    let save = text_rect(&out.shapes, "Save").expect("the 'Save' button is painted");
+    // The row's "Save" (the first match — the footer's is below it) writes the list,
+    // raises the confirmation pill, and returns the row to view mode.
+    let save = text_rect(&out.shapes, "Save").expect("the row's 'Save' button is painted");
     click_at(&mut app, &ctx, save.center(), SIZE);
     assert_eq!(
         app.toast.as_ref().map(|(m, _)| m.as_str()),
@@ -334,10 +349,24 @@ fn contacts_can_be_added_edited_and_removed() {
         "the saved config carries the contacts key: {written}"
     );
 
-    // The row's "✕" opens a confirmation modal; nothing is removed until it is confirmed.
-    let out = drive_frames(&mut app, &ctx, SIZE, 3);
-    let x = text_rect(&out.shapes, "✕").expect("the row's '✕' button is painted");
-    click_at(&mut app, &ctx, x.center(), SIZE);
+    // The row animates back to view mode: "Edit" is back, "Delete" is gone.
+    drive_until_settled(&mut app, &ctx, SIZE, 1.0);
+    let out = drive_frames(&mut app, &ctx, SIZE, 1);
+    assert!(text_present(&out.shapes, "Edit"));
+    assert!(
+        !text_present(&out.shapes, "Delete"),
+        "no delete affordance outside edit mode"
+    );
+    assert!(text_present(&out.shapes, "Load"));
+
+    // "Edit" reopens the row; its red "Delete" arms the confirmation modal; nothing
+    // is removed until it is confirmed.
+    let edit = text_rect(&out.shapes, "Edit").expect("the row's 'Edit' button is painted");
+    click_at(&mut app, &ctx, edit.center(), SIZE);
+    drive_until_settled(&mut app, &ctx, SIZE, 1.0);
+    let out = drive_frames(&mut app, &ctx, SIZE, 1);
+    let delete = text_rect(&out.shapes, "Delete").expect("the row's 'Delete' button");
+    click_at(&mut app, &ctx, delete.center(), SIZE);
     let out = drive_frames(&mut app, &ctx, SIZE, 2);
     assert_eq!(
         app.config.contacts.len(),
@@ -349,10 +378,28 @@ fn contacts_can_be_added_edited_and_removed() {
         "the modal asks to remove the (nameless) contact"
     );
 
-    // Confirming in the modal drops the row.
+    // Escape dismisses the modal; the row keeps editing behind it.
+    frame(&ctx, &mut app, focused_raw(vec![escape_key()]));
+    let out = drive_frames(&mut app, &ctx, SIZE, 2);
+    assert!(
+        !text_present(&out.shapes, "Remove this contact?"),
+        "Escape dismissed the modal"
+    );
+    assert_eq!(
+        count_text(&out.shapes, "Delete"),
+        1,
+        "the row is still editing"
+    );
+
+    // Re-arm the modal and confirm: the row drops, nothing stays expanded.
+    let delete = text_rect(&out.shapes, "Delete").expect("the row's 'Delete' button");
+    click_at(&mut app, &ctx, delete.center(), SIZE);
+    let out = drive_frames(&mut app, &ctx, SIZE, 2);
     let remove = text_rect(&out.shapes, "Remove").expect("the modal's 'Remove' button");
     click_at(&mut app, &ctx, remove.center(), SIZE);
     assert!(app.config.contacts.is_empty(), "confirming removes the row");
+    assert_eq!(app.editing_contact, None, "the row left edit mode");
+    assert_eq!(app.contact_edit_prev, None, "nothing animates out");
 
     std::env::remove_var("XDG_CONFIG_HOME");
 }
@@ -369,16 +416,19 @@ fn closing_the_panel_flushes_staged_edits() {
     app.show_contacts = true;
     let ctx = egui::Context::default();
 
-    // Add a row, then close: the panel is gone and the config on disk carries it.
+    // Add a row (it opens in edit mode), let the row settle, then close: the panel
+    // is gone and the config on disk carries it.
     let out = drive_frames(&mut app, &ctx, SIZE, 3);
     let add = text_rect(&out.shapes, "+  Add contact").expect("the add button is painted");
     click_at(&mut app, &ctx, add.center(), SIZE);
-    let out = drive_frames(&mut app, &ctx, SIZE, 2);
+    drive_until_settled(&mut app, &ctx, SIZE, 1.0);
+    let out = drive_frames(&mut app, &ctx, SIZE, 1);
     let close = text_rect(&out.shapes, "Close").expect("the 'Close' button is painted");
     click_at(&mut app, &ctx, close.center(), SIZE);
 
     assert!(!app.show_contacts, "Close dismisses the panel");
     assert!(!app.contacts_dirty, "the staged edit was flushed");
+    assert_eq!(app.editing_contact, None, "edit mode was exited on close");
     let written = std::fs::read_to_string(dir.path().join("streampipe").join("config.json"))
         .expect("closing wrote the redirected config");
     let reloaded: Config = serde_json::from_str(&written).unwrap();
@@ -389,6 +439,231 @@ fn closing_the_panel_flushes_staged_edits() {
     );
 
     std::env::remove_var("XDG_CONFIG_HOME");
+}
+
+/// Rows in view mode are read-only: they paint avatar, labels, "Load" and "Edit" —
+/// no editable fields, no delete affordance, no per-row save. Those widgets exist
+/// only while a row is in edit mode (the distinguishing check against the old
+/// always-editable layout).
+#[test]
+fn view_mode_rows_are_read_only() {
+    let (mut app, _rt) = test_app_with(Config {
+        contacts: vec![Contact {
+            name: "Alice".into(),
+            ticket: "alice-ticket".into(),
+        }],
+        ..Config::default()
+    });
+    app.show_contacts = true;
+    let ctx = egui::Context::default();
+
+    let out = drive_frames(&mut app, &ctx, SIZE, 3);
+    assert!(text_present(&out.shapes, "Load"), "the row offers 'Load'");
+    assert!(text_present(&out.shapes, "Edit"), "the row offers 'Edit'");
+    assert!(
+        !text_present(&out.shapes, "Paste their ticket here"),
+        "no ticket field is painted in view mode"
+    );
+    assert!(
+        !text_present(&out.shapes, "Name"),
+        "no name-field hint is painted in view mode"
+    );
+    assert!(
+        !text_present(&out.shapes, "Delete"),
+        "no delete affordance is painted in view mode"
+    );
+}
+
+/// Clicking "Edit" animates a row into the edit state; exactly one row edits at a
+/// time. Opening the second row animates the first closed and the second open.
+/// Probes: "Delete" is only painted by an editing row, "Load" only by a view row
+/// (the fields here are non-empty, so the TextEdit hints never paint).
+#[test]
+fn only_one_row_edits_at_a_time() {
+    let (mut app, _rt) = test_app_with(Config {
+        contacts: vec![
+            Contact {
+                name: "Alice".into(),
+                ticket: "alice-ticket".into(),
+            },
+            Contact {
+                name: "Bob".into(),
+                ticket: "bob-ticket".into(),
+            },
+        ],
+        ..Config::default()
+    });
+    app.show_contacts = true;
+    let ctx = egui::Context::default();
+
+    // View mode: both rows offer "Load"/"Edit"; no delete affordance, only the
+    // footer's "Save".
+    let out = drive_frames(&mut app, &ctx, SIZE, 3);
+    assert_eq!(count_text(&out.shapes, "Edit"), 2, "both rows offer 'Edit'");
+    assert_eq!(count_text(&out.shapes, "Load"), 2, "both rows offer 'Load'");
+    assert_eq!(count_text(&out.shapes, "Delete"), 0);
+    assert_eq!(
+        count_text(&out.shapes, "Save"),
+        1,
+        "only the footer paints 'Save'"
+    );
+
+    // Open the top row (the first "Edit" match).
+    let edit = text_rect(&out.shapes, "Edit").expect("an 'Edit' button");
+    click_at(&mut app, &ctx, edit.center(), SIZE);
+    drive_until_settled(&mut app, &ctx, SIZE, 1.0);
+    let out = drive_frames(&mut app, &ctx, SIZE, 1);
+    assert_eq!(
+        count_text(&out.shapes, "Delete"),
+        1,
+        "exactly one row edits"
+    );
+    assert_eq!(
+        count_text(&out.shapes, "Edit"),
+        1,
+        "the editing row's 'Edit' is gone"
+    );
+    assert_eq!(
+        count_text(&out.shapes, "Load"),
+        1,
+        "only the idle row offers 'Load'"
+    );
+    assert_eq!(
+        count_text(&out.shapes, "Save"),
+        2,
+        "the row's green Save plus the footer's"
+    );
+
+    // Open the idle row via the only remaining "Edit": the first row animates
+    // closed (it is now the top row in view mode), the second animates open.
+    let edit2 = text_rect(&out.shapes, "Edit").expect("the idle row's 'Edit'");
+    click_at(&mut app, &ctx, edit2.center(), SIZE);
+    drive_until_settled(&mut app, &ctx, SIZE, 1.0);
+    let out = drive_frames(&mut app, &ctx, SIZE, 1);
+    assert_eq!(
+        count_text(&out.shapes, "Delete"),
+        1,
+        "still exactly one row edits"
+    );
+    assert_eq!(
+        count_text(&out.shapes, "Edit"),
+        1,
+        "only the idle row offers 'Edit'"
+    );
+    // The editing row (with "Delete") is the lower one; the idle row (with "Edit")
+    // sits on top.
+    let delete_rect = text_rect(&out.shapes, "Delete").expect("'Delete' on the editing row");
+    let edit_rect = text_rect(&out.shapes, "Edit").expect("'Edit' on the idle row");
+    assert!(
+        delete_rect.min.y > edit_rect.min.y,
+        "row 2 edits, row 1 is back in view: {delete_rect:?} vs {edit_rect:?}"
+    );
+}
+
+/// Escape while a row edits exits edit mode and keeps the panel up; Escape with
+/// nothing editing closes the panel (the existing behaviour is preserved).
+#[test]
+fn escape_exits_edit_mode_then_closes_the_panel() {
+    let (mut app, _rt) = test_app_with(Config {
+        contacts: vec![Contact {
+            name: "Alice".into(),
+            ticket: "alice-ticket".into(),
+        }],
+        ..Config::default()
+    });
+    app.show_contacts = true;
+    let ctx = egui::Context::default();
+
+    // Open a row's edit mode ("Delete" is the edit-mode probe: the field is
+    // non-empty, so its hint never paints).
+    let out = drive_frames(&mut app, &ctx, SIZE, 3);
+    let edit = text_rect(&out.shapes, "Edit").expect("the row paints 'Edit'");
+    click_at(&mut app, &ctx, edit.center(), SIZE);
+    drive_until_settled(&mut app, &ctx, SIZE, 1.0);
+    let out = drive_frames(&mut app, &ctx, SIZE, 1);
+    assert_eq!(count_text(&out.shapes, "Delete"), 1, "the row is editing");
+
+    // Escape exits edit mode; the panel stays up.
+    frame(&ctx, &mut app, focused_raw(vec![escape_key()]));
+    assert!(app.show_contacts, "Escape leaves the panel standing");
+    assert_eq!(app.editing_contact, None, "Escape exited edit mode");
+    drive_until_settled(&mut app, &ctx, SIZE, 1.0);
+    let out = drive_frames(&mut app, &ctx, SIZE, 2);
+    assert!(app.show_contacts, "the panel is still open");
+    assert_eq!(
+        count_text(&out.shapes, "Delete"),
+        0,
+        "the row is back in view mode"
+    );
+
+    // Escape with nothing editing closes the panel (existing behaviour).
+    frame(&ctx, &mut app, focused_raw(vec![escape_key()]));
+    assert!(!app.show_contacts, "the second Escape closed the panel");
+}
+
+/// The delete confirmation never survives the panel: closing the panel by any route
+/// (here Cmd+, opening Settings over it) drops the pending confirmation, so
+/// reopening Contacts shows a clean list — not a stale "Remove …?" dialog.
+#[test]
+fn the_delete_confirmation_does_not_survive_the_panel() {
+    let (mut app, _rt) = test_app_with(Config {
+        contacts: vec![Contact {
+            name: "Alice".into(),
+            ticket: "alice-ticket".into(),
+        }],
+        ..Config::default()
+    });
+    app.show_contacts = true;
+    let ctx = egui::Context::default();
+
+    // Edit the row, arm the delete confirmation, and let the modal paint.
+    let out = drive_frames(&mut app, &ctx, SIZE, 3);
+    let edit = text_rect(&out.shapes, "Edit").expect("the row paints 'Edit'");
+    click_at(&mut app, &ctx, edit.center(), SIZE);
+    drive_until_settled(&mut app, &ctx, SIZE, 1.0);
+    let out = drive_frames(&mut app, &ctx, SIZE, 1);
+    let delete = text_rect(&out.shapes, "Delete").expect("the row paints 'Delete'");
+    click_at(&mut app, &ctx, delete.center(), SIZE);
+    let out = drive_frames(&mut app, &ctx, SIZE, 2);
+    assert!(
+        text_present(&out.shapes, "Remove Alice?"),
+        "the modal is up"
+    );
+
+    // Cmd+, opens Settings over the panel; the confirmation goes down with it.
+    frame(
+        &ctx,
+        &mut app,
+        focused_raw(vec![egui::Event::Key {
+            key: egui::Key::Comma,
+            physical_key: Some(egui::Key::Comma),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND,
+        }]),
+    );
+    assert!(
+        app.show_options && !app.show_contacts,
+        "Cmd+, swapped the panel"
+    );
+    assert_eq!(
+        app.confirm_remove_contact, None,
+        "the pending confirmation was dropped with the panel"
+    );
+
+    // Reopen Contacts from the footer: a clean list, no stale dialog.
+    let out = drive_frames(&mut app, &ctx, SIZE, 2);
+    let contacts = text_rect(&out.shapes, "Contacts").expect("the footer paints 'Contacts'");
+    click_at(&mut app, &ctx, contacts.center(), SIZE);
+    assert!(
+        app.show_contacts && !app.show_options,
+        "the footer reopened the picker"
+    );
+    let out = drive_frames(&mut app, &ctx, SIZE, 2);
+    assert!(
+        !text_present(&out.shapes, "Remove Alice?"),
+        "no stale confirmation dialog on reopen"
+    );
 }
 
 /// At the minimum window size the overlay paints, keeps its controls inside the window,

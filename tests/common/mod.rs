@@ -170,6 +170,29 @@ pub fn drive_frames(
     out
 }
 
+/// Drive frames headlessly until the contact-row edit tween reaches `target` within
+/// 0.002, polling the value — fixed frame counts are unreliable: headless `dt` runs
+/// ~2–15 ms, so the rate-30 tween settles in ~14–103 frames depending on the
+/// machine. Use this wherever a test needs the layout static before the next click
+/// (a row animating shifts the footer ~12 px; clicking a stale rect is the flake).
+pub fn drive_until_settled(app: &mut App, ctx: &egui::Context, size: egui::Vec2, target: f32) {
+    let raw = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), size)),
+        ..Default::default()
+    };
+    for _ in 0..300 {
+        frame(ctx, app, raw.clone());
+        if (app.contact_edit_anim - target).abs() <= 0.002 {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(8));
+    }
+    panic!(
+        "contact edit tween did not reach {target} within 300 frames (stuck at {})",
+        app.contact_edit_anim
+    );
+}
+
 /// A real, parseable watch ticket for a throwaway endpoint identity.
 ///
 /// A junk string like `"abc"` makes `start_watch` bail and spawn nothing, which

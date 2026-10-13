@@ -4,8 +4,16 @@ mod common;
 
 use std::time::{Duration, Instant};
 
-use common::{assert_awake, settled_repaint_delay, test_app};
-use streampipe::gui::{state::Mode, TOAST, TOAST_FRAME};
+use common::{assert_awake, drive_until_settled, settled_repaint_delay, test_app, test_app_with};
+use eframe::egui;
+use streampipe::gui::{
+    config::{Config, Contact},
+    state::Mode,
+    TOAST, TOAST_FRAME,
+};
+
+/// The size these tests drive the window at (matches `settled_repaint_delay`).
+const SIZE: egui::Vec2 = egui::vec2(760.0, 560.0);
 
 #[test]
 fn idle_window_falls_asleep_once_the_copy_toast_expires() {
@@ -63,4 +71,56 @@ fn a_fading_toast_repaints_at_display_rate() {
     // Nothing live: the guard must stay disarmed, or an idle window burns frames.
     let (mut app, _rt) = test_app();
     assert_eq!(settled_repaint_delay(&mut app), Duration::MAX);
+}
+
+/// The contact-row edit tween repaints at display rate while in flight (open and
+/// close) and sleeps exactly once settled — and an open panel with nothing editing
+/// sleeps too. The edit state is armed directly (the fields are `pub`) with no
+/// focus anywhere, so no TextEdit cursor blink can keep the window awake.
+#[test]
+fn the_contact_edit_tween_sleeps_when_settled() {
+    let (mut app, _rt) = test_app_with(Config {
+        contacts: vec![Contact {
+            name: "Alice".into(),
+            ticket: "alice-ticket".into(),
+        }],
+        ..Config::default()
+    });
+
+    // Panel open, nothing editing: the window sleeps.
+    app.show_contacts = true;
+    assert_eq!(
+        settled_repaint_delay(&mut app),
+        Duration::MAX,
+        "an open panel with nothing editing must not repaint"
+    );
+
+    // Arm edit mode: the tween is in flight, so frames must keep coming.
+    app.editing_contact = Some(0);
+    let delay = settled_repaint_delay(&mut app);
+    assert_awake(delay);
+
+    // Poll to settle (fixed frame counts are unreliable headless): sleeps again.
+    let ctx = egui::Context::default();
+    drive_until_settled(&mut app, &ctx, SIZE, 1.0);
+    assert_eq!(
+        settled_repaint_delay(&mut app),
+        Duration::MAX,
+        "the settled tween must not keep the window awake"
+    );
+
+    // Exit edit mode: the row animates closed (awake), then sleeps, and the
+    // animating-out row (`contact_edit_prev`) is released on settle — never pinned
+    // expanded.
+    app.editing_contact = None;
+    app.contact_edit_prev = Some(0);
+    app.contact_edit_anim = 0.0;
+    assert_awake(settled_repaint_delay(&mut app));
+    drive_until_settled(&mut app, &ctx, SIZE, 1.0);
+    assert_eq!(
+        settled_repaint_delay(&mut app),
+        Duration::MAX,
+        "the closed row must not keep repainting once settled"
+    );
+    assert_eq!(app.contact_edit_prev, None, "prev is released on settle");
 }
