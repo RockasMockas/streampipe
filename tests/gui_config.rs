@@ -3,11 +3,16 @@
 //! `CONFIG_ENV` serialises the tests that redirect `XDG_CONFIG_HOME` into a temp
 //! dir, so they never touch the real user config and never race each other.
 
+mod common;
+
 use std::fs;
 use std::sync::Mutex;
 
-use streampipe::gui::config::{config_path, Config, Contact, DEFAULT_VOLUME};
+use eframe::egui;
+use streampipe::gui::config::{config_path, ticket_is_valid, Config, Contact, DEFAULT_VOLUME};
 use streampipe::stream::Player;
+
+use common::{drive_frames, real_ticket, test_app, test_app_with};
 
 /// Serialises the tests that mutate the environment / config dir.
 static CONFIG_ENV: Mutex<()> = Mutex::new(());
@@ -208,4 +213,71 @@ fn secret_round_trips() {
     // The generated secret was persisted to disk.
     let loaded = Config::load();
     assert_eq!(loaded.secret_hex, cfg.secret_hex);
+}
+
+/// `ticket_is_valid` accepts a freshly minted ticket and rejects the garbage forms a
+/// polluted or hand-edited config can carry.
+#[test]
+fn ticket_is_valid_accepts_real_tickets_and_rejects_garbage() {
+    assert!(ticket_is_valid(&real_ticket()));
+    // Surrounding whitespace is tolerated, mirroring the Watch tab's trimmed parse.
+    let real = real_ticket();
+    assert!(ticket_is_valid(&format!("  {real}\n")));
+
+    assert!(!ticket_is_valid(""));
+    assert!(!ticket_is_valid("   "));
+    assert!(!ticket_is_valid("a"));
+    // Right prefix, no body.
+    assert!(!ticket_is_valid("endpoint"));
+    // The garbage shape a test-polluted config leaves behind: a long run of `b`s
+    // (base32 for a repeating pattern the postcard wire format rejects).
+    assert!(!ticket_is_valid(&"b".repeat(144)));
+}
+
+/// A stored ticket the wire format rejects is dropped when the app opens — from the
+/// in-memory config *and* from disk — and the first idle frame arms a replacement
+/// refresh. A valid ticket is kept untouched; a first-run config arms nothing.
+#[test]
+fn invalid_stored_ticket_is_dropped_and_replaced() {
+    let _guard = CONFIG_ENV.lock().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    std::env::set_var("XDG_CONFIG_HOME", dir.path());
+
+    let (mut app, _rt) = test_app_with(Config {
+        broadcast_ticket: Some("b".repeat(144)),
+        ..Config::default()
+    });
+    assert!(app.regen_ticket, "the garbage ticket arms auto-replacement");
+    assert!(app.config.broadcast_ticket.is_none(), "dropped from memory");
+    assert!(
+        Config::load().broadcast_ticket.is_none(),
+        "the drop is persisted, so the garbage cannot come back on the next start"
+    );
+
+    // The first idle frame consumes the flag and kicks off the replacement refresh
+    // (`refreshing` is armed synchronously by the spawn).
+    let ctx = egui::Context::default();
+    let _out = drive_frames(&mut app, &ctx, egui::vec2(760.0, 560.0), 2);
+    assert!(!app.regen_ticket, "the flag fires exactly once");
+    let g = app.state.lock().unwrap();
+    assert!(
+        g.refreshing || g.ticket.is_some(),
+        "a replacement refresh was started"
+    );
+    drop(g);
+
+    // A valid ticket is kept and arms nothing.
+    let real = real_ticket();
+    let (app, _rt) = test_app_with(Config {
+        broadcast_ticket: Some(real.clone()),
+        ..Config::default()
+    });
+    assert!(!app.regen_ticket);
+    assert_eq!(app.config.broadcast_ticket.as_deref(), Some(real.as_str()));
+
+    // First run (no ticket at all): nothing armed, no refresh spawned.
+    let (app, _rt) = test_app();
+    assert!(!app.regen_ticket);
+
+    std::env::remove_var("XDG_CONFIG_HOME");
 }

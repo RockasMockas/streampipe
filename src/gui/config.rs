@@ -13,7 +13,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::stream::Player;
+use crate::{stream::Player, EndpointTicket};
 use iroh::SecretKey;
 use serde::{Deserialize, Serialize};
 
@@ -48,6 +48,16 @@ pub fn player_from_key(key: &str) -> Player {
         "none" => Player::None,
         _ => Player::Mpv,
     }
+}
+
+/// Whether a ticket string parses as a well-formed [`EndpointTicket`].
+///
+/// A config written by an older build (or polluted by a test fixture that fakes a
+/// long ticket for layout) can carry a garbage string — e.g. a run of `b`s — that
+/// the current wire format rejects. Such a ticket can never be dialled, so callers
+/// detect it with this and replace it with a freshly minted one.
+pub fn ticket_is_valid(ticket: &str) -> bool {
+    ticket.trim().parse::<EndpointTicket>().is_ok()
 }
 
 /// A saved contact: a friendly name paired with the ticket to watch.

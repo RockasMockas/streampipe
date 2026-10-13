@@ -162,11 +162,22 @@ impl App {
         } else {
             ui.add_space(12.0);
             section_tick(ui, "Send friends this stream ticket:", ACCENT);
+            // While a refresh is in flight (manual or the automatic replacement of an
+            // invalid stored ticket) and nothing is shown yet, say so instead of
+            // prompting for a button press that is already happening.
+            let refreshing = self.state.lock().unwrap().refreshing;
             let ticket = snap
                 .ticket
                 .clone()
                 .or_else(|| self.config.broadcast_ticket.clone())
-                .unwrap_or_else(|| "no ticket yet — press Refresh Relay".into());
+                .unwrap_or_else(|| {
+                    if refreshing {
+                        "issuing a fresh ticket…"
+                    } else {
+                        "no ticket yet — press Refresh Relay"
+                    }
+                    .into()
+                });
             let requested = self.ticket_row(
                 ui,
                 "ticket",
@@ -176,7 +187,7 @@ impl App {
                 "Refreshing…",
             );
             if requested {
-                self.refresh_relay(ui.ctx());
+                self.refresh_relay(ui.ctx(), "Relay refreshed ✓");
             }
         }
 
@@ -347,8 +358,10 @@ impl App {
     }
 
     /// Rebind the endpoint (same identity) and mint a fresh saved ticket, picking up a
-    /// new relay / ephemeral port hints for the next broadcast.
-    fn refresh_relay(&mut self, ctx: &Context) {
+    /// new relay / ephemeral port hints for the next broadcast. `done_msg` is the toast
+    /// raised when the new ticket lands, so callers can name the reason (manual refresh
+    /// vs. the automatic replacement of an invalid stored ticket).
+    pub(crate) fn refresh_relay(&mut self, ctx: &Context, done_msg: &'static str) {
         let bind = match parse_bind(&self.config) {
             Ok(bind) => bind,
             Err(e) => {
@@ -363,7 +376,7 @@ impl App {
             self.handle.clone(),
             ctx.clone(),
             bind,
-            "Relay refreshed ✓",
+            done_msg,
         );
     }
 

@@ -62,6 +62,11 @@ pub struct App {
     pub state: Arc<Mutex<SharedState>>,
     /// The persisted configuration, edited live and saved on change and quit.
     pub config: Config,
+    /// Whether the loaded config carried a broadcast ticket the current wire format
+    /// rejects (see [`config::ticket_is_valid`]). Set once in [`App::new`] after
+    /// dropping the invalid ticket; the first idle frame mints a fresh replacement
+    /// (same identity, like a manual relay refresh) and clears the flag.
+    pub regen_ticket: bool,
     /// The log ring fed by the tee writer.
     pub log: log::LogRing,
     /// The stats channel sender, cloned to each broadcast.
@@ -146,7 +151,7 @@ impl App {
     /// runtime they keep alive.
     pub fn new(
         handle: Handle,
-        config: Config,
+        mut config: Config,
         state: Arc<Mutex<SharedState>>,
         log: log::LogRing,
         stats_tx: mpsc::UnboundedSender<StreamStats>,
@@ -159,11 +164,25 @@ impl App {
         // The slider's range is 0..=100; the `min` only guards a value restored from
         // a hand-edited config.
         let watch_volume = config.volume.min(100);
+        // Self-heal a stored broadcast ticket the current wire format rejects (an
+        // older build, or a test-polluted config, can leave a garbage string): drop
+        // it, persist the removal, and flag the first idle frame to mint a fresh
+        // replacement from the live endpoint (see `draw`).
+        let regen_ticket = config
+            .broadcast_ticket
+            .as_deref()
+            .is_some_and(|t| !config::ticket_is_valid(t));
+        if regen_ticket {
+            tracing::warn!("stored broadcast ticket is invalid; replacing it with a fresh one");
+            config.broadcast_ticket = None;
+            config.save();
+        }
         App {
             handle,
             state,
             watch_ticket: config.last_ticket.clone(),
             config,
+            regen_ticket,
             log,
             stats_tx,
             tab: Tab::Watch,
@@ -620,6 +639,14 @@ impl App {
         let notice = self.state.lock().unwrap().notice.take();
         if let Some(msg) = notice {
             self.toast = Some((msg, Instant::now()));
+        }
+        // Replace an invalid stored ticket (flagged and dropped in `App::new`) with a
+        // freshly minted one: once, while nothing is running and no refresh is in
+        // flight. Same identity as a manual refresh, so friends' saved tickets (from
+        // before the garbage got written) still resolve.
+        if self.regen_ticket && !any_active && !refreshing {
+            self.regen_ticket = false;
+            self.refresh_relay(ui.ctx(), "Replaced invalid ticket ✓");
         }
         // Slide the tab underline toward the selected tab, on the wall clock.
         let now = Instant::now();

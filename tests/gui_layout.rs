@@ -111,6 +111,13 @@ fn the_volume_slider_opens_at_half_and_reopens_where_it_was_left() {
 /// escapes the window.
 #[test]
 fn broadcast_tab_renders_at_min_size() {
+    // A live broadcast persists its shown ticket to config; redirect the config dir
+    // (the mutex serialises these tests) so the fake ticket never lands in the real
+    // user config — a garbage ticket there would show up on the next app start.
+    let _guard = streampipe::gui::config::CONFIG_ENV.lock().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    std::env::set_var("XDG_CONFIG_HOME", dir.path());
+
     let (mut app, _rt) = test_app();
     app.tab = Tab::Broadcast;
     {
@@ -162,6 +169,38 @@ fn broadcast_tab_renders_at_min_size() {
         "the copy toast should add painting, got {} vs {}",
         with_toast.len(),
         without_toast.len()
+    );
+
+    std::env::remove_var("XDG_CONFIG_HOME");
+}
+
+/// While a refresh is in flight and no ticket is shown yet, the idle Broadcast tab's
+/// ticket box reads "issuing a fresh ticket…" — the state the automatic replacement
+/// of an invalid stored ticket leaves it in — instead of prompting for a button
+/// press that is already happening.
+#[test]
+fn the_idle_ticket_box_announces_an_in_flight_refresh() {
+    let (mut app, _rt) = test_app();
+    app.tab = Tab::Broadcast;
+    app.config.broadcast_ticket = None;
+    {
+        let mut g = app.state.lock().unwrap();
+        g.refreshing = true;
+        g.ticket = None;
+    }
+    let size = egui::vec2(760.0, 560.0);
+    let out = render_shapes(&mut app, size);
+    assert!(
+        text_present(&out, "issuing a fresh ticket…"),
+        "the box announces the in-flight replacement"
+    );
+
+    // Nothing in flight, still no ticket: the original prompt returns.
+    app.state.lock().unwrap().refreshing = false;
+    let out = render_shapes(&mut app, size);
+    assert!(
+        text_present(&out, "no ticket yet — press Refresh Relay"),
+        "the idle prompt shows when nothing is in flight"
     );
 }
 
