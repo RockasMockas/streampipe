@@ -580,7 +580,7 @@ mod unix_socket_tests {
 ///
 /// Real media does not flow here, because that needs a publisher that completes
 /// ICE, DTLS and SRTP. The media path itself, including the keyframe gate, is
-/// covered by the unit tests in `streampipe::stream`.
+/// covered by the tests in `tests/stream_host.rs`.
 #[cfg(test)]
 mod whip_tests {
     use std::{

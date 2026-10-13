@@ -1,4 +1,6 @@
-# Streampip![Streampipe gui preview](assets/streampipe-preview.png)
+# Streampipe
+
+![Streampipe gui preview](assets/streampipe-preview.png)
 
 Streampipe uses [iroh](https://crates.io/crates/iroh) to broadcast video and
 audio directly, peer-to-peer, with low latency to friends using streaming software like OBS.

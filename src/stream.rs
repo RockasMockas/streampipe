@@ -18,7 +18,7 @@
 use std::{
     io,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -127,7 +127,7 @@ impl Player {
         &self,
         sdp: &Path,
         buffer: Option<Duration>,
-        path: Option<&std::path::Path>,
+        path: Option<&Path>,
         volume: u8,
         script: Option<&Path>,
     ) -> Vec<String> {
@@ -1727,14 +1727,14 @@ pub struct ViewerConfig {
     /// The local address to play out on.
     pub play: SocketAddr,
     /// Where to write the SDP file.
-    pub sdp: Option<std::path::PathBuf>,
+    pub sdp: Option<PathBuf>,
     /// Whether to write the default SDP file into the current folder rather than
     /// the system temp dir. Set for `--player none` and a bare `--sdp`.
     pub sdp_here: bool,
     /// The player to launch.
     pub player: Player,
     /// An explicit path to the player binary, for a player not on `PATH`.
-    pub player_path: Option<std::path::PathBuf>,
+    pub player_path: Option<PathBuf>,
     /// Whether to launch the player at all.
     pub no_launch: bool,
     /// How much jitter buffer to give the player, `None` for lowest latency.
@@ -2168,11 +2168,7 @@ pub fn auto_buffer(configured: Option<Duration>, rtt: Option<Duration>) -> Optio
 /// usable path, `here` drops the file in the current folder so the user can
 /// open it by hand (`--player none`, or a bare `--sdp`); otherwise it goes to
 /// the system temp dir to keep the folder clean.
-pub fn sdp_path(
-    explicit: Option<std::path::PathBuf>,
-    here: bool,
-    video_port: u16,
-) -> std::path::PathBuf {
+pub fn sdp_path(explicit: Option<PathBuf>, here: bool, video_port: u16) -> PathBuf {
     let name = format!("streampipe-{video_port}.sdp");
     if let Some(p) = explicit.filter(|p| !p.as_os_str().is_empty()) {
         return if p.is_dir() { p.join(name) } else { p };
@@ -2186,7 +2182,7 @@ pub fn sdp_path(
 }
 
 /// Write the SDP file.
-async fn write_sdp(path: &std::path::Path, sdp: &str) -> Result<()> {
+async fn write_sdp(path: &Path, sdp: &str) -> Result<()> {
     tokio::fs::write(path, sdp)
         .await
         .with_std_context(|_| format!("error writing sdp file to {path:?}"))?;
@@ -2195,7 +2191,7 @@ async fn write_sdp(path: &std::path::Path, sdp: &str) -> Result<()> {
 }
 
 /// Stage the mpv buffer-drain control script on disk for `--script=`.
-async fn stage_mpv_script(player: Player) -> Option<std::path::PathBuf> {
+async fn stage_mpv_script(player: Player) -> Option<PathBuf> {
     if player != Player::Mpv {
         return None;
     }
@@ -2216,7 +2212,7 @@ async fn stage_mpv_script(player: Player) -> Option<std::path::PathBuf> {
 async fn launch(
     cfg: &ViewerConfig,
     buffer: Option<Duration>,
-    sdp_path: &std::path::Path,
+    sdp_path: &Path,
     video_port: u16,
     kf_tx: &mpsc::Sender<()>,
     exit_tx: &mpsc::Sender<()>,
@@ -2314,7 +2310,7 @@ pub async fn wait_until_listening(port: u16) {
 /// A gap in the video sequence nudges the viewer to ask the host for a keyframe,
 /// but `last_kf` is refreshed by every keyframe (the host tags each with an
 /// epoch), so a gap right after an IDR asks for nothing. Only a sustained gap
-/// with no keyframe for [`KF_REQUEST_INTERVAL`] sends a PLI: on a lossy path
+/// with no keyframe for `KF_REQUEST_INTERVAL` sends a PLI: on a lossy path
 /// nearly every frame has a gap, and a PLI per gap is a keyframe storm that
 /// amplifies the loss instead of recovering.
 // Pre-existing: this forwarder threads a handful of per-viewer state pointers
