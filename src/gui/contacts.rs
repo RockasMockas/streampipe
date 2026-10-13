@@ -456,39 +456,43 @@ impl App {
                         ui.add_space(4.0);
 
                         // Split the row explicitly: fields flush left, action pills
-                        // flush right. The pills are held back *before* the fields are
-                        // laid out and the fields are truncated to the pixels that
-                        // remain; a spacer (the slack the labels did not use) then
-                        // pushes "Load"/"Edit" and "Save"/"Delete" onto the card's
-                        // right margin. Left to their natural width the labels ran past
-                        // the card on a real (long) ticket, shoving the pills off the
-                        // panel's edge — and egui feeds that overflow back into
-                        // `available_width()`, so every row grew the next one and the
-                        // whole list drifted right.
+                        // flush right. Both the view and the edit set live in the SAME
+                        // band — two overlapping child UIs — so laying one out never
+                        // advances the other's cursor. Reserving the band once in the
+                        // parent keeps the row (and the pinned panel) from ever growing
+                        // wider for the few frames the crossfade runs both states at
+                        // once. Left to flow in sequence, the second block started at the
+                        // first block's right margin and spilled past the card.
+                        let band_min = ui.cursor().min;
+                        let band_w = (row_rect.max.x - RIGHT_PAD - band_min.x).max(0.0);
+                        let band_h = row_rect.height();
+                        ui.allocate_exact_size(egui::vec2(band_w, band_h), egui::Sense::hover());
+                        let band = egui::Rect::from_min_size(band_min, egui::vec2(band_w, band_h));
                         let gap = ui.spacing().item_spacing.x;
-                        let actions_w = (if show_view { LOAD_W + EDIT_W } else { 0.0 })
-                            + (if show_edit { SAVE_W + DELETE_W } else { 0.0 });
-                        let n_actions = 2.0 * ((show_view as usize + show_edit as usize) as f32);
-                        // Read what is left *now*, with the avatar already placed, then
-                        // hold back the pills, the gaps between them, and the quiet
-                        // right margin.
-                        let fields =
-                            (ui.available_width() - actions_w - gap * n_actions - RIGHT_PAD)
-                                .max(64.0);
+                        // Both states carry two pills of the same combined width, so the
+                        // fields split the leftover identically in either child.
+                        let fields = (band_w - (LOAD_W + EDIT_W) - gap * 2.0).max(64.0);
                         let name_font = egui::FontId::proportional(NAME_SIZE);
                         let ticket_font = egui::FontId::monospace(TICKET_SIZE);
                         // A name caps at 42% of the budget: the ticket is the string that
                         // hurts to retype, so it keeps the bulk of the room.
                         let name_w = (fields * 0.42).clamp(28.0, 190.0).min(fields);
                         let ticket_w = (fields - name_w - gap).max(24.0);
+                        let band_layout = egui::Layout::left_to_right(egui::Align::Center);
 
                         if show_view {
                             // View mode: read-only labels and the two actions, fading
                             // out as the row opens.
+                            let mut vu = ui.new_child(
+                                egui::UiBuilder::new()
+                                    .max_rect(band)
+                                    .layout(band_layout)
+                                    .id_salt(("contact_view_row", i)),
+                            );
                             let a = 1.0 - p;
                             let named = !contact.name.trim().is_empty();
                             let (name_disp, name_cut) = fit_text(
-                                ui,
+                                &vu,
                                 if named { &contact.name } else { "Unnamed" },
                                 &name_font,
                                 name_w,
@@ -498,7 +502,7 @@ impl App {
                             } else {
                                 egui::Color32::GRAY
                             };
-                            let name_resp = ui.label(
+                            let name_resp = vu.label(
                                 egui::RichText::new(name_disp)
                                     .font(name_font.clone())
                                     .strong()
@@ -508,8 +512,8 @@ impl App {
                                 name_resp.on_hover_text(&contact.name);
                             }
                             let (ticket_disp, ticket_cut) =
-                                fit_text(ui, &contact.ticket, &ticket_font, ticket_w);
-                            let ticket_resp = ui.label(
+                                fit_text(&vu, &contact.ticket, &ticket_font, ticket_w);
+                            let ticket_resp = vu.label(
                                 egui::RichText::new(ticket_disp)
                                     .font(ticket_font.clone())
                                     .color(egui::Color32::PLACEHOLDER.gamma_multiply(a)),
@@ -523,11 +527,9 @@ impl App {
                             // The spacer between the labels and the pills: exactly the
                             // slack the labels did not use, so "Edit" lands flush with
                             // the card's right margin.
-                            let pad = (row_rect.max.x - RIGHT_PAD
-                                - (LOAD_W + EDIT_W + gap)
-                                - ui.cursor().min.x)
-                                .max(0.0);
-                            ui.add_space(pad);
+                            let pad =
+                                (band.max.x - (LOAD_W + EDIT_W + gap) - vu.cursor().min.x).max(0.0);
+                            vu.add_space(pad);
 
                             // "Load" is the row's primary action (accent-filled); the
                             // loaded row reads "In the box" and leaves the interactive
@@ -535,11 +537,11 @@ impl App {
                             // brighten a touch on hover, dim on press, riding the row's
                             // alpha `a` so the pill fades as one object.
                             let load_rect = egui::Rect::from_min_size(
-                                egui::pos2(ui.cursor().min.x, row_rect.center().y - PILL_H * 0.5),
+                                egui::pos2(vu.cursor().min.x, row_rect.center().y - PILL_H * 0.5),
                                 egui::vec2(LOAD_W, PILL_H),
                             );
-                            let load_hovered = pointer_over(ui, load_rect);
-                            let load_pressed = pointer_pressed_over(ui, load_rect);
+                            let load_hovered = pointer_over(&vu, load_rect);
+                            let load_pressed = pointer_pressed_over(&vu, load_rect);
                             let load = egui::Button::new(
                                 egui::RichText::new(if active { "In the box" } else { "Load" })
                                     .color(if active {
@@ -570,7 +572,7 @@ impl App {
                                     ACCENT.gamma_multiply(0.7 * a)
                                 },
                             ));
-                            if ui.add_enabled(!active, load).clicked() {
+                            if vu.add_enabled(!active, load).clicked() {
                                 load_idx = Some(i);
                             }
 
@@ -578,11 +580,11 @@ impl App {
                             // the grey pill sits right of "Load". Flat paint, no halo;
                             // its whole treatment fades with the row, matching "Load".
                             let edit_rect = egui::Rect::from_min_size(
-                                egui::pos2(ui.cursor().min.x, row_rect.center().y - PILL_H * 0.5),
+                                egui::pos2(vu.cursor().min.x, row_rect.center().y - PILL_H * 0.5),
                                 egui::vec2(EDIT_W, PILL_H),
                             );
-                            let edit_hovered = pointer_over(ui, edit_rect);
-                            let edit_pressed = pointer_pressed_over(ui, edit_rect);
+                            let edit_hovered = pointer_over(&vu, edit_rect);
+                            let edit_pressed = pointer_pressed_over(&vu, edit_rect);
                             let edit = egui::Button::new(
                                 egui::RichText::new("Edit").color(CLOSE_GREY.gamma_multiply(a)),
                             )
@@ -608,15 +610,22 @@ impl App {
                                     }) * a,
                                 ),
                             ));
-                            if ui.add(edit).clicked() {
+                            if vu.add(edit).clicked() {
                                 edit_idx = Some(i);
                             }
                         }
 
                         if show_edit {
                             // Edit mode: editable fields, green "Save", red "Delete",
-                            // fading in as the row opens.
-                            let name = ui.add(
+                            // fading in as the row opens. Its own child UI, laid out in
+                            // the same band as the view set so the two crossfade in place.
+                            let mut eu = ui.new_child(
+                                egui::UiBuilder::new()
+                                    .max_rect(band)
+                                    .layout(band_layout)
+                                    .id_salt(("contact_edit_row", i)),
+                            );
+                            let name = eu.add(
                                 egui::TextEdit::singleline(&mut contact.name)
                                     .hint_text("Name")
                                     .desired_width(name_w),
@@ -624,7 +633,7 @@ impl App {
                             // Stable ids per row, so Enter-to-save can be read off the
                             // focused field.
                             let ticket_id = egui::Id::new(("contact_ticket", i));
-                            let ticket = ui.add(
+                            let ticket = eu.add(
                                 egui::TextEdit::singleline(&mut contact.ticket)
                                     .id(ticket_id)
                                     .hint_text("Paste their ticket here")
@@ -635,8 +644,8 @@ impl App {
                             // as the Watch tab's Enter-to-play, one step earlier in the
                             // flow.
                             if enter
-                                && (ui.ctx().memory(|m| m.has_focus(ticket_id))
-                                    || ui.ctx().memory(|m| m.has_focus(name.id)))
+                                && (eu.ctx().memory(|m| m.has_focus(ticket_id))
+                                    || eu.ctx().memory(|m| m.has_focus(name.id)))
                             {
                                 save_idx = Some(i);
                             }
@@ -655,20 +664,18 @@ impl App {
 
                             // Same spacer as the view pair: push "Save"/"Delete" onto
                             // the card's right margin, off the rounded corner.
-                            let pad = (row_rect.max.x - RIGHT_PAD
-                                - (SAVE_W + DELETE_W + gap)
-                                - ui.cursor().min.x)
-                                .max(0.0);
-                            ui.add_space(pad);
+                            let pad =
+                                (band.max.x - (SAVE_W + DELETE_W + gap) - eu.cursor().min.x).max(0.0);
+                            eu.add_space(pad);
 
                             // Green "Save": persists immediately, raises the toast, and
                             // drops the row back to view mode.
                             let save_rect = egui::Rect::from_min_size(
-                                egui::pos2(ui.cursor().min.x, row_rect.center().y - 12.0),
+                                egui::pos2(eu.cursor().min.x, row_rect.center().y - 12.0),
                                 egui::vec2(SAVE_W, 24.0),
                             );
-                            let save_hovered = pointer_over(ui, save_rect);
-                            let save_pressed = pointer_pressed_over(ui, save_rect);
+                            let save_hovered = pointer_over(&eu, save_rect);
+                            let save_pressed = pointer_pressed_over(&eu, save_rect);
                             let save = egui::Button::new(
                                 egui::RichText::new("Save").color(ACCENT.gamma_multiply(p)),
                             )
@@ -690,7 +697,7 @@ impl App {
                                     0.70
                                 }),
                             ));
-                            if ui.add(save).clicked() {
+                            if eu.add(save).clicked() {
                                 save_idx = Some(i);
                             }
 
@@ -698,11 +705,11 @@ impl App {
                             // can never delete a contact. The row keeps editing behind
                             // the dialog.
                             let del_rect = egui::Rect::from_min_size(
-                                egui::pos2(ui.cursor().min.x, row_rect.center().y - 12.0),
+                                egui::pos2(eu.cursor().min.x, row_rect.center().y - 12.0),
                                 egui::vec2(DELETE_W, 24.0),
                             );
-                            let del_hovered = pointer_over(ui, del_rect);
-                            let del_pressed = pointer_pressed_over(ui, del_rect);
+                            let del_hovered = pointer_over(&eu, del_rect);
+                            let del_pressed = pointer_pressed_over(&eu, del_rect);
                             let delete = egui::Button::new(
                                 egui::RichText::new("Delete").color(ERROR.gamma_multiply(p)),
                             )
@@ -724,7 +731,7 @@ impl App {
                                     0.50
                                 }),
                             ));
-                            if ui.add(delete).clicked() {
+                            if eu.add(delete).clicked() {
                                 remove_idx = Some(i);
                             }
                         }

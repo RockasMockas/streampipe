@@ -495,6 +495,49 @@ fn closing_the_panel_flushes_staged_edits() {
     std::env::remove_var("XDG_CONFIG_HOME");
 }
 
+/// During the view→edit crossfade both states live in the same band, so the edit-only
+/// pills ("Save"/"Delete") stay pinned to the card's right edge — they are never pushed
+/// past it (which is what made the row spill wider for a few frames when the two states
+/// laid out in sequence). Calibrated against the fully-settled edit frame.
+#[test]
+fn crossfading_into_edit_keeps_the_row_within_the_card() {
+    let (mut app, _rt) = test_app_with(Config {
+        contacts: vec![Contact {
+            name: "A very long display name here".into(),
+            ticket: "a-friend-ticket-string-that-is-long-ish-for-overflow".into(),
+        }],
+        ..Config::default()
+    });
+    app.show_contacts = true;
+    let ctx = egui::Context::default();
+
+    // Open the row and let the crossfade run; sample the first frame (mid-tween, both
+    // states present) before it settles.
+    let out = drive_frames(&mut app, &ctx, SIZE, 3);
+    let edit = text_rect(&out.shapes, "Edit").expect("the row offers 'Edit'");
+    click_at(&mut app, &ctx, edit.center(), SIZE);
+    let mid = drive_frames(&mut app, &ctx, SIZE, 1);
+
+    // Settle fully into edit mode and read where "Delete" rests at the card's edge.
+    drive_until_settled(&mut app, &ctx, SIZE, 1.0);
+    let settled = drive_frames(&mut app, &ctx, SIZE, 1);
+    let del_ref = text_rect(&settled.shapes, "Delete")
+        .expect("the settled row paints 'Delete'")
+        .max
+        .x;
+
+    // Mid-crossfade, the edit-only pills must not sit further right than the settled
+    // card edge (the sequential layout flung them past it).
+    for label in ["Save", "Delete"] {
+        if let Some(r) = text_rect(&mid.shapes, label) {
+            assert!(
+                r.max.x <= del_ref + 1.0,
+                "'{label}' spills past the card edge mid-crossfade: {r:?} vs edge {del_ref}"
+            );
+        }
+    }
+}
+
 /// Rows in view mode are read-only: they paint avatar, labels, "Load" and "Edit" —
 /// no editable fields, no delete affordance, no per-row save. Those widgets exist
 /// only while a row is in edit mode (the distinguishing check against the old
