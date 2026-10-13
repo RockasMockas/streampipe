@@ -307,7 +307,8 @@ fn contacts_can_be_added_edited_and_removed() {
         "the new row's name field is armed for typing"
     );
 
-    // The hint recedes, and the row carries the two fields and two actions.
+    // The hint recedes, and the row carries the two fields, a "Load" action and a
+    // small "✕" remove.
     let out = drive_frames(&mut app, &ctx, SIZE, 3);
     assert!(
         !text_present(&out.shapes, hint),
@@ -316,7 +317,7 @@ fn contacts_can_be_added_edited_and_removed() {
     assert!(text_present(&out.shapes, "Name"));
     assert!(text_present(&out.shapes, "Paste their ticket here"));
     assert!(text_present(&out.shapes, "Load"));
-    assert!(text_present(&out.shapes, "Remove"));
+    assert!(text_present(&out.shapes, "✕"));
 
     // "Save" writes the list, with the confirmation pill.
     let save = text_rect(&out.shapes, "Save").expect("the 'Save' button is painted");
@@ -333,11 +334,25 @@ fn contacts_can_be_added_edited_and_removed() {
         "the saved config carries the contacts key: {written}"
     );
 
-    // "Remove" drops the row.
+    // The row's "✕" opens a confirmation modal; nothing is removed until it is confirmed.
     let out = drive_frames(&mut app, &ctx, SIZE, 3);
-    let remove = text_rect(&out.shapes, "Remove").expect("the 'Remove' button is painted");
+    let x = text_rect(&out.shapes, "✕").expect("the row's '✕' button is painted");
+    click_at(&mut app, &ctx, x.center(), SIZE);
+    let out = drive_frames(&mut app, &ctx, SIZE, 2);
+    assert_eq!(
+        app.config.contacts.len(),
+        1,
+        "the modal is open; nothing removed yet"
+    );
+    assert!(
+        text_present(&out.shapes, "Remove this contact?"),
+        "the modal asks to remove the (nameless) contact"
+    );
+
+    // Confirming in the modal drops the row.
+    let remove = text_rect(&out.shapes, "Remove").expect("the modal's 'Remove' button");
     click_at(&mut app, &ctx, remove.center(), SIZE);
-    assert!(app.config.contacts.is_empty(), "'Remove' drops the row");
+    assert!(app.config.contacts.is_empty(), "confirming removes the row");
 
     std::env::remove_var("XDG_CONFIG_HOME");
 }

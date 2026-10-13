@@ -79,6 +79,9 @@ pub struct App {
     /// The contact row whose name field should take keyboard focus next frame — armed by
     /// "Add contact" so typing starts in the new row, cleared once consumed.
     pub focus_contact_row: Option<usize>,
+    /// The contact row whose deletion is awaiting confirmation in the modal. `Some(i)`
+    /// opens the "Remove …?" dialog; confirming removes row `i`, cancelling clears it.
+    pub confirm_remove_contact: Option<usize>,
     /// Whether the bottom log panel is expanded.
     pub log_open: bool,
     /// Whether the WHIP bearer token is shown in cleartext. Masked by default so a
@@ -159,6 +162,7 @@ impl App {
             show_contacts: false,
             contacts_dirty: false,
             focus_contact_row: None,
+            confirm_remove_contact: None,
             log_open: false,
             show_bearer: false,
             watch_player,
@@ -196,6 +200,9 @@ impl App {
                     self.show_contacts = false;
                 }
             }
+            // A hairline between the two panel toggles, so the pair reads as distinct
+            // entries rather than one run of buttons.
+            ui.separator();
             if ui.button("Contacts").clicked() {
                 self.toggle_contacts();
             }
