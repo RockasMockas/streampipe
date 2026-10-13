@@ -20,9 +20,16 @@ use std::time::Instant;
 use eframe::egui::{self, Context, Ui};
 
 use super::{
-    config::Contact, options::CLOSE_GREY, pointer_over, pointer_pressed_over, primary_button_glow,
-    soft_glow, top_bevel, truncate, App, ACCENT, ERROR, WATCH_ACCENT,
+    config::Contact, options::CLOSE_GREY, contact_chip, pointer_over, pointer_pressed_over,
+    primary_button_glow, soft_glow, top_bevel, App, ACCENT, ERROR, WATCH_ACCENT,
 };
+
+/// The row's name type. A touch over body size and bold, so a card reads as *name first,
+/// ticket second* — the same two-step hierarchy the tab headings use.
+const NAME_SIZE: f32 = 14.0;
+/// The row's ticket type: monospace (tickets are opaque strings) and quiet, so it never
+/// competes with the name.
+const TICKET_SIZE: f32 = 11.5;
 
 /// The footer pair's box — the same size and painted language as Settings' Save/Close.
 const BUTTON: egui::Vec2 = egui::vec2(90.0, 30.0);
@@ -34,6 +41,12 @@ const EDIT_W: f32 = 64.0;
 const SAVE_W: f32 = 64.0;
 /// The edit-mode "Delete" pill — opens the confirmation modal.
 const DELETE_W: f32 = 74.0;
+/// The per-row action pills' height — one size for "Load"/"Edit"/"Save"/"Delete", so the
+/// actions line up whether a row is read or open.
+const PILL_H: f32 = 24.0;
+/// Below this a fading element's halo is skipped: at that alpha the glow is sub-pixel and
+/// only adds shapes to a frame that is nearly gone.
+const GLOW_MIN: f32 = 0.06;
 /// The list stops growing here and scrolls, so the footer always stays on screen.
 const LIST_MAX_H: f32 = 248.0;
 /// The per-row card's height (avatar, fields and actions all sit inside it).
@@ -42,6 +55,9 @@ const ROW_H: f32 = 34.0;
 const ROW_GROW: f32 = 12.0;
 /// The initials avatar's diameter.
 const AVATAR_D: f32 = 24.0;
+/// The placeholder card the empty list paints. Matches a fully-opened row, so the panel
+/// keeps one rhythm whether it holds a ghost or a contact.
+const EMPTY_H: f32 = 46.0;
 
 impl App {
     /// Show the Contacts window and take it down on "×" / Escape, persisting edits.
@@ -215,11 +231,22 @@ impl App {
     /// The window's contents: an intro line, the scrollable list of contact cards, then
     /// the Save/Close footer.
     fn contacts_content(&mut self, ui: &mut Ui) {
-        ui.label(
-            egui::RichText::new("Pick a contact to load their ticket into the Watch tab.")
-                .weak()
-                .size(12.0),
-        );
+        // The intro line leads; the saved count rides the right edge as a quiet pill —
+        // the same chip language the Watch tab uses for the loaded contact, so the two
+        // panels read as one set. It is a fact, not a live signal, so it stays static.
+        let saved = self.config.contacts.len();
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("Pick a contact to load their ticket into the Watch tab.")
+                    .weak()
+                    .size(12.0),
+            );
+            if saved > 0 {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    contact_chip(ui, &format!("{saved} saved"), CLOSE_GREY);
+                });
+            }
+        });
         ui.add_space(8.0);
 
         // Every mutation is collected as an index during layout and applied once the list
@@ -240,9 +267,47 @@ impl App {
             .max_height(LIST_MAX_H)
             .show(ui, |ui| {
                 if self.config.contacts.is_empty() {
-                    // A calm, centred empty state with room to breathe.
+                    // A calm, centred empty state: a placeholder card — the ghost of the
+                    // row that will appear — so the panel reads as "waiting" rather than
+                    // "nothing here". A stroked ghost avatar and two muted bars stand in
+                    // for the name and ticket a real row carries.
                     ui.vertical_centered(|ui| {
-                        ui.add_space(22.0);
+                        ui.add_space(14.0);
+                        let card_w = ui.available_width().min(340.0);
+                        let (card, _) =
+                            ui.allocate_exact_size(egui::vec2(card_w, EMPTY_H), egui::Sense::hover());
+                        let corner = egui::CornerRadius::same(7);
+                        ui.painter()
+                            .rect_filled(card, corner, egui::Color32::from_white_alpha(4));
+                        ui.painter().rect_stroke(
+                            card,
+                            corner,
+                            egui::Stroke::new(1.0, egui::Color32::from_white_alpha(12)),
+                            egui::StrokeKind::Inside,
+                        );
+                        top_bevel(ui.painter(), card, 7);
+                        let ghost = egui::pos2(card.min.x + 8.0 + AVATAR_D * 0.5, card.center().y);
+                        ui.painter().circle_stroke(
+                            ghost,
+                            AVATAR_D * 0.5,
+                            egui::Stroke::new(1.0, egui::Color32::from_white_alpha(22)),
+                        );
+                        // The two bars: name (shorter, brighter) above ticket (longer,
+                        // dimmer) — the same visual weight order as a filled row.
+                        let bar_x = ghost.x + AVATAR_D * 0.5 + 12.0;
+                        let bar_room = (card.max.x - 14.0 - bar_x).max(0.0);
+                        for (dy, frac, alpha) in [(-6.0, 0.42f32, 22u8), (6.0, 0.66, 13)] {
+                            let bar = egui::Rect::from_min_size(
+                                egui::pos2(bar_x, ghost.y + dy - 2.0),
+                                egui::vec2(bar_room * frac, 4.0),
+                            );
+                            ui.painter().rect_filled(
+                                bar,
+                                egui::CornerRadius::same(2),
+                                egui::Color32::from_white_alpha(alpha),
+                            );
+                        }
+                        ui.add_space(12.0);
                         ui.label(
                             egui::RichText::new(
                                 "No contacts yet — add one to fill the Watch tab in one click.",
@@ -250,7 +315,7 @@ impl App {
                             .weak()
                             .size(12.0),
                         );
-                        ui.add_space(22.0);
+                        ui.add_space(14.0);
                     });
                 }
 
@@ -309,8 +374,14 @@ impl App {
                             )
                         };
                         let corner = egui::CornerRadius::same(7);
+                        // Haloes go down *before* the card, so only the rim shows: the
+                        // accent glow while the row opens, a neutral lift on hover. The
+                        // hover halo is what makes a card feel it is rising off the panel
+                        // — a fill swap alone reads as a colour change, not movement.
                         if p > 0.02 {
                             soft_glow(ui.painter(), row_rect, corner, ACCENT.gamma_multiply(p));
+                        } else if hovered && !active {
+                            soft_glow(ui.painter(), row_rect, corner, egui::Color32::WHITE);
                         }
                         ui.painter().rect_filled(row_rect, corner, fill);
                         ui.painter().rect_stroke(
@@ -323,6 +394,20 @@ impl App {
                         // lit from above — the same depth cue the central panel's ground
                         // and the error callout use.
                         top_bevel(ui.painter(), row_rect, 7);
+                        // A loaded contact also gets a solid bar down its left edge — the
+                        // app's left-bar language (`section_tick`, the error callout). The
+                        // 12% tint alone was too quiet to spot while scanning the list.
+                        if active {
+                            let bar = egui::Rect::from_min_size(
+                                egui::pos2(row_rect.min.x + 3.0, row_rect.min.y + 6.0),
+                                egui::vec2(3.0, row_rect.height() - 12.0),
+                            );
+                            ui.painter().rect_filled(
+                                bar,
+                                egui::CornerRadius::same(1),
+                                WATCH_ACCENT.gamma_multiply(0.9),
+                            );
+                        }
 
                         // Inset the initials avatar from the card's left edge.
                         ui.add_space(8.0);
@@ -346,7 +431,14 @@ impl App {
                         // language, applied to a circle.
                         let [rr, rg, rb, _ra] =
                             egui::epaint::Hsva::new(hue, 0.42, 0.74, 1.0).to_srgba_unmultiplied();
-                        let ring = egui::Color32::from_rgba_unmultiplied(rr, rg, rb, 140);
+                        // The ring rides the tween with the avatar's scale, so the face
+                        // brightens as its row opens instead of only growing.
+                        let ring = egui::Color32::from_rgba_unmultiplied(
+                            rr,
+                            rg,
+                            rb,
+                            (140.0 + 95.0 * p).min(235.0) as u8,
+                        );
                         ui.painter().circle_stroke(
                             avatar_rect.center(),
                             av_r,
@@ -361,55 +453,80 @@ impl App {
                         );
                         ui.add_space(4.0);
 
-                        // Split the row explicitly: fields, then actions. The widths
-                        // come from `available_width()` so the row fills the panel at
-                        // any window size (a `Grid` clamps each column to the previous
-                        // frame's width). Mid-crossfade all four action pills are up,
-                        // so the fields shrink to what is left.
+                        // Split the row explicitly: fields, then actions. The pills are
+                        // held back *before* the fields are laid out and the fields are
+                        // truncated to the pixels that remain. Left to their natural width
+                        // the labels ran past the card on a real (long) ticket, shoving
+                        // "Load"/"Edit" off the panel's edge — and egui feeds that
+                        // overflow back into `available_width()`, so every row grew the
+                        // next one and the whole list drifted right.
                         let gap = ui.spacing().item_spacing.x;
                         let actions_w = (if show_view { LOAD_W + EDIT_W } else { 0.0 })
                             + (if show_edit { SAVE_W + DELETE_W } else { 0.0 });
                         let n_actions = 2.0 * ((show_view as usize + show_edit as usize) as f32);
-                        // 8 (avatar inset) + avatar + 4 (avatar/name gap) + the
-                        // inter-widget gaps flanking the action pills.
-                        let used = 8.0 + AVATAR_D + 4.0 + actions_w + gap * (n_actions + 2.0);
-                        let fields = (avail - used).max(64.0);
-                        let name_w = (fields * 0.4).clamp(28.0, 190.0);
-                        let ticket_w = (fields - name_w).max(24.0);
+                        // Read what is left *now*, with the avatar already placed, then
+                        // hold back the pills and the gaps that flank them.
+                        let fields =
+                            (ui.available_width() - actions_w - gap * n_actions - 2.0).max(64.0);
+                        let name_font = egui::FontId::proportional(NAME_SIZE);
+                        let ticket_font = egui::FontId::monospace(TICKET_SIZE);
+                        // A name caps at 42% of the budget: the ticket is the string that
+                        // hurts to retype, so it keeps the bulk of the room.
+                        let name_w = (fields * 0.42).clamp(28.0, 190.0).min(fields);
+                        let ticket_w = (fields - name_w - gap).max(24.0);
 
                         if show_view {
                             // View mode: read-only labels and the two actions, fading
                             // out as the row opens.
                             let a = 1.0 - p;
-                            let name_text = if contact.name.trim().is_empty() {
-                                egui::RichText::new("Unnamed")
-                                    .color(egui::Color32::GRAY.gamma_multiply(a))
+                            let named = !contact.name.trim().is_empty();
+                            let (name_disp, name_cut) = fit_text(
+                                ui,
+                                if named { &contact.name } else { "Unnamed" },
+                                &name_font,
+                                name_w,
+                            );
+                            let name_col = if named {
+                                egui::Color32::WHITE
                             } else {
-                                egui::RichText::new(contact.name.as_str())
-                                    .color(egui::Color32::WHITE.gamma_multiply(a))
+                                egui::Color32::GRAY
                             };
-                            ui.label(name_text);
-                            ui.label(
-                                egui::RichText::new(truncate(&contact.ticket, 40))
-                                    .monospace()
-                                    .weak()
-                                    .size(12.0)
+                            let name_resp = ui.label(
+                                egui::RichText::new(name_disp)
+                                    .font(name_font.clone())
+                                    .strong()
+                                    .color(name_col.gamma_multiply(a)),
+                            );
+                            if name_cut {
+                                name_resp.on_hover_text(&contact.name);
+                            }
+                            let (ticket_disp, ticket_cut) =
+                                fit_text(ui, &contact.ticket, &ticket_font, ticket_w);
+                            let ticket_resp = ui.label(
+                                egui::RichText::new(ticket_disp)
+                                    .font(ticket_font.clone())
                                     .color(egui::Color32::PLACEHOLDER.gamma_multiply(a)),
                             );
+                            // A cut ticket is the one thing worth revealing in full: the
+                            // whole string comes back on hover.
+                            if ticket_cut {
+                                ticket_resp.on_hover_text(&contact.ticket);
+                            }
 
                             // "Load" is the row's primary action (accent-filled); the
                             // loaded row reads "In the box" and leaves the interactive
                             // set. The soft halo matches every other primary button in
                             // the app, so the row's main action reads as first-class.
-                            // It fades with the row's crossfade and recedes entirely on
-                            // a loaded (non-interactive) row.
+                            // Halo, fill and stroke all ride the row's alpha `a`, so the
+                            // pill fades as one object rather than text dissolving inside
+                            // a fully-painted box.
                             let load_rect = egui::Rect::from_min_size(
                                 ui.cursor().min,
-                                egui::vec2(LOAD_W, 24.0),
+                                egui::vec2(LOAD_W, PILL_H),
                             );
                             let load_hovered = pointer_over(ui, load_rect);
                             let load_pressed = pointer_pressed_over(ui, load_rect);
-                            if !active {
+                            if !active && a > GLOW_MIN {
                                 primary_button_glow(
                                     ui.painter(),
                                     load_rect,
@@ -426,7 +543,7 @@ impl App {
                                         egui::Color32::WHITE.gamma_multiply(a)
                                     }),
                             )
-                            .min_size(egui::vec2(LOAD_W, 24.0))
+                            .min_size(egui::vec2(LOAD_W, PILL_H))
                             .fill(if active {
                                 WATCH_ACCENT.gamma_multiply(0.16 * a)
                             } else {
@@ -445,40 +562,47 @@ impl App {
                             }
 
                             // "Edit" opens this row's edit state (one row at a time);
-                            // the grey pill sits right of "Load".
+                            // the grey pill sits right of "Load". Its whole treatment
+                            // fades with the row, matching "Load" above.
                             let edit_rect = egui::Rect::from_min_size(
                                 ui.cursor().min,
-                                egui::vec2(EDIT_W, 24.0),
+                                egui::vec2(EDIT_W, PILL_H),
                             );
                             let edit_hovered = pointer_over(ui, edit_rect);
                             let edit_pressed = pointer_pressed_over(ui, edit_rect);
-                            primary_button_glow(
-                                ui.painter(),
-                                edit_rect,
-                                CLOSE_GREY,
-                                edit_hovered,
-                                edit_pressed,
-                            );
+                            if a > GLOW_MIN {
+                                primary_button_glow(
+                                    ui.painter(),
+                                    edit_rect,
+                                    CLOSE_GREY.gamma_multiply(a),
+                                    edit_hovered,
+                                    edit_pressed,
+                                );
+                            }
                             let edit = egui::Button::new(
                                 egui::RichText::new("Edit").color(CLOSE_GREY.gamma_multiply(a)),
                             )
-                            .min_size(egui::vec2(EDIT_W, 24.0))
-                            .fill(CLOSE_GREY.gamma_multiply(if edit_pressed {
-                                0.10
-                            } else if edit_hovered {
-                                0.18
-                            } else {
-                                0.12
-                            }))
+                            .min_size(egui::vec2(EDIT_W, PILL_H))
+                            .fill(CLOSE_GREY.gamma_multiply(
+                                (if edit_pressed {
+                                    0.10
+                                } else if edit_hovered {
+                                    0.18
+                                } else {
+                                    0.12
+                                }) * a,
+                            ))
                             .stroke(egui::Stroke::new(
                                 1.0,
-                                CLOSE_GREY.gamma_multiply(if edit_pressed {
-                                    0.30
-                                } else if edit_hovered {
-                                    0.60
-                                } else {
-                                    0.40
-                                }),
+                                CLOSE_GREY.gamma_multiply(
+                                    (if edit_pressed {
+                                        0.30
+                                    } else if edit_hovered {
+                                        0.60
+                                    } else {
+                                        0.40
+                                    }) * a,
+                                ),
                             ));
                             if ui.add(edit).clicked() {
                                 edit_idx = Some(i);
@@ -739,6 +863,44 @@ impl App {
             }
         });
     }
+}
+
+/// Fit `text` into `max_w` pixels at `font_id`, eliding with "…" if it does not fit.
+///
+/// Char-count truncation is useless here: a proportional face makes "Wi-Fi" and "iiii"
+/// wildly different widths, so the cut has to be measured, not counted. Returns the
+/// string to draw and whether it was cut, so the caller can offer the whole string on
+/// hover.
+fn fit_text(ui: &Ui, text: &str, font_id: &egui::FontId, max_w: f32) -> (String, bool) {
+    let width_of = |s: &str| {
+        ui.painter()
+            .layout_no_wrap(s.to_string(), font_id.clone(), egui::Color32::WHITE)
+            .rect
+            .width()
+    };
+    if max_w <= 0.0 || width_of(text) <= max_w {
+        return (text.to_string(), false);
+    }
+    let chars: Vec<char> = text.chars().collect();
+    // Binary-search the longest prefix that still fits once the ellipsis joins it.
+    let mut lo = 0usize;
+    let mut hi = chars.len();
+    while lo < hi {
+        let mid = lo + (hi - lo + 1) / 2;
+        let candidate: String = chars[..mid].iter().collect::<String>() + "…";
+        if width_of(&candidate) <= max_w {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    // Drop a trailing space before the ellipsis — "Alice …" reads as a gap, not a cut.
+    let mut out: String = chars[..lo].iter().collect();
+    while out.ends_with(char::is_whitespace) {
+        out.pop();
+    }
+    out.push('…');
+    (out, true)
 }
 
 /// The initials (up to two letters) shown on a contact's avatar, plus a deterministic

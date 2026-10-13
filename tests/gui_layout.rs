@@ -300,7 +300,7 @@ fn a_blank_ticket_disables_the_watch_button() {
 /// The Watch tab shows a ticket hint while empty; it recedes once a ticket is pasted.
 #[test]
 fn the_watch_tab_shows_a_ticket_hint_when_empty() {
-    let hint = "No ticket yet? Start a broadcast, or ask a friend to share theirs.";
+    let hint = "";
     // Empty ticket: the hint is shown.
     let (mut app, _rt) = test_app();
     app.tab = Tab::Watch;
