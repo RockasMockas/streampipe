@@ -42,6 +42,12 @@ const DELETE_W: f32 = 74.0;
 /// The per-row action pills' height — one size for "Load"/"Edit"/"Save"/"Delete", so the
 /// actions line up whether a row is read or open.
 const PILL_H: f32 = 24.0;
+/// The action pills' corner radius — half their height, so they read as true pills (the
+/// app's rounded language, matching the cards' 7 and the window's 8).
+const PILL_R: egui::CornerRadius = egui::CornerRadius::same(12);
+/// The pill label type: one compact size, a touch under the row's body text and bold, so
+/// every action reads as a deliberate control — the same scale as the panel's chips.
+const PILL_TEXT: f32 = 11.0;
 /// Quiet margin between the action pills and the card's right edge, in every state
 /// (view and edit), so the pills ride the edge without touching the rounded corner.
 const RIGHT_PAD: f32 = 10.0;
@@ -542,15 +548,22 @@ impl App {
                             );
                             let load_hovered = pointer_over(&vu, load_rect);
                             let load_pressed = pointer_pressed_over(&vu, load_rect);
-                            let load = egui::Button::new(
-                                egui::RichText::new(if active { "In the box" } else { "Load" })
-                                    .color(if active {
-                                        WATCH_ACCENT.gamma_multiply(a)
-                                    } else {
-                                        egui::Color32::WHITE.gamma_multiply(a)
-                                    }),
-                            )
+                            // A soft accent halo on hover — the app's interactive-surface
+                            // language (the copy box uses the same). Painted before the
+                            // pill, so only the rim shows; it rides the row's alpha `a`.
+                            if load_hovered && !active {
+                                soft_glow(vu.painter(), load_rect, PILL_R, ACCENT.gamma_multiply(a));
+                            }
+                            let load = egui::Button::new(pill_label(
+                                if active { "In the box" } else { "Load" },
+                                if active {
+                                    WATCH_ACCENT.gamma_multiply(a)
+                                } else {
+                                    egui::Color32::WHITE.gamma_multiply(a)
+                                },
+                            ))
                             .min_size(egui::vec2(LOAD_W, PILL_H))
+                            .corner_radius(PILL_R)
                             .fill(if active {
                                 WATCH_ACCENT.gamma_multiply(0.16 * a)
                             } else if load_pressed {
@@ -585,10 +598,9 @@ impl App {
                             );
                             let edit_hovered = pointer_over(&vu, edit_rect);
                             let edit_pressed = pointer_pressed_over(&vu, edit_rect);
-                            let edit = egui::Button::new(
-                                egui::RichText::new("Edit").color(CLOSE_GREY.gamma_multiply(a)),
-                            )
+                            let edit = egui::Button::new(pill_label("Edit", CLOSE_GREY.gamma_multiply(a)))
                             .min_size(egui::vec2(EDIT_W, PILL_H))
+                            .corner_radius(PILL_R)
                             .fill(CLOSE_GREY.gamma_multiply(
                                 (if edit_pressed {
                                     0.10
@@ -676,10 +688,13 @@ impl App {
                             );
                             let save_hovered = pointer_over(&eu, save_rect);
                             let save_pressed = pointer_pressed_over(&eu, save_rect);
-                            let save = egui::Button::new(
-                                egui::RichText::new("Save").color(ACCENT.gamma_multiply(p)),
-                            )
+                            // The accent halo blooms on hover, riding the row's open alpha.
+                            if save_hovered {
+                                soft_glow(eu.painter(), save_rect, PILL_R, ACCENT.gamma_multiply(p));
+                            }
+                            let save = egui::Button::new(pill_label("Save", ACCENT.gamma_multiply(p)))
                             .min_size(egui::vec2(SAVE_W, 24.0))
+                            .corner_radius(PILL_R)
                             .fill(ACCENT.gamma_multiply(if save_pressed {
                                 0.40
                             } else if save_hovered {
@@ -710,10 +725,15 @@ impl App {
                             );
                             let del_hovered = pointer_over(&eu, del_rect);
                             let del_pressed = pointer_pressed_over(&eu, del_rect);
-                            let delete = egui::Button::new(
-                                egui::RichText::new("Delete").color(ERROR.gamma_multiply(p)),
-                            )
-                            .min_size(egui::vec2(DELETE_W, 24.0))
+                            // A red halo on hover — the destructive affordance, in the
+                            // error hue the callouts already use, riding the open alpha.
+                            if del_hovered {
+                                soft_glow(eu.painter(), del_rect, PILL_R, ERROR.gamma_multiply(p));
+                            }
+                            let delete =
+                                egui::Button::new(pill_label("Delete", ERROR.gamma_multiply(p)))
+                                    .min_size(egui::vec2(DELETE_W, 24.0))
+                                    .corner_radius(PILL_R)
                             .fill(ERROR.gamma_multiply(if del_pressed {
                                 0.40
                             } else if del_hovered {
@@ -742,8 +762,9 @@ impl App {
             });
 
         ui.add_space(2.0);
-        let add_btn = egui::Button::new(egui::RichText::new("+  Add contact").color(ACCENT))
+        let add_btn = egui::Button::new(pill_label("+  Add contact", ACCENT))
             .min_size(egui::vec2(0.0, PILL_H))
+            .corner_radius(PILL_R)
             .fill(ACCENT.gamma_multiply(0.14))
             .stroke(egui::Stroke::new(1.0, ACCENT.gamma_multiply(0.45)));
         if ui.add(add_btn).clicked() {
@@ -811,6 +832,16 @@ impl App {
         }
         self.contacts_dirty = dirty;
     }
+}
+
+/// A pill's label: one compact, bold type at `PILL_TEXT`, so "Load"/"Edit"/"Save"/
+/// "Delete"/"Add contact" all read as the same family of control — matching the panel's
+/// chips and the quiet ticket text rather than egui's stock button size.
+fn pill_label(text: &str, color: egui::Color32) -> egui::RichText {
+    egui::RichText::new(text)
+        .size(PILL_TEXT)
+        .strong()
+        .color(color)
 }
 
 /// Fit `text` into `max_w` pixels at `font_id`, eliding with "…" if it does not fit.
