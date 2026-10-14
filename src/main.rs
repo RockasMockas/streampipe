@@ -15,7 +15,7 @@ use iroh::{endpoint::Accepting, Endpoint, EndpointAddr, SecretKey};
 use n0_error::{bail_any, ensure_any, AnyError, Result, StdResultExt};
 use streampipe::{
     common::{
-        create_endpoint, log_level, stats_enabled, stream_alpn, udp_alpn, CommonArgs,
+        create_endpoint, create_media_endpoint, log_level, stats_enabled, stream_alpn, udp_alpn, CommonArgs,
         ONLINE_TIMEOUT,
     },
     gui, stream, udp, EndpointTicket,
@@ -1062,7 +1062,7 @@ async fn listen_whip(args: ListenWhipArgs) -> Result<()> {
     let listen = udp::resolve(&args.listen)?;
     let secret_key = get_or_create_secret()?;
     let alpn = stream_alpn(&args.common)?;
-    let endpoint = create_endpoint(secret_key, &args.common, vec![alpn.clone()]).await?;
+    let endpoint = create_media_endpoint(secret_key, &args.common, vec![alpn.clone()]).await?;
     // wait for the endpoint to figure out its address before making a ticket
     if (timeout(ONLINE_TIMEOUT, endpoint.online()).await).is_err() {
         eprintln!("Warning: Failed to connect to the home relay");
@@ -1102,7 +1102,7 @@ async fn listen_whip(args: ListenWhipArgs) -> Result<()> {
 async fn connect_whip(args: ConnectWhipArgs) -> Result<()> {
     let play = udp::resolve(&args.addr)?;
     let secret_key = get_or_create_secret()?;
-    let endpoint = create_endpoint(secret_key, &args.common, vec![])
+    let endpoint = create_media_endpoint(secret_key, &args.common, vec![])
         .await
         .std_context("unable to bind endpoint")?;
 

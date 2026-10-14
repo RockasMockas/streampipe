@@ -16,6 +16,7 @@
 //! packet larger than the connection's `max_datagram_size()` is fragmented into
 //! several datagrams and reassembled by the viewer.
 use std::{
+    collections::VecDeque,
     io,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
@@ -49,9 +50,11 @@ use tokio::{
 };
 
 use crate::{
+    pace::{Pacer, PACE_MAX_DELAY},
     rtp::{
-        self, reorder_timeout_for, Codec, ParameterSets, Reorder, RtpInfo, TAG_AUDIO, TAG_EPOCH,
-        TAG_FRAGMENT, TAG_KEYFRAME_REQ, TAG_SESSION, TAG_VIDEO,
+        self, nack_timing, reorder_timeout_for, Codec, History, ParameterSets, Reorder, RtpInfo,
+        HISTORY_AUDIO, HISTORY_VIDEO, NACK_AUDIO, NACK_VIDEO, TAG_AUDIO, TAG_EPOCH, TAG_FRAGMENT,
+        TAG_KEYFRAME_REQ, TAG_NACK, TAG_SESSION, TAG_VIDEO,
     },
     sdp::{self, MediaHeader, MediaKind, OfferMedia, SessionHeader},
     whip::{self, AbortOnDrop, Answer, WhipRequest},
@@ -85,6 +88,11 @@ const WAN_RTT: Duration = Duration::from_millis(50);
 const WAIT_INTERVAL: Duration = Duration::from_secs(5);
 /// How often periodic counters are logged while a tunnel runs.
 pub const STATS_INTERVAL: Duration = Duration::from_secs(5);
+/// How often a viewer checks its reorder buffers for resends to ask for again
+/// and holes that timed out.
+const REORDER_TICK: Duration = Duration::from_millis(10);
+/// How often a viewer re-reads the round-trip time its hole timing derives from.
+const RTT_INTERVAL: Duration = Duration::from_secs(1);
 /// How long a viewer waits before redialing a host that went away.
 const RECONNECT_DELAY: Duration = Duration::from_secs(2);
 /// Capacity of the per-viewer media queue.
@@ -290,6 +298,10 @@ pub struct Counters {
     pub fragmented: AtomicU64,
     /// Keyframe requests.
     pub keyframes: AtomicU64,
+    /// Lost packets asked for again: sent by a viewer, received by the host.
+    pub nacked: AtomicU64,
+    /// Lost packets the host sent again.
+    pub resent: AtomicU64,
 }
 
 impl Counters {
@@ -301,7 +313,7 @@ impl Counters {
         tracing::debug!(
             "media tunnel stats: {} packets / {} bytes forwarded, \
              {} fragmented, {} oversized dropped, {} unwanted payload types dropped, \
-             {} undeliverable, {} keyframe requests",
+             {} undeliverable, {} keyframe requests, {} nacked, {} resent",
             self.get(&self.forwarded),
             self.get(&self.forwarded_bytes),
             self.get(&self.fragmented),
@@ -309,6 +321,8 @@ impl Counters {
             self.get(&self.unwanted),
             self.get(&self.undeliverable),
             self.get(&self.keyframes),
+            self.get(&self.nacked),
+            self.get(&self.resent),
         );
     }
 
@@ -316,7 +330,7 @@ impl Counters {
         tracing::info!(
             "media tunnel closed: {} packets / {} bytes forwarded, \
              {} fragmented, {} oversized dropped, {} unwanted payload types dropped, \
-             {} undeliverable, {} keyframe requests",
+             {} undeliverable, {} keyframe requests, {} nacked, {} resent",
             self.get(&self.forwarded),
             self.get(&self.forwarded_bytes),
             self.get(&self.fragmented),
@@ -324,6 +338,8 @@ impl Counters {
             self.get(&self.unwanted),
             self.get(&self.undeliverable),
             self.get(&self.keyframes),
+            self.get(&self.nacked),
+            self.get(&self.resent),
         );
     }
 
@@ -590,6 +606,8 @@ pub enum Frame {
     Video(Bytes),
     /// An audio RTP packet.
     Audio(Bytes),
+    /// A packet the viewer lost and asked for again (see [`ViewerEvent::Nack`]).
+    Resend(MediaKind, Bytes),
 }
 
 /// What the viewer acceptor tells the media session.
@@ -609,6 +627,15 @@ pub enum ViewerEvent {
     Keyframe {
         /// Identifier of the viewer.
         id: u64,
+    },
+    /// A viewer lost packets and asks for them again.
+    Nack {
+        /// Identifier of the viewer.
+        id: u64,
+        /// The media the sequence numbers belong to.
+        kind: MediaKind,
+        /// The RTP sequence numbers to resend.
+        seqs: Vec<u16>,
     },
     /// A viewer is gone.
     Left {
@@ -849,57 +876,80 @@ async fn handle_viewer(accepting: Accepting, tx: mpsc::Sender<ViewerEvent>) -> R
         let conn = conn.clone();
         let counters = counters.clone();
         tokio::spawn(async move {
-            // The id of the next fragmented datagram.
-            let mut frag_id: u16 = 0;
-            while let Some(frame) = frame_rx.recv().await {
-                let (tag, payload) = match frame {
-                    Frame::Header(b) => (TAG_SESSION, b),
-                    Frame::Epoch => (TAG_EPOCH, Bytes::new()),
-                    Frame::Video(b) => (TAG_VIDEO, b),
-                    Frame::Audio(b) => (TAG_AUDIO, b),
-                };
-                let mut buf = Vec::with_capacity(1 + payload.len());
-                buf.push(tag);
-                buf.extend_from_slice(&payload);
-                // The limit can move with the path MTU estimate, so ask on
-                // every packet rather than once.
-                let max = conn.max_datagram_size().unwrap_or(max);
-                if buf.len() > max {
-                    // Too large for one datagram: fragment it instead of
-                    // dropping it. A lost fragment is plain packet loss, the
-                    // viewer's gap detection and keyframe gate recover from it.
-                    let frags = match rtp::fragment_all(&buf, frag_id, max) {
-                        Some(frags) => frags,
-                        None => {
-                            counters.record_dropped(buf.len(), max);
-                            continue;
-                        }
+            let mut sender = DatagramSender {
+                conn,
+                max,
+                frag_id: 0,
+                counters,
+            };
+            // Video waits here for the pacer; see `crate::pace`. Headers and
+            // audio skip the queue: they are tiny, and audio delayed behind a
+            // keyframe would make the player's audio clock stutter. Resends
+            // jump the video queue, since the viewer is holding a hole open for
+            // them, but are paced like the rest so a burst of them cannot
+            // overflow the very bottleneck that lost the originals.
+            let mut video: VecDeque<(u8, Bytes, Instant)> = VecDeque::new();
+            let mut resend: VecDeque<(u8, Bytes, Instant)> = VecDeque::new();
+            let mut pacer = Pacer::new(Instant::now());
+            loop {
+                // Release all the video the pacer allows right now.
+                let mut wait = None;
+                loop {
+                    let queue = if resend.is_empty() {
+                        &mut video
+                    } else {
+                        &mut resend
                     };
-                    frag_id = frag_id.wrapping_add(1);
-                    for frag in frags {
-                        match conn.send_datagram(frag.into()) {
-                            Ok(()) => {
-                                counters.fragmented.fetch_add(1, Ordering::Relaxed);
-                            }
-                            Err(e) => {
-                                tracing::debug!("cannot send fragment to viewer: {e}");
-                                break;
-                            }
+                    let Some((tag, payload, queued)) = queue.front() else {
+                        break;
+                    };
+                    let now = Instant::now();
+                    // An epoch is a zero-length marker, it only keeps its place;
+                    // a packet that waited too long goes regardless.
+                    if *tag != TAG_EPOCH && now.duration_since(*queued) < PACE_MAX_DELAY {
+                        if let Some(d) = pacer.take(1 + payload.len(), now) {
+                            wait = Some(d);
+                            break;
                         }
                     }
-                    continue;
+                    let (tag, payload, _) = queue.pop_front().expect("front was Some");
+                    if sender.send(tag, &payload).is_err() {
+                        return;
+                    }
                 }
-                match conn.send_datagram(buf.into()) {
-                    Ok(()) => {
-                        counters.forwarded.fetch_add(1, Ordering::Relaxed);
+                let frame = tokio::select! {
+                    frame = frame_rx.recv() => frame,
+                    // Never shorter than a millisecond: the runtime's timer
+                    // cannot do better, and the tokens accrued meanwhile go out
+                    // as one small burst.
+                    _ = sleep(wait.unwrap_or_default().max(Duration::from_millis(1))),
+                        if wait.is_some() => continue,
+                };
+                let Some(frame) = frame else { return };
+                let sent = match frame {
+                    Frame::Header(b) => sender.send(TAG_SESSION, &b),
+                    Frame::Audio(b) => sender.send(TAG_AUDIO, &b),
+                    Frame::Epoch => {
+                        video.push_back((TAG_EPOCH, Bytes::new(), Instant::now()));
+                        Ok(())
                     }
-                    Err(SendDatagramError::TooLarge) => {
-                        counters.dropped.fetch_add(1, Ordering::Relaxed);
+                    Frame::Video(b) => {
+                        let now = Instant::now();
+                        pacer.on_arrival(1 + b.len(), now);
+                        video.push_back((TAG_VIDEO, b, now));
+                        Ok(())
                     }
-                    Err(e) => {
-                        tracing::debug!("cannot send datagram to viewer: {e}");
-                        break;
+                    Frame::Resend(kind, b) => {
+                        let tag = match kind {
+                            MediaKind::Video => TAG_VIDEO,
+                            MediaKind::Audio => TAG_AUDIO,
+                        };
+                        resend.push_back((tag, b, Instant::now()));
+                        Ok(())
                     }
+                };
+                if sent.is_err() {
+                    return;
                 }
             }
         })
@@ -913,11 +963,29 @@ async fn handle_viewer(accepting: Accepting, tx: mpsc::Sender<ViewerEvent>) -> R
             datagram = conn.read_datagram() => {
                 match datagram {
                     Ok(data) => {
-                        if data.first() == Some(&TAG_KEYFRAME_REQ) {
-                            counters.keyframes.fetch_add(1, Ordering::Relaxed);
-                            if tx.send(ViewerEvent::Keyframe { id }).await.is_err() {
-                                break;
+                        let event = match data.first().copied() {
+                            Some(TAG_KEYFRAME_REQ) => {
+                                counters.keyframes.fetch_add(1, Ordering::Relaxed);
+                                ViewerEvent::Keyframe { id }
                             }
+                            Some(TAG_NACK) => {
+                                let Some((media, seqs)) = rtp::decode_nack(&data) else {
+                                    continue;
+                                };
+                                let kind = match media {
+                                    NACK_VIDEO => MediaKind::Video,
+                                    NACK_AUDIO => MediaKind::Audio,
+                                    _ => continue,
+                                };
+                                counters
+                                    .nacked
+                                    .fetch_add(seqs.len() as u64, Ordering::Relaxed);
+                                ViewerEvent::Nack { id, kind, seqs }
+                            }
+                            _ => continue,
+                        };
+                        if tx.send(event).await.is_err() {
+                            break;
                         }
                     }
                     Err(e) => {
@@ -933,6 +1001,62 @@ async fn handle_viewer(accepting: Accepting, tx: mpsc::Sender<ViewerEvent>) -> R
     forward.abort();
     let _ = tx.send(ViewerEvent::Left { id }).await;
     Ok(())
+}
+
+/// Frames tagged datagrams onto a viewer connection, fragmenting the ones that
+/// do not fit.
+struct DatagramSender {
+    conn: Connection,
+    /// The datagram limit at connection time, used if the connection no longer
+    /// reports one.
+    max: usize,
+    /// The id of the next fragmented datagram.
+    frag_id: u16,
+    counters: Arc<Counters>,
+}
+
+impl DatagramSender {
+    /// Send one tagged datagram. An error means the connection is gone.
+    fn send(&mut self, tag: u8, payload: &[u8]) -> std::result::Result<(), ()> {
+        let mut buf = Vec::with_capacity(1 + payload.len());
+        buf.push(tag);
+        buf.extend_from_slice(payload);
+        // The limit can move with the path MTU estimate, so ask on every packet
+        // rather than once.
+        let max = self.conn.max_datagram_size().unwrap_or(self.max);
+        if buf.len() > max {
+            // Too large for one datagram: fragment it instead of dropping it. A
+            // lost fragment is plain packet loss, the viewer's gap detection
+            // and keyframe gate recover from it.
+            let Some(frags) = rtp::fragment_all(&buf, self.frag_id, max) else {
+                self.counters.record_dropped(buf.len(), max);
+                return Ok(());
+            };
+            self.frag_id = self.frag_id.wrapping_add(1);
+            for frag in frags {
+                if let Err(e) = self.conn.send_datagram(frag.into()) {
+                    tracing::debug!("cannot send fragment to viewer: {e}");
+                    return Err(());
+                }
+                self.counters.fragmented.fetch_add(1, Ordering::Relaxed);
+            }
+            return Ok(());
+        }
+        match self.conn.send_datagram(buf.into()) {
+            Ok(()) => {
+                self.counters.forwarded.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+            Err(SendDatagramError::TooLarge) => {
+                self.counters.dropped.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+            Err(e) => {
+                tracing::debug!("cannot send datagram to viewer: {e}");
+                Err(())
+            }
+        }
+    }
 }
 
 /// Read the `hello` handshake from a viewer.
@@ -998,6 +1122,10 @@ pub struct Host {
     pub last_header: Vec<u8>,
     /// The H.264 parameter sets seen in band.
     pub sets: ParameterSets,
+    /// The video packets recently forwarded, for resending.
+    pub video_history: History,
+    /// The audio packets recently forwarded, for resending.
+    pub audio_history: History,
     /// The connected viewers.
     pub viewers: Vec<Viewer>,
     /// Counter for the entity tags of the resources.
@@ -1043,6 +1171,8 @@ impl Host {
             },
             last_header: Vec::new(),
             sets: ParameterSets::default(),
+            video_history: History::new(HISTORY_VIDEO),
+            audio_history: History::new(HISTORY_AUDIO),
             viewers: Vec::new(),
             etag_seq: 0,
             mids: Vec::new(),
@@ -1131,6 +1261,23 @@ impl Host {
                 let _ = id;
                 self.request_keyframe();
             }
+            ViewerEvent::Nack { id, kind, seqs } => {
+                // Only a streaming viewer has a sequence baseline to fill holes
+                // in; a gated one is waiting for a keyframe anyway.
+                let Some(viewer) = self.viewers.iter().find(|v| v.id == id && v.streaming) else {
+                    return;
+                };
+                let history = match kind {
+                    MediaKind::Video => &self.video_history,
+                    MediaKind::Audio => &self.audio_history,
+                };
+                for seq in seqs {
+                    if let Some(packet) = history.get(seq) {
+                        try_send(&viewer.tx, &Frame::Resend(kind, packet), &self.counters);
+                        self.counters.resent.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }
             ViewerEvent::Left { id } => {
                 self.viewers.retain(|v| v.id != id);
                 let line = format!(
@@ -1179,6 +1326,8 @@ impl Host {
         self.offer = parsed;
         self.mids.clear();
         self.sets = ParameterSets::default();
+        self.video_history.clear();
+        self.audio_history.clear();
         self.header = SessionHeader {
             gen: 0,
             media: Vec::new(),
@@ -1228,6 +1377,8 @@ impl Host {
         self.offer.clear();
         self.mids.clear();
         self.sets = ParameterSets::default();
+        self.video_history.clear();
+        self.audio_history.clear();
         for viewer in &mut self.viewers {
             viewer.streaming = false;
         }
@@ -1308,6 +1459,11 @@ impl Host {
         if !matches {
             self.header.gen += 1;
             self.set_header_media(kind, pt, &params);
+        }
+
+        match kind {
+            MediaKind::Video => self.video_history.insert(info.seq, data.clone()),
+            MediaKind::Audio => self.audio_history.insert(info.seq, data.clone()),
         }
 
         let size = data.len() as u64;
@@ -1601,7 +1757,7 @@ fn new_rtc() -> Rtc {
 /// The byte size of a frame, for the counters.
 fn frame_len(frame: &Frame) -> usize {
     match frame {
-        Frame::Header(b) | Frame::Video(b) | Frame::Audio(b) => b.len(),
+        Frame::Header(b) | Frame::Video(b) | Frame::Audio(b) | Frame::Resend(_, b) => b.len(),
         Frame::Epoch => 0,
     }
 }
@@ -1624,6 +1780,7 @@ fn clone_frame(frame: &Frame) -> Frame {
         Frame::Epoch => Frame::Epoch,
         Frame::Video(b) => Frame::Video(b.clone()),
         Frame::Audio(b) => Frame::Audio(b.clone()),
+        Frame::Resend(kind, b) => Frame::Resend(*kind, b.clone()),
     }
 }
 
@@ -1851,11 +2008,7 @@ pub async fn connect_whip(endpoint: Endpoint, cfg: ViewerConfig) -> Result<()> {
         // its round-trip time, otherwise the player's zero-buffer RTP receiver
         // drops every reordered packet and the log fills with `max delay
         // reached` and corrupt pictures.
-        let rtt = conn
-            .paths()
-            .iter()
-            .find(|p| p.is_selected())
-            .map(|p| p.rtt());
+        let rtt = selected_rtt(&conn);
         let buffer = auto_buffer(cfg.buffer, rtt);
         if cfg.buffer.is_none() && buffer.is_some() {
             eprintln!(
@@ -1980,6 +2133,10 @@ pub async fn connect_whip(endpoint: Endpoint, cfg: ViewerConfig) -> Result<()> {
         wait_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let mut stats_tick = interval(STATS_INTERVAL);
         stats_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let mut reorder_tick = interval(REORDER_TICK);
+        reorder_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut rtt_tick = interval(RTT_INTERVAL);
+        rtt_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         let result: Result<()> = loop {
             let silence = sleep_until(last_packet + STALL_INTERVAL);
@@ -2053,29 +2210,43 @@ pub async fn connect_whip(endpoint: Endpoint, cfg: ViewerConfig) -> Result<()> {
                         }
                         Some(tag @ (TAG_VIDEO | TAG_AUDIO)) if forwarding => {
                             let is_video = tag == TAG_VIDEO;
-                            let port = if is_video { ports.video } else { ports.audio };
                             let packet = &data[1..];
                             // Reorder by RTP sequence number before handing the
                             // packet to the player, so the unordered datagram path
-                            // does not look like packet loss to ffplay.
+                            // does not look like packet loss to ffplay, and ask
+                            // the host to resend any hole this packet reveals.
                             let order = if is_video { &mut video_order } else { &mut audio_order };
+                            let now = Instant::now();
                             let emit = match rtp::parse_header(packet) {
-                                Some((info, _)) => {
-                                    order.push(info.seq, packet.to_vec(), Instant::now())
-                                }
+                                Some((info, _)) => order.push(info.seq, packet.to_vec(), now),
                                 None => vec![packet.to_vec()],
                             };
-                            for pkt in emit {
-                                if forward_tx
-                                    .try_send(ForwardMsg::Packet(port, pkt, is_video))
-                                    .is_err()
-                                {
-                                    counters.undeliverable.fetch_add(1, Ordering::Relaxed);
-                                }
-                            }
+                            let nacks = order.take_nacks(now);
+                            hand_off(&forward_tx, ports, is_video, emit, &counters);
+                            send_nack(&conn, is_video, &nacks, &counters);
                             last_packet = tokio::time::Instant::now();
                         }
                         _ => {}
+                    }
+                }
+                // Ask again for resends that did not arrive, and flush holes
+                // that timed out while no packet came in to notice.
+                _ = reorder_tick.tick(), if forwarding => {
+                    let now = Instant::now();
+                    for (order, is_video) in [(&mut video_order, true), (&mut audio_order, false)] {
+                        let emit = order.poll(now);
+                        let nacks = order.take_nacks(now);
+                        hand_off(&forward_tx, ports, is_video, emit, &counters);
+                        send_nack(&conn, is_video, &nacks, &counters);
+                    }
+                }
+                // Keep the hole timing in step with the path: a resend takes a
+                // round trip, and the round trip moves.
+                _ = rtt_tick.tick() => {
+                    if let Some(rtt) = selected_rtt(&conn) {
+                        let (timeout, renack) = nack_timing(cfg.buffer, rtt);
+                        video_order.set_timing(timeout, renack);
+                        audio_order.set_timing(timeout, renack);
                     }
                 }
                 Some(()) = kf_rx.recv() => {
@@ -2356,6 +2527,55 @@ pub async fn forward(
         *last_kf = Some(Instant::now());
         tracing::debug!("video sequence gap at {}, asking for a keyframe", info.seq);
         let _ = kf_tx.try_send(());
+    }
+}
+
+/// The round-trip time of the path a connection is using.
+fn selected_rtt(conn: &Connection) -> Option<Duration> {
+    conn.paths()
+        .iter()
+        .find(|p| p.is_selected())
+        .map(|p| p.rtt())
+}
+
+/// Queue packets released by a [`Reorder`] for the forward task.
+fn hand_off(
+    forward_tx: &mpsc::Sender<ForwardMsg>,
+    ports: PlayPorts,
+    is_video: bool,
+    packets: Vec<Vec<u8>>,
+    counters: &Counters,
+) {
+    let port = if is_video { ports.video } else { ports.audio };
+    for packet in packets {
+        if forward_tx
+            .try_send(ForwardMsg::Packet(port, packet, is_video))
+            .is_err()
+        {
+            counters.undeliverable.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Ask the host to resend lost packets of one media.
+fn send_nack(conn: &Connection, is_video: bool, seqs: &[u16], counters: &Counters) {
+    let media = if is_video { NACK_VIDEO } else { NACK_AUDIO };
+    if !seqs.is_empty() {
+        tracing::debug!(
+            "asking for {} lost {} packet(s): {seqs:?}",
+            seqs.len(),
+            if is_video { "video" } else { "audio" }
+        );
+    }
+    for chunk in seqs.chunks(rtp::NACK_MAX) {
+        match conn.send_datagram(Bytes::from(rtp::encode_nack(media, chunk))) {
+            Ok(()) => {
+                counters
+                    .nacked
+                    .fetch_add(chunk.len() as u64, Ordering::Relaxed);
+            }
+            Err(e) => tracing::debug!("cannot send a nack: {e}"),
+        }
     }
 }
 

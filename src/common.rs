@@ -5,18 +5,19 @@
 
 use std::{
     net::{SocketAddrV4, SocketAddrV6},
+    sync::Arc,
     time::Duration,
 };
 
 use clap::Parser;
 use iroh::{
-    endpoint::{presets, QuicTransportConfig},
+    endpoint::{presets, QuicTransportConfig, QuicTransportConfigBuilder},
     Endpoint, SecretKey,
 };
 use n0_error::{Result, StdResultExt};
 use tracing::Level;
 
-use crate::udp;
+use crate::{pace::MediaCongestion, udp};
 
 /// How long to wait for the endpoint to come online before giving up.
 pub const ONLINE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -119,20 +120,52 @@ pub fn udp_alpn(common: &CommonArgs) -> Result<Vec<u8>> {
     })
 }
 
-/// The QUIC transport config for a media tunnel: default state machine, widened
+/// The QUIC transport config for a tunnel: default state machine, widened
 /// datagram buffers. See [`DATAGRAM_BUFFER`].
+pub fn tunnel_transport_config() -> QuicTransportConfig {
+    tunnel_transport().build()
+}
+
+/// The QUIC transport config for a WHIP/RTP media tunnel: the tunnel config
+/// with [`MediaCongestion`] in place of the default loss-based controller, which
+/// throttles a lossy path below the bitrate of a live stream that cannot slow
+/// down. The host's [`crate::pace::Pacer`] shapes the media instead.
 pub fn media_transport_config() -> QuicTransportConfig {
-    QuicTransportConfig::builder()
-        .datagram_receive_buffer_size(Some(DATAGRAM_BUFFER))
-        .datagram_send_buffer_size(DATAGRAM_BUFFER)
+    tunnel_transport()
+        .congestion_controller_factory(Arc::new(MediaCongestion))
         .build()
 }
 
-/// Bind an endpoint with the given ALPNs and the addresses from `common`.
+fn tunnel_transport() -> QuicTransportConfigBuilder {
+    QuicTransportConfig::builder()
+        .datagram_receive_buffer_size(Some(DATAGRAM_BUFFER))
+        .datagram_send_buffer_size(DATAGRAM_BUFFER)
+}
+
+/// Bind an endpoint for a tunnel (tcp, udp, unix); see [`tunnel_transport_config`].
 pub async fn create_endpoint(
     secret_key: SecretKey,
     common: &CommonArgs,
     alpns: Vec<Vec<u8>>,
+) -> Result<Endpoint> {
+    bind_endpoint(secret_key, common, alpns, tunnel_transport_config()).await
+}
+
+/// Bind an endpoint for the WHIP/RTP media path; see [`media_transport_config`].
+pub async fn create_media_endpoint(
+    secret_key: SecretKey,
+    common: &CommonArgs,
+    alpns: Vec<Vec<u8>>,
+) -> Result<Endpoint> {
+    bind_endpoint(secret_key, common, alpns, media_transport_config()).await
+}
+
+/// Bind an endpoint with the given ALPNs, transport and the addresses from `common`.
+async fn bind_endpoint(
+    secret_key: SecretKey,
+    common: &CommonArgs,
+    alpns: Vec<Vec<u8>>,
+    transport: QuicTransportConfig,
 ) -> Result<Endpoint> {
     for alpn in &alpns {
         tracing::debug!(
@@ -147,7 +180,7 @@ pub async fn create_endpoint(
     let mut builder = Endpoint::builder(presets::N0)
         .secret_key(secret_key)
         .alpns(alpns)
-        .transport_config(media_transport_config());
+        .transport_config(transport);
     if let Some(addr) = common.ipv4_addr {
         tracing::debug!("binding ipv4 addr {addr}");
         builder = builder.bind_addr(addr)?;

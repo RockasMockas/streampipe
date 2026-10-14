@@ -27,7 +27,7 @@ use iroh::{Endpoint, EndpointAddr, SecretKey};
 use tokio::{runtime::Handle, sync::mpsc, task::JoinHandle, time::timeout};
 
 use crate::{
-    common::{create_endpoint, stream_alpn, CommonArgs, ONLINE_TIMEOUT},
+    common::{create_media_endpoint, stream_alpn, CommonArgs, ONLINE_TIMEOUT},
     stream::{self, Player, StreamStats, ViewerConfig, WhipConfig},
     udp, EndpointTicket, STREAM_ALPN,
 };
@@ -262,7 +262,7 @@ pub async fn ensure_endpoint(
         verbose_max: 3,
     };
     let alpn = stream_alpn(&common)?;
-    let endpoint = create_endpoint(secret, &common, vec![alpn]).await?;
+    let endpoint = create_media_endpoint(secret, &common, vec![alpn]).await?;
     let mut g = state.lock().unwrap();
     g.endpoint = Some(endpoint.clone());
     g.bind = bind;
@@ -641,7 +641,7 @@ pub fn spawn_watch(
             verbose_max: 3,
         };
         let secret = SecretKey::generate();
-        let endpoint = match create_endpoint(secret, &common, vec![]).await {
+        let endpoint = match create_media_endpoint(secret, &common, vec![]).await {
             Ok(endpoint) => endpoint,
             Err(e) => {
                 return fail(

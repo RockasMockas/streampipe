@@ -216,6 +216,85 @@ async fn audio_and_video_are_tagged_apart() {
     assert_eq!(host.counters.get(&host.counters.unwanted), 1);
 }
 
+/// Drain everything queued for a viewer.
+fn drain(rx: &mut mpsc::Receiver<Frame>) {
+    while rx.try_recv().is_ok() {}
+}
+
+#[tokio::test]
+async fn nack_resends_forwarded_packets() {
+    // A viewer that lost packets asks for them by sequence number; the host
+    // answers from its history, per media, and only with what it still has.
+    let mut host = host().await;
+    host.negotiate(&offer(), false).expect("an answer");
+    let mut rx = viewer(&mut host);
+    host.handle_media(info(96, 100), &keyframe());
+    host.handle_media(info(96, 101), &nal(1, b"inter-101"));
+    host.handle_media(info(96, 102), &nal(1, b"inter-102"));
+    host.handle_media(info(111, 7), b"opus-7");
+    drain(&mut rx);
+
+    host.on_viewer_event(ViewerEvent::Nack {
+        id: 1,
+        kind: MediaKind::Video,
+        seqs: vec![102, 101, 5000],
+    });
+    let mut resent = Vec::new();
+    while let Ok(frame) = rx.try_recv() {
+        match frame {
+            Frame::Resend(MediaKind::Video, b) => {
+                resent.push(rtp::parse_header(&b).expect("an rtp packet").0.seq)
+            }
+            other => panic!("expected a video resend, got {other:?}"),
+        }
+    }
+    assert_eq!(resent, vec![102, 101], "5000 was never forwarded");
+    assert_eq!(host.counters.get(&host.counters.resent), 2);
+
+    host.on_viewer_event(ViewerEvent::Nack {
+        id: 1,
+        kind: MediaKind::Audio,
+        seqs: vec![7],
+    });
+    match rx.try_recv() {
+        Ok(Frame::Resend(MediaKind::Audio, b)) => {
+            let (info, start) = rtp::parse_header(&b).expect("an rtp packet");
+            assert_eq!(info.seq, 7);
+            assert_eq!(&b[start..], b"opus-7");
+        }
+        other => panic!("expected an audio resend, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn nack_from_a_gated_viewer_is_ignored() {
+    // A viewer still waiting for its keyframe has no sequence baseline, so
+    // there is no hole of its to fill.
+    let mut host = host().await;
+    host.negotiate(&offer(), false).expect("an answer");
+    let mut rx = viewer(&mut host);
+    host.handle_media(info(96, 1), &nal(1, b"inter"));
+    drain(&mut rx);
+    host.on_viewer_event(ViewerEvent::Nack {
+        id: 1,
+        kind: MediaKind::Video,
+        seqs: vec![1],
+    });
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn a_new_offer_forgets_the_history() {
+    // A new publisher session starts a new sequence space: an old packet must
+    // never answer a NACK for the new one.
+    let mut host = host().await;
+    host.negotiate(&offer(), false).expect("an answer");
+    host.handle_media(info(96, 9), &keyframe());
+    assert!(host.video_history.get(9).is_some());
+    host.negotiate(&offer(), true).expect("an answer");
+    assert!(host.video_history.get(9).is_none());
+}
+
 #[tokio::test]
 async fn viewers_leave_and_rejoin() {
     let mut host = host().await;
@@ -417,6 +496,7 @@ async fn a_real_publisher_reaches_a_viewer() {
             Frame::Epoch => "epoch",
             Frame::Video(_) => "video",
             Frame::Audio(_) => "audio",
+            Frame::Resend(..) => "resend",
         })
         .collect();
     assert_eq!(kinds.first().copied(), Some("header"), "{kinds:?}");

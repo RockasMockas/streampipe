@@ -15,12 +15,14 @@
 //!   keyframe.
 //! * [`TAG_FRAGMENT`]: a fragment of a datagram that was too large for a
 //!   single QUIC datagram, see [`fragment_all`] and [`Reassembler`].
+//! * [`TAG_NACK`]: viewer to host, please resend these lost packets, see
+//!   [`encode_nack`] and [`History`].
 //!
 //! RTP header extensions and CSRCs are dropped when re-framing, the generated
 //! player SDP advertises neither.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     time::{Duration, Instant},
 };
 
@@ -43,6 +45,85 @@ pub const TAG_KEYFRAME_REQ: u8 = 4;
 /// continent QUIC's datagram limit settles near 1100 bytes and full-size RTP
 /// packets would otherwise be lost on every frame.
 pub const TAG_FRAGMENT: u8 = 5;
+/// A viewer asking the host to resend lost RTP packets.
+///
+/// The framing is `tag, media, seq(2)...`, media being [`NACK_VIDEO`] or
+/// [`NACK_AUDIO`] and the sequence numbers the RTP sequence numbers to resend.
+pub const TAG_NACK: u8 = 6;
+/// The [`TAG_NACK`] media byte for video.
+pub const NACK_VIDEO: u8 = 0;
+/// The [`TAG_NACK`] media byte for audio.
+pub const NACK_AUDIO: u8 = 1;
+/// The most sequence numbers in one [`TAG_NACK`] datagram, so it always fits
+/// the smallest datagram limit QUIC allows.
+pub const NACK_MAX: usize = 256;
+
+/// Frame a NACK for `seqs` of one media, at most [`NACK_MAX`] of them.
+pub fn encode_nack(media: u8, seqs: &[u16]) -> Vec<u8> {
+    let seqs = &seqs[..seqs.len().min(NACK_MAX)];
+    let mut buf = Vec::with_capacity(2 + 2 * seqs.len());
+    buf.push(TAG_NACK);
+    buf.push(media);
+    for seq in seqs {
+        buf.extend_from_slice(&seq.to_be_bytes());
+    }
+    buf
+}
+
+/// Parse a [`TAG_NACK`] datagram into its media byte and sequence numbers.
+pub fn decode_nack(buf: &[u8]) -> Option<(u8, Vec<u16>)> {
+    let (&tag, rest) = buf.split_first()?;
+    let (&media, seqs) = rest.split_first()?;
+    if tag != TAG_NACK || seqs.len() % 2 != 0 || seqs.len() / 2 > NACK_MAX {
+        return None;
+    }
+    let (seqs, _) = seqs.as_chunks::<2>();
+    Some((media, seqs.iter().map(|s| u16::from_be_bytes(*s)).collect()))
+}
+
+/// The packets the host keeps per media for resending, a power of two so the
+/// slots line up across the 16 bit sequence number wrap.
+///
+/// About two seconds of video at 20 Mbit/s: far more than a NACK ever reaches
+/// back, since a viewer gives up on a hole within half a second.
+pub const HISTORY_VIDEO: usize = 4096;
+/// See [`HISTORY_VIDEO`]; audio runs at 50 packets a second.
+pub const HISTORY_AUDIO: usize = 512;
+
+/// The recently forwarded RTP packets of one media, by sequence number, so a
+/// viewer can ask for a lost one again ([`TAG_NACK`]).
+pub struct History {
+    slots: Vec<Option<(u16, bytes::Bytes)>>,
+}
+
+impl History {
+    /// A history of `capacity` packets, which must be a power of two.
+    pub fn new(capacity: usize) -> Self {
+        assert!(capacity.is_power_of_two() && capacity <= 1 << 16);
+        History {
+            slots: vec![None; capacity],
+        }
+    }
+
+    /// Remember a forwarded packet, replacing the one `capacity` packets older.
+    pub fn insert(&mut self, seq: u16, packet: bytes::Bytes) {
+        let slot = seq as usize % self.slots.len();
+        self.slots[slot] = Some((seq, packet));
+    }
+
+    /// The packet with this sequence number, if it is still remembered.
+    pub fn get(&self, seq: u16) -> Option<bytes::Bytes> {
+        match &self.slots[seq as usize % self.slots.len()] {
+            Some((s, packet)) if *s == seq => Some(packet.clone()),
+            _ => None,
+        }
+    }
+
+    /// Forget everything: a new publisher session starts a new sequence space.
+    pub fn clear(&mut self) {
+        self.slots.iter_mut().for_each(|s| *s = None);
+    }
+}
 
 /// The length of the fragment framing: tag, id, index, total.
 pub const FRAG_HEADER_LEN: usize = 5;
@@ -224,10 +305,50 @@ pub fn reorder_timeout_for(buffer: Option<Duration>) -> Duration {
         .unwrap_or(REORDER_TIMEOUT)
 }
 
+/// The longest a [`Reorder`] holds a hole while resends may still fill it.
+pub const REORDER_TIMEOUT_NACK_MAX: Duration = Duration::from_millis(500);
+
+/// Slack on top of the round trip for a resend to arrive: timers, and the
+/// host's pacer queue.
+const NACK_SLACK: Duration = Duration::from_millis(20);
+
+/// How long a [`Reorder`] holds a hole, and how long it waits for a resend
+/// before asking again, on a path with round-trip time `rtt`.
+///
+/// A NACK is answered one round trip later, so a hole is asked for again after
+/// 1.5 rtt and held for 2.5 rtt: long enough for the second resend to land
+/// too. Never shorter than the window `--buffer` asks for (see
+/// [`reorder_timeout_for`]), never longer than [`REORDER_TIMEOUT_NACK_MAX`].
+pub fn nack_timing(buffer: Option<Duration>, rtt: Duration) -> (Duration, Duration) {
+    let renack = rtt * 3 / 2 + NACK_SLACK;
+    let timeout = (rtt * 5 / 2 + NACK_SLACK * 2)
+        .max(reorder_timeout_for(buffer))
+        .min(REORDER_TIMEOUT_NACK_MAX);
+    (timeout, renack)
+}
+
 /// The most packets the [`Reorder`] holds per media at once.
 const REORDER_CAP: usize = 8192;
 
-/// Puts RTP packets back into sequence order.
+/// How often a [`Reorder`] asks the host for one lost packet before giving up.
+pub const NACK_TRIES: u8 = 2;
+
+/// The most holes a [`Reorder`] asks the host to fill at once.
+///
+/// A gap wider than this is an outage or a new sequence space, not a few lost
+/// packets: it is left to time out, and the keyframe request recovers the
+/// picture.
+pub const NACK_PENDING: usize = 1024;
+
+/// How far behind the next expected sequence number a packet may be and still
+/// count as late; anything older is a new sequence space (the publisher
+/// reconnected) and resets the baseline.
+const LATE_WINDOW: i16 = 1024;
+
+/// How many abandoned holes a [`Reorder`] remembers, see [`Reorder::push`].
+const ABANDONED_CAP: usize = 512;
+
+/// Puts RTP packets back into sequence order, and finds the lost ones.
 ///
 /// The host forwards one RTP packet per QUIC datagram, and datagrams are
 /// unreliable *and unordered*, so packets reach the viewer scrambled even on a
@@ -237,10 +358,11 @@ const REORDER_CAP: usize = 8192;
 /// have separate sequence spaces) and emits strictly in sequence order.
 ///
 /// A packet that arrives when expected is emitted at once; a later one is held
-/// until the hole before it is filled. If a hole is not filled within the
-/// configured timeout, everything held is flushed in order and the hole is
-/// abandoned (genuine loss the player conceals). Packets older than the next
-/// expected (very late, or duplicates past a hole) are dropped.
+/// until the hole before it is filled. Every hole is reported once by
+/// [`Reorder::take_nacks`] so the viewer can ask the host to resend it, and
+/// once more if the resend does not arrive in time. If a hole is not filled
+/// within the configured timeout, everything held is flushed in order and the
+/// hole is abandoned (genuine loss the player conceals).
 pub struct Reorder {
     /// The next sequence number to emit, `None` until the first packet.
     next: Option<u16>,
@@ -248,6 +370,15 @@ pub struct Reorder {
     held: Vec<(u16, Instant, Vec<u8>)>,
     /// How long to hold a hole before flushing. See [`Reorder::with_timeout`].
     timeout: Duration,
+    /// The highest sequence number seen, so that each hole is noticed once.
+    highest: Option<u16>,
+    /// The holes, `(seq, when it was last asked for, how often)`.
+    missing: Vec<(u16, Option<Instant>, u8)>,
+    /// How long a resend may take before a hole is asked for again.
+    renack: Duration,
+    /// Holes a flush gave up on, so a very late packet for one of them can
+    /// still be handed on, while a duplicate of an emitted packet is dropped.
+    abandoned: VecDeque<u16>,
 }
 
 impl Default for Reorder {
@@ -256,6 +387,10 @@ impl Default for Reorder {
             next: None,
             held: Vec::new(),
             timeout: REORDER_TIMEOUT,
+            highest: None,
+            missing: Vec::new(),
+            renack: REORDER_TIMEOUT / 2,
+            abandoned: VecDeque::new(),
         }
     }
 }
@@ -268,57 +403,123 @@ impl Reorder {
     pub fn with_timeout(timeout: Duration) -> Self {
         Self {
             timeout,
+            renack: timeout / 2,
             ..Default::default()
         }
+    }
+
+    /// Change how long a hole is held, and how long a resend may take before
+    /// the hole is asked for again. See [`nack_timing`].
+    pub fn set_timing(&mut self, timeout: Duration, renack: Duration) {
+        self.timeout = timeout;
+        self.renack = renack;
     }
 
     /// Feed one packet by its RTP sequence number.
     ///
     /// Returns the packets to hand to the player now: the packet itself if it
-    /// closes the gap, plus any held packets it unblocks. A packet older than
-    /// the next expected (too late to reorder here) is passed through untouched
-    /// so a downstream jitter buffer can still recover it.
+    /// closes the gap, plus any held packets it unblocks. A packet for a hole
+    /// that was already abandoned is passed through untouched, so a downstream
+    /// jitter buffer can still recover it; a duplicate of a packet that was
+    /// already emitted (a resend racing a delayed original) is dropped.
     pub fn push(&mut self, seq: u16, packet: Vec<u8>, now: Instant) -> Vec<Vec<u8>> {
         let mut out = Vec::new();
-        match self.next {
-            None => {
-                // First packet: it is the baseline, emit it and wait for the next.
-                self.next = Some(seq.wrapping_add(1));
+        let Some(next) = self.next else {
+            // First packet: it is the baseline, emit it and wait for the next.
+            self.next = Some(seq.wrapping_add(1));
+            self.highest = Some(seq);
+            out.push(packet);
+            return out;
+        };
+        let ahead = seq.wrapping_sub(next) as i16;
+        if ahead < -LATE_WINDOW {
+            // Far older than anything still in flight: the sequence space
+            // changed under us. Start over from this packet.
+            self.clear();
+            return self.push(seq, packet, now);
+        }
+        if ahead < 0 {
+            if let Some(i) = self.abandoned.iter().position(|s| *s == seq) {
+                self.abandoned.remove(i);
                 out.push(packet);
             }
-            Some(next) => {
-                let ahead = seq.wrapping_sub(next) as i16;
-                if ahead < 0 {
-                    // Older than the next expected: too late for this stage to
-                    // reorder, but a downstream jitter buffer (ffplay's --buffer)
-                    // can still salvage it. Emit it untouched rather than
-                    // destroying a packet the player might recover.
-                    out.push(packet);
-                    return out;
-                }
-                if ahead == 0 {
-                    out.push(packet);
-                    self.next = Some(next.wrapping_add(1));
-                    self.drain(&mut out);
-                } else {
-                    // A future packet: hold it until the hole before it is filled.
-                    if !self.held.iter().any(|(s, _, _)| *s == seq) {
-                        if self.held.len() >= REORDER_CAP {
-                            self.flush(&mut out);
-                        }
-                        self.held.push((seq, now, packet));
-                    }
-                    self.expire(now, &mut out);
-                }
+            return out;
+        }
+        self.note(seq);
+        if ahead == 0 {
+            out.push(packet);
+            self.next = Some(next.wrapping_add(1));
+            self.drain(&mut out);
+        } else if !self.held.iter().any(|(s, _, _)| *s == seq) {
+            // A future packet: hold it until the hole before it is filled.
+            if self.held.len() >= REORDER_CAP {
+                self.flush(&mut out);
+            }
+            self.held.push((seq, now, packet));
+        }
+        self.expire(now, &mut out);
+        out
+    }
+
+    /// Flush on the timeout even when no packet arrives to trigger it.
+    pub fn poll(&mut self, now: Instant) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        self.expire(now, &mut out);
+        out
+    }
+
+    /// The holes to ask the host to resend now.
+    ///
+    /// A new hole is returned on the first call after it appears, then again
+    /// if its resend has not arrived within the renack interval, up to
+    /// [`NACK_TRIES`] times in all.
+    pub fn take_nacks(&mut self, now: Instant) -> Vec<u16> {
+        let Some(next) = self.next else {
+            return Vec::new();
+        };
+        // Forget the holes a flush has passed.
+        self.missing
+            .retain(|(s, _, _)| s.wrapping_sub(next) as i16 >= 0);
+        let mut seqs = Vec::new();
+        for (seq, asked, tries) in &mut self.missing {
+            let due = asked.is_none_or(|at| now.duration_since(at) >= self.renack);
+            if *tries < NACK_TRIES && due {
+                *asked = Some(now);
+                *tries += 1;
+                seqs.push(*seq);
             }
         }
-        out
+        seqs
     }
 
     /// Forget everything: called at an epoch, where the sequence baseline resets.
     pub fn clear(&mut self) {
         self.next = None;
         self.held.clear();
+        self.highest = None;
+        self.missing.clear();
+        self.abandoned.clear();
+    }
+
+    /// Track the holes `seq` opens or fills.
+    fn note(&mut self, seq: u16) {
+        let Some(highest) = self.highest else {
+            self.highest = Some(seq);
+            return;
+        };
+        let jump = seq.wrapping_sub(highest) as i16;
+        if jump <= 0 {
+            // At or below the highest seen: it may fill a hole.
+            self.missing.retain(|(s, _, _)| *s != seq);
+            return;
+        }
+        self.highest = Some(seq);
+        let gap = jump as usize - 1;
+        if gap > 0 && self.missing.len() + gap <= NACK_PENDING {
+            let first = highest.wrapping_add(1);
+            self.missing
+                .extend((0..gap as u16).map(|i| (first.wrapping_add(i), None, 0)));
+        }
     }
 
     /// Emit held packets that are now consecutive with the next expected.
@@ -351,13 +552,21 @@ impl Reorder {
 
     /// Release all held packets in sequence order, abandoning the holes.
     fn flush(&mut self, out: &mut Vec<Vec<u8>>) {
-        let next = self.next.unwrap_or(0);
+        let mut expect = self.next.unwrap_or(0);
         self.held
-            .sort_by_key(|(s, _, _)| s.wrapping_sub(next) as i16);
-        for (s, _, p) in self.held.drain(..) {
-            self.next = Some(s.wrapping_add(1));
+            .sort_by_key(|(s, _, _)| s.wrapping_sub(expect) as i16);
+        for (s, _, p) in std::mem::take(&mut self.held) {
+            let gap = (s.wrapping_sub(expect) as i16).max(0) as usize;
+            for i in 0..gap.min(ABANDONED_CAP) {
+                if self.abandoned.len() >= ABANDONED_CAP {
+                    self.abandoned.pop_front();
+                }
+                self.abandoned.push_back(expect.wrapping_add(i as u16));
+            }
+            expect = s.wrapping_add(1);
             out.push(p);
         }
+        self.next = Some(expect);
     }
 }
 

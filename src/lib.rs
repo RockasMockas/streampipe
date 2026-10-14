@@ -9,6 +9,7 @@ pub const STREAM_ALPN: &[u8] = b"STREAMPIPE_WEBRTC_V0";
 
 pub mod common;
 pub mod gui;
+pub mod pace;
 pub mod rtp;
 pub mod sdp;
 pub mod stream;

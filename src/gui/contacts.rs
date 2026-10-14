@@ -20,9 +20,11 @@ use std::time::Instant;
 use eframe::egui::{self, Context, Ui};
 
 use super::{
-    config::{Contact, ticket_is_valid}, options::CLOSE_GREY, contact_chip, pointer_over,
-    pointer_pressed_over, pulse_factor, soft_glow, top_bevel, App, Tab, ACCENT, ERROR,
-    WATCH_ACCENT,
+    config::{ticket_is_valid, Contact},
+    contact_chip,
+    options::CLOSE_GREY,
+    pointer_over, pointer_pressed_over, pulse_factor, soft_glow, top_bevel, App, Tab, ACCENT,
+    ERROR, WATCH_ACCENT,
 };
 
 /// The row's name type: derived from the theme's body size, lifted a touch and set bold,
@@ -250,16 +252,21 @@ impl App {
         let pill_fits = |label: &str, w: f32, size: f32| {
             let gw = ui
                 .painter()
-                .layout_no_wrap(label.to_string(), egui::FontId::proportional(size), egui::Color32::WHITE)
+                .layout_no_wrap(
+                    label.to_string(),
+                    egui::FontId::proportional(size),
+                    egui::Color32::WHITE,
+                )
                 .rect
                 .width();
             gw * 1.15 + pill_pad * 2.0 + 2.0 <= w
         };
-        let pill_size = if pill_fits("In the box", LOAD_W, btn) && pill_fits("Delete", DELETE_W, btn) {
-            btn
-        } else {
-            PILL_TEXT
-        };
+        let pill_size =
+            if pill_fits("In the box", LOAD_W, btn) && pill_fits("Delete", DELETE_W, btn) {
+                btn
+            } else {
+                PILL_TEXT
+            };
         let name_font = egui::FontId::proportional(body + NAME_LIFT);
         let ticket_font = egui::FontId::monospace(mono);
 
@@ -306,8 +313,8 @@ impl App {
                     ui.vertical_centered(|ui| {
                         ui.add_space(14.0);
                         let card_w = ui.available_width().min(340.0);
-                        let (card, _) =
-                            ui.allocate_exact_size(egui::vec2(card_w, EMPTY_H), egui::Sense::hover());
+                        let (card, _) = ui
+                            .allocate_exact_size(egui::vec2(card_w, EMPTY_H), egui::Sense::hover());
                         let corner = egui::CornerRadius::same(7);
                         ui.painter()
                             .rect_filled(card, corner, egui::Color32::from_white_alpha(4));
@@ -388,8 +395,10 @@ impl App {
                         // The open motion is eased (`ease(p)`) so the card grows quickly
                         // then settles gently; settled geometry (p = 1) is unchanged.
                         let grow = ROW_GROW * ease(p);
-                        let row_rect =
-                            egui::Rect::from_min_size(ui.cursor().min, egui::vec2(avail, ROW_H + grow));
+                        let row_rect = egui::Rect::from_min_size(
+                            ui.cursor().min,
+                            egui::vec2(avail, ROW_H + grow),
+                        );
                         // A quiet hover cue on a non-active row: a brighter stroke and a
                         // thin left accent tick. It deliberately leaves the pills' own
                         // hover fills untouched, so the row's feedback never washes out
@@ -466,10 +475,7 @@ impl App {
                         // the full height puts the row's centre line in the middle of
                         // the card, and everything centers inside it with a clean
                         // margin above and below.
-                        ui.allocate_exact_size(
-                            egui::vec2(0.0, ROW_H + grow),
-                            egui::Sense::hover(),
-                        );
+                        ui.allocate_exact_size(egui::vec2(0.0, ROW_H + grow), egui::Sense::hover());
                         // Inset the initials avatar from the card's left edge.
                         ui.add_space(8.0);
                         let (avatar_rect, _resp) = ui.allocate_exact_size(
@@ -485,12 +491,16 @@ impl App {
                         let [ar, ag, ab, _aa] =
                             egui::epaint::Hsva::new(hue, 0.42, 0.5, 1.0).to_srgba_unmultiplied();
                         let av_bg = egui::Color32::from_rgba_unmultiplied(ar, ag, ab, 255);
-                        ui.painter().circle_filled(avatar_rect.center(), av_r, av_bg);
+                        ui.painter()
+                            .circle_filled(avatar_rect.center(), av_r, av_bg);
                         // A faint white sheen in the avatar's upper arc — the same lit-from-
                         // above cue the cards carry, kept inside the disc so it reads as a
                         // highlight rather than a blob.
                         ui.painter().circle_filled(
-                            egui::pos2(avatar_rect.center().x, avatar_rect.center().y - av_r * 0.32),
+                            egui::pos2(
+                                avatar_rect.center().x,
+                                avatar_rect.center().y - av_r * 0.32,
+                            ),
                             av_r * 0.55,
                             egui::Color32::from_white_alpha(12),
                         );
@@ -610,7 +620,12 @@ impl App {
                             // language (the copy box uses the same). Painted before the
                             // pill, so only the rim shows; it rides the row's alpha `a`.
                             if load_hovered && !active {
-                                soft_glow(vu.painter(), load_rect, PILL_R, ACCENT.gamma_multiply(a));
+                                soft_glow(
+                                    vu.painter(),
+                                    load_rect,
+                                    PILL_R,
+                                    ACCENT.gamma_multiply(a),
+                                );
                             }
                             let load = egui::Button::new(pill_label(
                                 if active { "In the box" } else { "Load" },
@@ -739,8 +754,8 @@ impl App {
 
                             // Same spacer as the view pair: push "Save"/"Delete" onto
                             // the card's right margin, off the rounded corner.
-                            let pad =
-                                (band.max.x - (SAVE_W + DELETE_W + gap) - eu.cursor().min.x).max(0.0);
+                            let pad = (band.max.x - (SAVE_W + DELETE_W + gap) - eu.cursor().min.x)
+                                .max(0.0);
                             eu.add_space(pad);
 
                             // Green "Save": persists immediately, raises the toast, and
@@ -753,7 +768,12 @@ impl App {
                             let save_pressed = pointer_pressed_over(&eu, save_rect);
                             // The accent halo blooms on hover, riding the row's open alpha.
                             if save_hovered {
-                                soft_glow(eu.painter(), save_rect, PILL_R, ACCENT.gamma_multiply(p));
+                                soft_glow(
+                                    eu.painter(),
+                                    save_rect,
+                                    PILL_R,
+                                    ACCENT.gamma_multiply(p),
+                                );
                             }
                             let save = egui::Button::new(pill_label(
                                 "Save",
@@ -797,14 +817,13 @@ impl App {
                             if del_hovered {
                                 soft_glow(eu.painter(), del_rect, PILL_R, ERROR.gamma_multiply(p));
                             }
-                            let delete =
-                                egui::Button::new(pill_label(
+                            let delete = egui::Button::new(pill_label(
                                 "Delete",
                                 ERROR.gamma_multiply(p),
                                 pill_size,
                             ))
-                                    .min_size(egui::vec2(DELETE_W, 24.0))
-                                    .corner_radius(PILL_R)
+                            .min_size(egui::vec2(DELETE_W, 24.0))
+                            .corner_radius(PILL_R)
                             .fill(ERROR.gamma_multiply(if del_pressed {
                                 0.40
                             } else if del_hovered {
@@ -871,7 +890,10 @@ impl App {
                 self.toast = Some(("Saved ✓".to_string(), Instant::now()));
             } else {
                 self.toast_error = true;
-                self.toast = Some(("Invalid ticket — check and try again".to_string(), Instant::now()));
+                self.toast = Some((
+                    "Invalid ticket — check and try again".to_string(),
+                    Instant::now(),
+                ));
             }
             ui.ctx().request_repaint();
         }
@@ -910,10 +932,7 @@ impl App {
 /// `Button` size when it fits the fixed pill widths, else [`PILL_TEXT`] (see
 /// `contacts_content`).
 fn pill_label(text: &str, color: egui::Color32, size: f32) -> egui::RichText {
-    egui::RichText::new(text)
-        .size(size)
-        .strong()
-        .color(color)
+    egui::RichText::new(text).size(size).strong().color(color)
 }
 
 /// A faint *additive* top-light over a card: white at the top edge fading to transparent
