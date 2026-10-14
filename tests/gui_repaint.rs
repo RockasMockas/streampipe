@@ -124,3 +124,30 @@ fn the_contact_edit_tween_sleeps_when_settled() {
     );
     assert_eq!(app.contact_edit_prev, None, "prev is released on settle");
 }
+
+/// A loaded ("active") contact row breathes its left bar, so an open panel with such a
+/// row repaints on the session cadence; the same panel with nothing loaded still sleeps.
+/// Regression guard for the live-pulse repaint gate — it must be gated on an active row,
+/// not merely on the panel being open, or an idle open panel would burn frames.
+#[test]
+fn an_open_panel_wakes_only_for_a_loaded_row() {
+    let (mut app, _rt) = test_app_with(Config {
+        contacts: vec![Contact {
+            name: "Alice".into(),
+            ticket: "alice-ticket".into(),
+        }],
+        ..Config::default()
+    });
+    app.show_contacts = true;
+
+    // Panel open, nothing loaded into the Watch box → no active row → sleeps.
+    assert_eq!(
+        settled_repaint_delay(&mut app),
+        Duration::MAX,
+        "an open panel with no loaded contact must not repaint"
+    );
+
+    // Load the contact → its card's left bar breathes → the panel repaints.
+    app.watch_ticket = "alice-ticket".into();
+    assert_awake(settled_repaint_delay(&mut app));
+}

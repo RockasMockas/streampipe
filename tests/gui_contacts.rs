@@ -934,6 +934,68 @@ fn the_load_button_is_flat_and_brightens_on_hover() {
     );
 }
 
+/// Row type is derived from the theme while keeping the documented *name-first*
+/// hierarchy: the name sits above the body/intro size, the ticket is monospace (matching
+/// the Watch ticket box), and no pill label overflows its fixed width (widening a pill
+/// would break the crossfade's flush-right pair-sum layout). Regression guard for the
+/// theme-derived-fonts change.
+#[test]
+fn row_type_is_theme_derived_and_keeps_the_name_first_hierarchy() {
+    let (mut app, _rt) = test_app_with(Config {
+        contacts: vec![Contact {
+            name: "Alice".into(),
+            ticket: "alice-ticket".into(),
+        }],
+        ..Config::default()
+    });
+    // Load the contact so its row is active and paints "In the box".
+    app.watch_ticket = "alice-ticket".into();
+    app.show_contacts = true;
+    let out = drive_frames(&mut app, &egui::Context::default(), SIZE, 3);
+
+    // The contact's name also appears as the Watch tab's chip (a small 10.5 pill), so
+    // take the largest painted instance of each string — the row's own name is the big,
+    // bold one, the chip is the quiet one.
+    let max_size_of = |needle: &str| -> Option<f32> {
+        out.shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::epaint::Shape::Text(t) if t.galley.text() == needle => {
+                    t.galley.job.sections.first().map(|sec| sec.format.font_id.size)
+                }
+                _ => None,
+            })
+            .reduce(f32::max)
+    };
+
+    let name = max_size_of("Alice").expect("the row paints the name");
+    let intro = max_size_of("Pick a contact to load their ticket into the Watch tab.")
+        .expect("the panel paints its intro line");
+    assert!(
+        name > intro,
+        "the name ({name}) must read above body/intro ({intro}) — the name-first hierarchy"
+    );
+
+    // The ticket text also lives in the Watch box (proportional), so assert that at least
+    // one painted instance of the ticket string — the contacts row's — is monospace.
+    let ticket_is_mono = out.shapes.iter().any(|s| {
+        matches!(&s.shape, egui::epaint::Shape::Text(t)
+            if t.galley.text().starts_with("alice")
+                && t.galley.job.sections.first().is_some_and(|sec| sec.format.font_id.family == egui::FontFamily::Monospace))
+    });
+    assert!(
+        ticket_is_mono,
+        "the contacts row sets its ticket in the theme's monospace, like the Watch box"
+    );
+
+    // The longest pill label ("In the box", LOAD_W = 74) never overflows its pill.
+    let in_box = text_rect(&out.shapes, "In the box").expect("the loaded row reads 'In the box'");
+    assert!(
+        in_box.width() <= 74.0,
+        "'In the box' overflows the fixed Load pill width: {in_box:?}"
+    );
+}
+
 /// A Ctrl+T key press event (the global "open Contacts" shortcut).
 fn ctrl_t() -> egui::Event {
     egui::Event::Key {

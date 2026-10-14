@@ -728,6 +728,18 @@ impl App {
         if self.show_contacts && contact_edit_moving {
             ui.ctx().request_repaint();
         }
+        // A loaded (active) contact row breathes its left bar on the shared pulse clock,
+        // so the panel repaints on the session cadence — but only while it is open *and*
+        // such a row is shown, so an open panel with no loaded contact still sleeps.
+        if self.show_contacts
+            && self
+                .config
+                .contacts
+                .iter()
+                .any(|c| !c.ticket.is_empty() && c.ticket == self.watch_ticket)
+        {
+            ui.ctx().request_repaint_after(REPAINT);
+        }
         // Only the visible tab's spinner matters — the other tab's `Starting` track is
         // not drawn, so it must not keep the window awake.
         let spinner_visible = match self.tab {
