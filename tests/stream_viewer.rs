@@ -202,6 +202,32 @@ fn player_windows_open_at_720p_in_the_corner() {
     }
 }
 
+/// `--no-config` keeps mpv.conf out, but the user's input.conf is passed back
+/// by absolute path; with no input.conf there is no `--input-conf` at all.
+#[test]
+fn mpv_loads_the_users_input_conf_but_not_their_config() {
+    let path = Path::new("/tmp/x.sdp");
+    let dir = tempfile::tempdir().unwrap();
+    std::env::set_var("MPV_HOME", dir.path());
+
+    let mpv = Player::Mpv.command(path, None, None, 100, None);
+    assert!(
+        !mpv.iter().any(|a| a.starts_with("--input-conf")),
+        "{mpv:?}"
+    );
+
+    let conf = dir.path().join("input.conf");
+    std::fs::write(&conf, "x show-text hi\n").unwrap();
+    let mpv = Player::Mpv.command(path, None, None, 100, None);
+    std::env::remove_var("MPV_HOME");
+    assert!(mpv.contains(&"--no-config".to_string()));
+    assert!(
+        mpv.contains(&format!("--input-conf={}", conf.display())),
+        "{mpv:?}"
+    );
+    assert_eq!(mpv.last().unwrap(), "/tmp/x.sdp");
+}
+
 #[test]
 fn a_player_path_replaces_the_binary_but_keeps_the_flags() {
     let path = Path::new("/tmp/x.sdp");

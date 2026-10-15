@@ -165,6 +165,12 @@ impl Player {
                     "--no-resume-playback".to_string(),
                     "--force-seekable=yes".to_string(),
                 ];
+                // `--no-config` drops the user's input.conf along with mpv.conf.
+                // Load it back by absolute path so their key bindings still
+                // apply; mpv.conf stays out.
+                if let Some(conf) = mpv_input_conf() {
+                    cmd.push(format!("--input-conf={}", conf.display()));
+                }
                 match buffer {
                     Some(ms) => {
                         cmd.push("--cache=yes".into());
@@ -280,6 +286,36 @@ impl Player {
     pub fn launches(&self) -> bool {
         *self != Player::None
     }
+}
+
+/// The user's own mpv `input.conf`, looked up where mpv itself looks.
+///
+/// mpv's `~~/` prefix resolves to nothing under `--no-config`, so the launcher
+/// finds the file and hands mpv its absolute path. `$MPV_HOME` replaces the
+/// per-user directory, as it does for mpv; otherwise `%APPDATA%\mpv` on
+/// Windows, and `$XDG_CONFIG_HOME/mpv` (or `~/.config/mpv`) then the legacy
+/// `~/.mpv` everywhere else, macOS included. The first file that exists wins.
+pub fn mpv_input_conf() -> Option<PathBuf> {
+    let env = |key: &str| {
+        std::env::var_os(key)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+    };
+    let dirs: Vec<PathBuf> = if let Some(dir) = env("MPV_HOME") {
+        vec![dir]
+    } else if cfg!(target_os = "windows") {
+        env("APPDATA").map(|d| d.join("mpv")).into_iter().collect()
+    } else {
+        let home = env("HOME");
+        let xdg = env("XDG_CONFIG_HOME").or_else(|| home.as_ref().map(|h| h.join(".config")));
+        xdg.map(|d| d.join("mpv"))
+            .into_iter()
+            .chain(home.map(|h| h.join(".mpv")))
+            .collect()
+    };
+    dirs.into_iter()
+        .map(|d| d.join("input.conf"))
+        .find(|p| p.is_file())
 }
 
 /// Counters for a running media tunnel, used for logging.

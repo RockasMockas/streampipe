@@ -312,11 +312,13 @@ local function jump_to_start()
 	end
 end
 
--- forced: override mpv's built-in END/HOME (seek to end/start of file),
--- which are useless on a live buffer.
+-- The user's input.conf is loaded (see `Player::command`). forced: the two
+-- jump keys win over it. END/HOME are plain bindings: they replace mpv's
+-- built-in END/HOME (seek to end/start of file, useless on a live buffer),
+-- but the user's own END/HOME binding, if any, wins.
 mp.add_key_binding("ctrl+shift+RIGHT", "buffer-edge", jump_to_edge, { forced = true })
-mp.add_key_binding("END", "buffer-edge-end", jump_to_edge, { forced = true })
+mp.add_key_binding("END", "buffer-edge-end", jump_to_edge)
 mp.add_key_binding("ctrl+shift+LEFT", "buffer-start", jump_to_start, { forced = true })
-mp.add_key_binding("HOME", "buffer-start-home", jump_to_start, { forced = true })
+mp.add_key_binding("HOME", "buffer-start-home", jump_to_start)
 
 mp.add_timeout(BASE, watchdog)
