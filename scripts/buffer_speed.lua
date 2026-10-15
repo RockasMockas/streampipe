@@ -197,4 +197,126 @@ local function watchdog()
 	mp.add_timeout(dt, watchdog)
 end
 
+---------------------------------------------------------------------
+-- Buffer jumps: hop to the live edge, or back to the oldest frame still
+-- in the cache, so the user can scrub the buffered window by hand.
+--
+-- Every jump is a relative `seek` by the distance from the play position.
+-- What breaks buffering is a seek whose demuxer target lands outside the
+-- cache's seekable range: mpv then does a low-level seek on the RTP stream
+-- and throws the whole cache away. Two traps:
+--  * the seekable range ends at the newest *completed* GOP. Packets after
+--    the newest keyframe are cached but are not seek points, so the real tip
+--    (`cache-end`) is up to a GOP past the end of the range;
+--  * the start of the range moves forward as old packets are pruned.
+-- The edge jump is an exact seek to tip - EDGE_MARGIN, with
+-- hr-seek-demuxer-offset pulling the demuxer half of it back inside the
+-- range: the demuxer lands on a cached keyframe and the decoder discards
+-- frames up to the target. The start jump is a keyframe seek a little past
+-- the start of the range, which snaps back to the first cached keyframe.
+-- The edge keeps a margin back — landing right on the tip stalls the instant
+-- the next packet is late.
+
+local EDGE_MARGIN = 0.5 -- stay this far inside the live edge
+local START_MARGIN = 0.5 -- aim this far past the cache start, in case it moves
+local DEMUX_EPS = 0.05 -- keep the demuxer seek this far inside the range end
+
+-- The seekable window [lo, hi] and the newest cached timestamp (tip), on the
+-- same clock as playback-time. nil when nothing is seekable.
+local function cache_bounds()
+	local st = mp.get_property_native("demuxer-cache-state")
+	local ranges = (type(st) == "table") and st["seekable-ranges"]
+	if type(ranges) ~= "table" or #ranges == 0 then
+		return nil
+	end
+	local lo, hi
+	for _, r in ipairs(ranges) do
+		local s, e = r["start"], r["end"]
+		if type(s) == "number" and s == s and type(e) == "number" and e == e then
+			if lo == nil or s < lo then
+				lo = s
+			end
+			if hi == nil or e > hi then
+				hi = e
+			end
+		end
+	end
+	if lo == nil then
+		return nil
+	end
+	local tip = st["cache-end"]
+	if type(tip) ~= "number" or tip ~= tip or tip < hi then
+		tip = hi
+	end
+	return lo, hi, tip
+end
+
+local function play_pos()
+	local pos = mp.get_property_number("playback-time")
+	if type(pos) ~= "number" or pos ~= pos then
+		return nil
+	end
+	return pos
+end
+
+-- hr-seek-demuxer-offset is only read when a queued seek executes; the
+-- `seek` event comes after that, so that is where the old value goes back.
+local saved_hr_offset = nil
+
+local function restore_hr_offset()
+	if saved_hr_offset ~= nil then
+		mp.set_property_number("hr-seek-demuxer-offset", saved_hr_offset)
+		saved_hr_offset = nil
+	end
+end
+
+mp.register_event("seek", restore_hr_offset)
+
+local function jump_to_edge()
+	local pos = play_pos()
+	local lo, hi, tip = cache_bounds()
+	if pos == nil or lo == nil then
+		msg.warn("buffer position unavailable")
+		return
+	end
+	local target = tip - EDGE_MARGIN
+	if target - pos < DEMUX_EPS then
+		return -- already at the edge; never seek backwards
+	end
+	if saved_hr_offset == nil then
+		saved_hr_offset = mp.get_property_number("hr-seek-demuxer-offset", 0)
+	end
+	-- The demuxer seeks to target - offset = min(target, hi) - DEMUX_EPS.
+	mp.set_property_number("hr-seek-demuxer-offset", math.max(0, target - hi) + DEMUX_EPS)
+	local _, err = mp.command_native({ name = "seek", target = target - pos, flags = "relative+exact" })
+	if err ~= nil then
+		msg.warn("edge jump failed: " .. tostring(err))
+		restore_hr_offset()
+	end
+end
+
+local function jump_to_start()
+	local pos = play_pos()
+	local lo = cache_bounds()
+	if pos == nil or lo == nil then
+		msg.warn("buffer position unavailable")
+		return
+	end
+	local target = lo + START_MARGIN
+	if pos <= target then
+		return -- already at the start
+	end
+	local _, err = mp.command_native({ name = "seek", target = target - pos, flags = "relative+keyframes" })
+	if err ~= nil then
+		msg.warn("start jump failed: " .. tostring(err))
+	end
+end
+
+-- forced: override mpv's built-in END/HOME (seek to end/start of file),
+-- which are useless on a live buffer.
+mp.add_key_binding("ctrl+shift+RIGHT", "buffer-edge", jump_to_edge, { forced = true })
+mp.add_key_binding("END", "buffer-edge-end", jump_to_edge, { forced = true })
+mp.add_key_binding("ctrl+shift+LEFT", "buffer-start", jump_to_start, { forced = true })
+mp.add_key_binding("HOME", "buffer-start-home", jump_to_start, { forced = true })
+
 mp.add_timeout(BASE, watchdog)
