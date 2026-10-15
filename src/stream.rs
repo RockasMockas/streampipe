@@ -163,6 +163,7 @@ impl Player {
                     // A live stream must start at the live edge, never resume a
                     // watched position from a previous run.
                     "--no-resume-playback".to_string(),
+                    "--force-seekable=yes".to_string(),
                 ];
                 match buffer {
                     Some(ms) => {
