@@ -25,6 +25,8 @@ fn defaults_match_acceptance() {
     assert_eq!(cfg.default_player(), Player::Mpv);
     assert!(cfg.last_ticket.is_empty());
     assert!(cfg.secret_hex.is_none());
+    // Aggressive Low Latency is opt-in.
+    assert!(!cfg.low_latency);
     // The volume starts at half, not full.
     assert_eq!(cfg.volume, DEFAULT_VOLUME);
     assert_eq!(DEFAULT_VOLUME, 50);
@@ -36,6 +38,7 @@ fn round_trip_preserves_fields() {
         broadcast_port: 9001,
         default_player: "vlc".into(),
         buffer_ms: Some(250),
+        low_latency: true,
         volume: 37,
         ..Config::default()
     };
@@ -47,6 +50,7 @@ fn round_trip_preserves_fields() {
     assert_eq!(back.broadcast_port, 9001);
     assert_eq!(back.default_player(), Player::Vlc);
     assert_eq!(back.buffer_ms, Some(250));
+    assert!(back.low_latency);
     assert_eq!(back.volume, 37);
     assert_eq!(back.player_paths.mpv.as_deref(), Some("/opt/mpv"));
     // newest first, deduped

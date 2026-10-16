@@ -316,7 +316,7 @@ fn the_live_watch_tab_shows_restart_and_stop_side_by_side() {
         let mut g = app.state.lock().unwrap();
         g.watch = Mode::Watching;
         g.watch_receiving = true;
-        g.watch_applied = Some((Player::Mpv, Some(90)));
+        g.watch_applied = Some((Player::Mpv, Some(90), false));
     }
 
     let ctx = egui::Context::default();
@@ -416,70 +416,143 @@ fn the_live_watch_tab_shows_restart_and_stop_side_by_side() {
     );
 }
 
-/// The prompt line appears iff a session is live *and* the shown player/buffer differ
-/// from what the live session was launched with.
+/// The prompt line appears iff a session is live *and* the shown player/buffer/latency
+/// mode differ from what the live session was launched with.
 #[test]
 fn the_watch_tab_prompts_to_restart_only_for_a_pending_edit() {
     const PROMPT: &str = "Press 'Restart' button to apply changes.";
-    let shows_prompt =
-        |watch: Mode, applied: Option<(Player, Option<u64>)>, player: Player, buffer: &str| {
-            let (mut app, _rt) = test_app();
-            app.tab = Tab::Watch;
-            app.watch_ticket = real_ticket();
-            app.watch_player = player;
-            app.watch_buffer = buffer.to_string();
-            {
-                let mut g = app.state.lock().unwrap();
-                g.watch = watch;
-                g.watch_applied = applied;
-            }
-            let shapes = render_shapes(&mut app, egui::vec2(760.0, 560.0));
-            shapes.iter().any(|s| match &s.shape {
-                egui::epaint::Shape::Text(t) => t.galley.text() == PROMPT,
-                _ => false,
-            })
-        };
+    let shows_prompt = |watch: Mode,
+                        applied: Option<(Player, Option<u64>, bool)>,
+                        player: Player,
+                        buffer: &str,
+                        low_latency: bool| {
+        let (mut app, _rt) = test_app();
+        app.tab = Tab::Watch;
+        app.watch_ticket = real_ticket();
+        app.watch_player = player;
+        app.watch_buffer = buffer.to_string();
+        app.watch_low_latency = low_latency;
+        {
+            let mut g = app.state.lock().unwrap();
+            g.watch = watch;
+            g.watch_applied = applied;
+        }
+        let shapes = render_shapes(&mut app, egui::vec2(760.0, 560.0));
+        shapes.iter().any(|s| match &s.shape {
+            egui::epaint::Shape::Text(t) => t.galley.text() == PROMPT,
+            _ => false,
+        })
+    };
+    let live = Some((Player::Mpv, Some(90), false));
 
     // Idle with an edited buffer: nothing to restart into, so no prompt.
     assert!(
-        !shows_prompt(Mode::Idle, None, Player::Mpv, "120"),
+        !shows_prompt(Mode::Idle, None, Player::Mpv, "120", false),
         "an idle tab must not prompt"
     );
     // Live and in sync: nothing pending, so no prompt.
     assert!(
-        !shows_prompt(
-            Mode::Watching,
-            Some((Player::Mpv, Some(90))),
-            Player::Mpv,
-            "90"
-        ),
-        "a live tab with matching player/buffer must not prompt"
+        !shows_prompt(Mode::Watching, live, Player::Mpv, "90", false),
+        "a live tab with matching settings must not prompt"
     );
-    // Live with an edited buffer, or a switched player: prompt.
+    // Live with an edited buffer, a switched player, or a toggled latency mode: prompt.
     assert!(
-        shows_prompt(
-            Mode::Watching,
-            Some((Player::Mpv, Some(90))),
-            Player::Mpv,
-            "120"
-        ),
+        shows_prompt(Mode::Watching, live, Player::Mpv, "120", false),
         "an edited buffer should raise the prompt"
     );
     assert!(
-        shows_prompt(
-            Mode::Watching,
-            Some((Player::Mpv, Some(90))),
-            Player::Vlc,
-            "90"
-        ),
+        shows_prompt(Mode::Watching, live, Player::Vlc, "90", false),
         "a switched player should raise the prompt"
+    );
+    assert!(
+        shows_prompt(Mode::Watching, live, Player::Mpv, "90", true),
+        "ticking Aggressive Low Latency should raise the prompt"
     );
     // Live with nothing recorded yet (defensive: the invariant says this can't
     // happen, but the condition must still be total).
     assert!(
-        shows_prompt(Mode::Starting, None, Player::Mpv, ""),
+        shows_prompt(Mode::Starting, None, Player::Mpv, "", false),
         "a live session with no record and a shown value should prompt"
     );
+}
+
+/// The "Aggressive Low Latency" checkbox rides at the right end of the Player/Buffer
+/// row, in the same size as the two labels, its explanation on the checkbox's own hover
+/// text (no trailing `*`, no icon). Ticking it greys out the Buffer field (it plays with
+/// no buffer) and is saved at once, so the app reopens with it ticked.
+#[test]
+fn aggressive_low_latency_shares_the_player_row_and_persists() {
+    // The click writes config; redirect the config dir (mutex serializes these tests).
+    let _guard = streampipe::gui::config::CONFIG_ENV.lock().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    std::env::set_var("XDG_CONFIG_HOME", dir.path());
+
+    let (mut app, _rt) = test_app();
+    app.tab = Tab::Watch;
+    app.watch_ticket = real_ticket();
+    let ctx = egui::Context::default();
+    let size = egui::vec2(760.0, 560.0);
+    let buffer_live = |ctx: &egui::Context, out: &egui::FullOutput| {
+        let buffer = text_rect(&out.shapes, "Buffer (ms)").expect("the buffer label");
+        ctx.interactive_rects_last_pass()
+            .iter()
+            .any(|r| (r.width() - 90.0).abs() < 1.0 && r.min.x > buffer.max.x)
+    };
+
+    let out = drive_frames(&mut app, &ctx, size, 3);
+    let label = text_rect(&out.shapes, "Aggressive Low Latency")
+        .expect("the checkbox label should be painted");
+    let player = text_rect(&out.shapes, "Player").expect("the player label");
+    // The toggle shares the Player/Buffer row: its line overlaps the labels' line
+    // vertically and it is the right-most thing on it, past the buffer field.
+    assert!(
+        label.min.y < player.max.y && label.max.y > player.min.y,
+        "the toggle should share the Player/Buffer row, got {label:?} vs {player:?}"
+    );
+    let field = ctx
+        .interactive_rects_last_pass()
+        .iter()
+        .find(|r| (r.width() - 90.0).abs() < 1.0)
+        .copied()
+        .expect("the buffer field");
+    assert!(
+        label.min.x > field.max.x,
+        "the toggle should sit to the right of the Buffer field, got {label:?} vs {field:?}"
+    );
+    // Set in the same size as the label it now sits beside.
+    let height_of = |needle: &str| -> Option<f32> {
+        out.shapes.iter().find_map(|s| match &s.shape {
+            egui::epaint::Shape::Text(t) if t.galley.text() == needle => {
+                Some(t.galley.rect.height())
+            }
+            _ => None,
+        })
+    };
+    assert_eq!(
+        height_of("Aggressive Low Latency"),
+        height_of("Player"),
+        "the toggle should be set in the same size as the row's labels"
+    );
+    assert!(!app.watch_low_latency, "off by default");
+    assert!(
+        buffer_live(&ctx, &out),
+        "the buffer field is live while unticked"
+    );
+
+    click_at(&mut app, &ctx, label.center(), size);
+    assert!(app.watch_low_latency, "a click on the label ticks it");
+    assert!(Config::load().low_latency, "and it is saved at once");
+    let out = drive_frames(&mut app, &ctx, size, 2);
+    assert!(
+        !buffer_live(&ctx, &out),
+        "the buffer field is greyed out while ticked"
+    );
+
+    // A fresh app opens with it ticked.
+    let (reopened, _rt2) = test_app_with(Config::load());
+    assert!(reopened.watch_low_latency);
+
+    std::env::remove_var("XDG_CONFIG_HOME");
 }
 
 /// Clicking `Restart` tears the previous session down before the new one is brought
@@ -519,7 +592,7 @@ fn clicking_restart_replaces_the_live_watch_session() {
         let mut g = app.state.lock().unwrap();
         g.watch = Mode::Watching;
         g.watch_session = Some(previous);
-        g.watch_applied = Some((Player::Mpv, None));
+        g.watch_applied = Some((Player::Mpv, None, false));
     }
 
     let ctx = egui::Context::default();
@@ -548,7 +621,7 @@ fn clicking_restart_replaces_the_live_watch_session() {
     let g = app.state.lock().unwrap();
     assert_eq!(
         g.watch_applied,
-        Some((Player::None, Some(120))),
+        Some((Player::None, Some(120), false)),
         "the record moves to the player/buffer shown on screen"
     );
     let session = g

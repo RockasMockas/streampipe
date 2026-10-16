@@ -107,6 +107,8 @@ pub struct App {
     pub watch_player: Player,
     /// The buffer field on the Watch tab, in milliseconds (empty = auto).
     pub watch_buffer: String,
+    /// The "Aggressive Low Latency" checkbox on the Watch tab.
+    pub watch_low_latency: bool,
     /// The initial player volume on the Watch tab, in percent (0-100).
     pub watch_volume: u8,
     /// The last copied box and when, for the transient toast.
@@ -167,6 +169,7 @@ impl App {
         // The slider's range is 0..=100; the `min` only guards a value restored from
         // a hand-edited config.
         let watch_volume = config.volume.min(100);
+        let watch_low_latency = config.low_latency;
         // Self-heal a stored broadcast ticket the current wire format rejects (an
         // older build, or a test-polluted config, can leave a garbage string): drop
         // it, persist the removal, and flag the first idle frame to mint a fresh
@@ -201,6 +204,7 @@ impl App {
             show_bearer: false,
             watch_player,
             watch_buffer,
+            watch_low_latency,
             watch_volume,
             copied: None,
             toast: None,

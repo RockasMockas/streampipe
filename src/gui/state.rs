@@ -98,9 +98,9 @@ pub struct SharedState {
     /// The running watch task, if any. Broadcasting and watching are independent
     /// sessions that may run at the same time, so each track owns its own handle.
     pub watch_session: Option<JoinHandle<()>>,
-    /// What the live watch session was launched with: `(player, buffer_ms)`, or
-    /// `None` while no watch session is up.
-    pub watch_applied: Option<(Player, Option<u64>)>,
+    /// What the live watch session was launched with: `(player, buffer_ms,
+    /// low_latency)`, or `None` while no watch session is up.
+    pub watch_applied: Option<(Player, Option<u64>, bool)>,
     /// Whether the live watch session is currently receiving media from the
     /// broadcaster: `false` while idle, connecting, connected-but-waiting, or after
     /// the stream ends.
@@ -164,7 +164,7 @@ pub struct UiSnapshot {
     pub watch: Mode,
     /// What the live watch session was launched with (see
     /// [`SharedState::watch_applied`]); `None` while the watch track is idle.
-    pub watch_applied: Option<(Player, Option<u64>)>,
+    pub watch_applied: Option<(Player, Option<u64>, bool)>,
     /// Whether the live watch session is receiving media, so the tab can tell
     /// "playing" from "waiting for the streamer".
     pub watch_receiving: bool,
@@ -517,6 +517,8 @@ pub struct WatchParams {
     pub play_addr: String,
     /// The jitter buffer in milliseconds, `None` for lowest latency.
     pub buffer_ms: Option<u64>,
+    /// Aggressive Low Latency, see [`ViewerConfig::low_latency`].
+    pub low_latency: bool,
     /// The player's startup volume in percent (0-100), 100 for its own default.
     pub volume: u8,
 }
@@ -605,7 +607,7 @@ pub fn spawn_watch(
         let mut g = state.lock().unwrap();
         g.watch = Mode::Starting;
         g.watch_error = None;
-        g.watch_applied = Some((params.player, params.buffer_ms));
+        g.watch_applied = Some((params.player, params.buffer_ms, params.low_latency));
         if let Some(previous) = &previous {
             previous.abort();
         }
@@ -692,6 +694,7 @@ pub fn spawn_watch(
             player_path: params.player_path,
             no_launch: false,
             buffer: params.buffer_ms.map(Duration::from_millis),
+            low_latency: params.low_latency,
             volume: params.volume,
             stats: true,
             media_state: Some(media_tx),

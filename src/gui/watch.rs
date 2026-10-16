@@ -13,6 +13,11 @@ use super::{
     truncate, App, ACCENT, ERROR, WATCH_ACCENT,
 };
 
+/// The hover text of the "Aggressive Low Latency" checkbox.
+pub const LOW_LATENCY_TOOLTIP: &str = "Lower latency, at the cost of more smearing and \
+    dropped frames.\n\n The Buffer setting is ignored \
+    while this is on.";
+
 /// Parse a buffer field (milliseconds) into an option; blank or invalid is `None`
 /// (lowest latency).
 pub fn parse_buffer_ms(text: &str) -> Option<u64> {
@@ -195,7 +200,10 @@ impl App {
         let big = ui.style().text_styles[&egui::TextStyle::Body].size * 1.3;
         let prop = egui::FontId::proportional(big);
         let box_h = big * 1.3;
-        ui.horizontal(|ui| {
+        // `horizontal_wrapped` so a min-width window drops the latency toggle to a line
+        // of its own instead of running it off the edge; at any normal width it stays
+        // on the row.
+        ui.horizontal_wrapped(|ui| {
             ui.label(egui::RichText::new("Player").size(big));
             // Deliberately NOT gated on `!busy`: the viewer picks a player mid-session
             // and presses `Restart` to apply it, so retuning playback is one click
@@ -212,15 +220,22 @@ impl App {
             // A stable id, so the buffer field's focus can be read (for the focus glow).
             let buffer_id = egui::Id::new("watch_buffer_input");
             // Also live while a session is up: edit the buffer, press `Restart`, and the
-            // new session launches with it.
-            let buffer_resp = ui.add_sized(
-                [90.0, box_h],
-                egui::TextEdit::singleline(&mut self.watch_buffer)
-                    .id(buffer_id)
-                    .hint_text(egui::RichText::new("auto").size(big))
-                    .font(prop.clone())
-                    .vertical_align(egui::Align::Center),
-            );
+            // new session launches with it. Greyed out under Aggressive Low Latency,
+            // which plays with no buffer whatever it says.
+            let low_latency = self.watch_low_latency;
+            let buffer_resp = ui
+                .add_enabled_ui(!low_latency, |ui| {
+                    ui.add_sized(
+                        [90.0, box_h],
+                        egui::TextEdit::singleline(&mut self.watch_buffer)
+                            .id(buffer_id)
+                            .hint_text(egui::RichText::new("auto").size(big))
+                            .font(prop.clone())
+                            .vertical_align(egui::Align::Center),
+                    )
+                })
+                .inner
+                .on_disabled_hover_text("Aggressive Low Latency plays with no buffer.");
             // A soft accent glow around the focused buffer field (same halo language as
             // the ticket box's focus ring).
             if ui.ctx().memory(|m| m.has_focus(buffer_id)) {
@@ -230,6 +245,22 @@ impl App {
                     ui.style().visuals.widgets.inactive.corner_radius,
                     ACCENT,
                 );
+            }
+            // Aggressive Low Latency at the right end of this row, in the same size and
+            // colour as the two labels, its explanation on the checkbox's own hover text.
+            // Live while a session is up like the two controls before it (tick it, press
+            // `Restart`), and persisted on the click like the volume, so the app reopens
+            // with it as it was left.
+            ui.add_space(12.0);
+            let toggle = ui
+                .checkbox(
+                    &mut self.watch_low_latency,
+                    egui::RichText::new("Aggressive Low Latency").size(big),
+                )
+                .on_hover_text(LOW_LATENCY_TOOLTIP);
+            if toggle.changed() && self.config.low_latency != self.watch_low_latency {
+                self.config.low_latency = self.watch_low_latency;
+                self.config.save();
             }
         });
 
@@ -376,10 +407,12 @@ impl App {
             // Tell the viewer an edit is pending, so they know one click (`Restart`)
             // applies it. Compares the *parsed* buffer, so `" 90 "`, `"90"` and
             // unparseable input each collapse to one value and cannot flicker the line.
-            if busy
-                && snap.watch_applied
-                    != Some((self.watch_player, parse_buffer_ms(&self.watch_buffer)))
-            {
+            let shown = (
+                self.watch_player,
+                parse_buffer_ms(&self.watch_buffer),
+                self.watch_low_latency,
+            );
+            if busy && snap.watch_applied != Some(shown) {
                 ui.add_space(4.0);
                 ui.weak("Press 'Restart' button to apply changes.");
             }
@@ -453,14 +486,17 @@ impl App {
             .map(PathBuf::from);
         let play_addr = self.config.play_addr.clone();
         let buffer_ms = parse_buffer_ms(&self.watch_buffer);
+        let low_latency = self.watch_low_latency;
         // The slider's range is 0..=100; the `min` only guards a value restored from a
         // hand-edited config.
         let volume = self.watch_volume.min(100);
 
-        // Persist the last-used buffer, volume and ticket. The default player is owned by
-        // Options (it is the value auto-selected on the Watch tab at open), so a
-        // quick-switch here only affects this session and must not overwrite it.
+        // Persist the last-used buffer, latency mode, volume and ticket. The default
+        // player is owned by Options (it is the value auto-selected on the Watch tab at
+        // open), so a quick-switch here only affects this session and must not
+        // overwrite it.
         self.config.buffer_ms = buffer_ms;
+        self.config.low_latency = low_latency;
         self.config.volume = volume;
         self.config.note_ticket(&ticket_text);
         self.config.save();
@@ -481,6 +517,7 @@ impl App {
                 player_path,
                 play_addr,
                 buffer_ms,
+                low_latency,
                 volume,
             },
         );
@@ -495,6 +532,7 @@ impl App {
             .buffer_ms
             .map(|ms| ms.to_string())
             .unwrap_or_default();
+        self.watch_low_latency = self.config.low_latency;
         self.watch_volume = self.config.volume.min(100);
     }
 }

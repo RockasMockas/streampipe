@@ -9,8 +9,9 @@
 use std::time::{Duration, Instant};
 
 use streampipe::rtp::{
-    nack_timing, reorder_timeout_for, Reorder, NACK_PENDING, NACK_TRIES, REORDER_TIMEOUT,
-    REORDER_TIMEOUT_MAX, REORDER_TIMEOUT_MIN, REORDER_TIMEOUT_NACK_MAX,
+    low_latency_timing, nack_timing, reorder_timeout_for, Reorder, LOW_LATENCY_AUDIO_HOLD_MAX,
+    LOW_LATENCY_FEC_HOLD, LOW_LATENCY_HOLD_MAX, LOW_LATENCY_REORDER, NACK_PENDING, NACK_TRIES,
+    REORDER_TIMEOUT, REORDER_TIMEOUT_MAX, REORDER_TIMEOUT_MIN, REORDER_TIMEOUT_NACK_MAX,
 };
 
 #[test]
@@ -230,4 +231,90 @@ fn nack_timing_leaves_room_for_two_resends() {
     assert_eq!(nack_timing(Some(ms(600)), ms(1)).0, REORDER_TIMEOUT_MAX);
     // Across the world: capped, so a lost resend cannot stall for seconds.
     assert_eq!(nack_timing(None, ms(400)).0, REORDER_TIMEOUT_NACK_MAX);
+}
+
+#[test]
+fn low_latency_timing_only_asks_for_resends_that_can_land() {
+    let ms = Duration::from_millis;
+    // No round trip known yet: reordering only, nothing to ask for.
+    assert_eq!(
+        low_latency_timing(None, true, false),
+        (LOW_LATENCY_REORDER, 0)
+    );
+    // A short path: one resend, held for the round trip plus slack.
+    assert_eq!(low_latency_timing(Some(ms(20)), true, false), (ms(35), 1));
+    // Right at the cap, the resend still fits.
+    assert_eq!(
+        low_latency_timing(Some(ms(65)), true, false),
+        (LOW_LATENCY_HOLD_MAX, 1)
+    );
+    // Too far for the cap: no resend, and no reason to hold for one.
+    assert_eq!(
+        low_latency_timing(Some(ms(100)), true, false),
+        (LOW_LATENCY_REORDER, 0)
+    );
+    // With parity coming, video waits for its frame's parity instead.
+    assert_eq!(
+        low_latency_timing(Some(ms(100)), true, true),
+        (LOW_LATENCY_FEC_HOLD, 0)
+    );
+    assert_eq!(low_latency_timing(Some(ms(60)), true, true), (ms(75), 1));
+    // Audio is the clock: a tighter cap, and no parity wait.
+    assert_eq!(low_latency_timing(Some(ms(20)), false, true), (ms(35), 1));
+    assert_eq!(
+        low_latency_timing(Some(ms(30)), false, false),
+        (LOW_LATENCY_REORDER, 0)
+    );
+    for rtt in [0, 5, 25, 40, 65, 80, 200, 2000] {
+        for fec in [false, true] {
+            assert!(low_latency_timing(Some(ms(rtt)), true, fec).0 <= LOW_LATENCY_HOLD_MAX);
+            assert!(low_latency_timing(Some(ms(rtt)), false, fec).0 <= LOW_LATENCY_AUDIO_HOLD_MAX);
+        }
+    }
+}
+
+#[test]
+fn low_latency_reorder_never_emits_out_of_order() {
+    // A packet that turns up after its hole was given up on: the standard
+    // reorder hands it on for the player's own reorder queue, the low latency
+    // one (whose player has none) drops it.
+    let t0 = Instant::now();
+    let late = t0 + Duration::from_secs(1);
+    for (mut r, passes) in [
+        (Reorder::default(), true),
+        (Reorder::low_latency(true), false),
+    ] {
+        r.push(1, vec![1], t0);
+        assert!(r.push(3, vec![3], t0).is_empty());
+        assert_eq!(r.poll(late), vec![vec![3]], "the hole times out");
+        assert_eq!(r.push(2, vec![2], late).is_empty(), !passes);
+        assert_eq!(
+            r.push(4, vec![4], late),
+            vec![vec![4]],
+            "and the stream goes on"
+        );
+    }
+}
+
+#[test]
+fn low_latency_reorder_holds_briefly_and_asks_at_most_once() {
+    let ms = Duration::from_millis;
+    let t0 = Instant::now();
+    // Before the round trip is known it asks for nothing and holds only for
+    // reordering.
+    let mut r = Reorder::low_latency(true);
+    r.push(1, vec![1], t0);
+    assert!(r.push(3, vec![3], t0).is_empty());
+    assert!(r.take_nacks(t0).is_empty());
+    assert!(r.poll(t0 + LOW_LATENCY_REORDER / 2).is_empty());
+    assert_eq!(r.poll(t0 + LOW_LATENCY_REORDER), vec![vec![3]]);
+    // Timed for a short path: one resend, never a second.
+    let mut r = Reorder::low_latency(true);
+    let (hold, tries) = low_latency_timing(Some(ms(20)), true, false);
+    r.set_timing(hold, hold);
+    r.set_nack_tries(tries);
+    r.push(1, vec![1], t0);
+    r.push(3, vec![3], t0);
+    assert_eq!(r.take_nacks(t0), vec![2]);
+    assert!(r.take_nacks(t0 + hold * 4).is_empty(), "one try only");
 }

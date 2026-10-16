@@ -50,11 +50,13 @@ use tokio::{
 };
 
 use crate::{
+    fec::{self, FecDecoder, FecEncoder},
     pace::{Pacer, PACE_MAX_DELAY},
     rtp::{
-        self, nack_timing, reorder_timeout_for, Codec, History, ParameterSets, Reorder, RtpInfo,
-        HISTORY_AUDIO, HISTORY_VIDEO, NACK_AUDIO, NACK_VIDEO, TAG_AUDIO, TAG_EPOCH, TAG_FRAGMENT,
-        TAG_KEYFRAME_REQ, TAG_NACK, TAG_SESSION, TAG_VIDEO,
+        self, low_latency_timing, nack_timing, reorder_timeout_for, Codec, History, ParameterSets,
+        Reorder, RtpInfo, HISTORY_AUDIO, HISTORY_VIDEO, NACK_AUDIO, NACK_VIDEO, TAG_AUDIO,
+        TAG_EPOCH, TAG_FEC, TAG_FRAGMENT, TAG_KEYFRAME_REQ, TAG_LOW_LATENCY, TAG_NACK, TAG_SESSION,
+        TAG_VIDEO,
     },
     sdp::{self, MediaHeader, MediaKind, OfferMedia, SessionHeader},
     whip::{self, AbortOnDrop, Answer, WhipRequest},
@@ -91,6 +93,12 @@ pub const STATS_INTERVAL: Duration = Duration::from_secs(5);
 /// How often a viewer checks its reorder buffers for resends to ask for again
 /// and holes that timed out.
 const REORDER_TICK: Duration = Duration::from_millis(10);
+/// [`REORDER_TICK`] for an Aggressive Low Latency viewer, whose holds are a
+/// few tens of milliseconds and should end on time.
+const LOW_LATENCY_REORDER_TICK: Duration = Duration::from_millis(5);
+/// How long after its last parity packet a low latency viewer still counts on
+/// the host's error correction when it times its holes.
+const FEC_ACTIVE: Duration = Duration::from_secs(2);
 /// How often a viewer re-reads the round-trip time its hole timing derives from.
 const RTT_INTERVAL: Duration = Duration::from_secs(1);
 /// How long a viewer waits before redialing a host that went away.
@@ -113,6 +121,15 @@ const FFPLAY_VOLUME_OFFSET: u8 = 20;
 const WINDOW_WIDTH: u32 = 1280;
 /// Height of the launched player window, in pixels (see [`WINDOW_WIDTH`]).
 const WINDOW_HEIGHT: u32 = 720;
+/// mpv's audio output buffer under Aggressive Low Latency, in seconds.
+///
+/// Audio is mpv's master clock, so its output buffer is latency the whole
+/// picture inherits: the standard 0.5 s becomes 0.5 s behind live once it
+/// fills. A tenth of a second still gives the speed script's resampling slack
+/// and absorbs the spread of a paced keyframe arriving behind its audio.
+const LOW_LATENCY_AUDIO_BUFFER: &str = "0.1";
+/// VLC's `--network-caching` under Aggressive Low Latency, in milliseconds.
+const LOW_LATENCY_VLC_CACHING: u32 = 30;
 
 /// The players `connect-whip` knows how to launch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
@@ -138,6 +155,20 @@ impl Player {
         path: Option<&Path>,
         volume: u8,
         script: Option<&Path>,
+    ) -> Vec<String> {
+        self.command_for(sdp, buffer, path, volume, script, false)
+    }
+
+    /// [`Player::command`], or with `low_latency` the Aggressive Low Latency
+    /// tuning, which plays with no buffer whatever `buffer` says.
+    pub fn command_for(
+        &self,
+        sdp: &Path,
+        buffer: Option<Duration>,
+        path: Option<&Path>,
+        volume: u8,
+        script: Option<&Path>,
+        low_latency: bool,
     ) -> Vec<String> {
         let file = sdp.display().to_string();
         // The custom path replaces the binary name, the flags stay the player's.
@@ -172,6 +203,21 @@ impl Player {
                     cmd.push(format!("--input-conf={}", conf.display()));
                 }
                 match buffer {
+                    _ if low_latency => {
+                        cmd.push("--no-cache".into());
+                        cmd.push("--profile=low-latency".into());
+                        // One list, which replaces the profile's own, so its
+                        // `fflags` is restated. `max_delay=0` and
+                        // `reorder_queue_size=0` turn off lavf's RTP reorder
+                        // queue: the viewer already hands packets over in
+                        // order, and that queue stalls on every real loss for
+                        // up to 100 ms before it gives up and moves on.
+                        cmd.push(
+                            "--demuxer-lavf-o=fflags=+nobuffer,max_delay=0,\
+                             reorder_queue_size=0,buffer_size=4194304"
+                                .into(),
+                        );
+                    }
                     Some(ms) => {
                         cmd.push("--cache=yes".into());
                         cmd.push(format!("--demuxer-readahead-secs={}", ms.as_secs_f64()));
@@ -198,17 +244,44 @@ impl Player {
                 // output real slack so resampled audio tracks the speed changes.
                 // Must come after `--profile=low-latency` to override its
                 // `audio-buffer=0` (last occurrence of a scalar wins).
-                cmd.push("--audio-buffer=0.5".into());
+                // Aggressive Low Latency keeps far less, see
+                // `LOW_LATENCY_AUDIO_BUFFER`.
+                let audio_buffer = if low_latency {
+                    LOW_LATENCY_AUDIO_BUFFER
+                } else {
+                    "0.5"
+                };
+                cmd.push(format!("--audio-buffer={audio_buffer}"));
+                // The profile's `video-latency-hacks` keeps a single decoded
+                // frame, and on an SDP stream (which states no frame rate) mpv
+                // then knows no frame duration, so it never drops a late
+                // frame: the picture can go no faster than the screen
+                // refreshes. A 60 fps stream on a 60 Hz screen never wins back
+                // a stall or a catch-up at `speed` > 1, while the audio does,
+                // and the two stay apart for good. Off, mpv looks one frame
+                // ahead and drops late frames until the picture is back on
+                // the audio clock.
+                if low_latency || buffer.is_none() {
+                    cmd.push("--video-latency-hacks=no".into());
+                }
                 // The buffer-drain control script, staged on disk by `launch()`;
-                // goes before the SDP, which must stay last.
+                // goes before the SDP, which must stay last. Under Aggressive
+                // Low Latency it drains toward the live edge harder.
                 if let Some(script) = script {
+                    if low_latency {
+                        cmd.push("--script-opts=streampipe-aggressive=yes".into());
+                    }
                     cmd.push(format!("--script={}", script.display()));
                 }
                 cmd.push(file);
                 cmd
             }
             Player::Vlc => {
-                let caching = buffer.map(|d| d.as_millis()).unwrap_or(100);
+                let caching = if low_latency {
+                    u128::from(LOW_LATENCY_VLC_CACHING)
+                } else {
+                    buffer.map(|d| d.as_millis()).unwrap_or(100)
+                };
                 vec![
                     bin("vlc"),
                     format!("--network-caching={caching}"),
@@ -250,6 +323,17 @@ impl Player {
                     "0".into(),
                 ];
                 match buffer {
+                    _ if low_latency => {
+                        // No reorder queue in the RTP demuxer (the viewer
+                        // already orders the packets, and the queue stalls on
+                        // every real loss), no decoder delay, and late frames
+                        // dropped to stay on the audio clock.
+                        cmd.extend(["-fflags".into(), "nobuffer".into()]);
+                        cmd.extend(["-flags".into(), "low_delay".into()]);
+                        cmd.extend(["-max_delay".into(), "0".into()]);
+                        cmd.extend(["-reorder_queue_size".into(), "0".into()]);
+                        cmd.push("-framedrop".into());
+                    }
                     Some(ms) => {
                         // Drop corrupt packets instead of feeding them to the
                         // decoder, and let the RTP receiver wait for reordering.
@@ -339,6 +423,8 @@ pub struct Counters {
     pub nacked: AtomicU64,
     /// Lost packets the host sent again.
     pub resent: AtomicU64,
+    /// Lost packets a low latency viewer rebuilt from the host's parity.
+    pub recovered: AtomicU64,
 }
 
 impl Counters {
@@ -350,7 +436,7 @@ impl Counters {
         tracing::debug!(
             "media tunnel stats: {} packets / {} bytes forwarded, \
              {} fragmented, {} oversized dropped, {} unwanted payload types dropped, \
-             {} undeliverable, {} keyframe requests, {} nacked, {} resent",
+             {} undeliverable, {} keyframe requests, {} nacked, {} resent, {} recovered",
             self.get(&self.forwarded),
             self.get(&self.forwarded_bytes),
             self.get(&self.fragmented),
@@ -360,6 +446,7 @@ impl Counters {
             self.get(&self.keyframes),
             self.get(&self.nacked),
             self.get(&self.resent),
+            self.get(&self.recovered),
         );
     }
 
@@ -367,7 +454,7 @@ impl Counters {
         tracing::info!(
             "media tunnel closed: {} packets / {} bytes forwarded, \
              {} fragmented, {} oversized dropped, {} unwanted payload types dropped, \
-             {} undeliverable, {} keyframe requests, {} nacked, {} resent",
+             {} undeliverable, {} keyframe requests, {} nacked, {} resent, {} recovered",
             self.get(&self.forwarded),
             self.get(&self.forwarded_bytes),
             self.get(&self.fragmented),
@@ -377,6 +464,7 @@ impl Counters {
             self.get(&self.keyframes),
             self.get(&self.nacked),
             self.get(&self.resent),
+            self.get(&self.recovered),
         );
     }
 
@@ -645,6 +733,9 @@ pub enum Frame {
     Audio(Bytes),
     /// A packet the viewer lost and asked for again (see [`ViewerEvent::Nack`]).
     Resend(MediaKind, Bytes),
+    /// Parity for the video frame just forwarded, for a low latency viewer
+    /// (see [`crate::fec`]).
+    Fec(Bytes),
 }
 
 /// What the viewer acceptor tells the media session.
@@ -673,6 +764,11 @@ pub enum ViewerEvent {
         kind: MediaKind,
         /// The RTP sequence numbers to resend.
         seqs: Vec<u16>,
+    },
+    /// A viewer runs Aggressive Low Latency and wants error correction.
+    LowLatency {
+        /// Identifier of the viewer.
+        id: u64,
     },
     /// A viewer is gone.
     Left {
@@ -984,6 +1080,14 @@ async fn handle_viewer(accepting: Accepting, tx: mpsc::Sender<ViewerEvent>) -> R
                         resend.push_back((tag, b, Instant::now()));
                         Ok(())
                     }
+                    // Parity rides the video queue right behind its frame, and
+                    // is paced and counted like the video it protects.
+                    Frame::Fec(b) => {
+                        let now = Instant::now();
+                        pacer.on_arrival(1 + b.len(), now);
+                        video.push_back((TAG_FEC, b, now));
+                        Ok(())
+                    }
                 };
                 if sent.is_err() {
                     return;
@@ -1019,6 +1123,7 @@ async fn handle_viewer(accepting: Accepting, tx: mpsc::Sender<ViewerEvent>) -> R
                                     .fetch_add(seqs.len() as u64, Ordering::Relaxed);
                                 ViewerEvent::Nack { id, kind, seqs }
                             }
+                            Some(TAG_LOW_LATENCY) => ViewerEvent::LowLatency { id },
                             _ => continue,
                         };
                         if tx.send(event).await.is_err() {
@@ -1138,6 +1243,9 @@ pub struct Viewer {
     pub tx: mpsc::Sender<Frame>,
     /// Whether the keyframe gate of this viewer is open.
     pub streaming: bool,
+    /// Whether the viewer runs Aggressive Low Latency, and so gets parity for
+    /// the video and every audio packet twice.
+    pub low_latency: bool,
 }
 
 /// The host side of the media session.
@@ -1163,6 +1271,8 @@ pub struct Host {
     pub video_history: History,
     /// The audio packets recently forwarded, for resending.
     pub audio_history: History,
+    /// The video frame in progress, for the low latency viewers' parity.
+    pub fec: FecEncoder,
     /// The connected viewers.
     pub viewers: Vec<Viewer>,
     /// Counter for the entity tags of the resources.
@@ -1210,6 +1320,7 @@ impl Host {
             sets: ParameterSets::default(),
             video_history: History::new(HISTORY_VIDEO),
             audio_history: History::new(HISTORY_AUDIO),
+            fec: FecEncoder::default(),
             viewers: Vec::new(),
             etag_seq: 0,
             mids: Vec::new(),
@@ -1268,6 +1379,7 @@ impl Host {
                     id,
                     tx,
                     streaming: false,
+                    low_latency: false,
                 });
                 let line = format!(
                     "viewer {id} connected on udp://127.0.0.1:{port}, \
@@ -1313,6 +1425,19 @@ impl Host {
                         try_send(&viewer.tx, &Frame::Resend(kind, packet), &self.counters);
                         self.counters.resent.fetch_add(1, Ordering::Relaxed);
                     }
+                }
+            }
+            ViewerEvent::LowLatency { id } => {
+                // Repeated every second by the viewer; only the first says so.
+                if let Some(viewer) = self
+                    .viewers
+                    .iter_mut()
+                    .find(|v| v.id == id && !v.low_latency)
+                {
+                    viewer.low_latency = true;
+                    tracing::info!(
+                        "viewer {id} runs aggressive low latency, sending it error correction"
+                    );
                 }
             }
             ViewerEvent::Left { id } => {
@@ -1365,6 +1490,7 @@ impl Host {
         self.sets = ParameterSets::default();
         self.video_history.clear();
         self.audio_history.clear();
+        self.fec.clear();
         self.header = SessionHeader {
             gen: 0,
             media: Vec::new(),
@@ -1416,6 +1542,7 @@ impl Host {
         self.sets = ParameterSets::default();
         self.video_history.clear();
         self.audio_history.clear();
+        self.fec.clear();
         for viewer in &mut self.viewers {
             viewer.streaming = false;
         }
@@ -1502,6 +1629,14 @@ impl Host {
             MediaKind::Video => self.video_history.insert(info.seq, data.clone()),
             MediaKind::Audio => self.audio_history.insert(info.seq, data.clone()),
         }
+        // What the low latency viewers get on top: the frame's parity once its
+        // last packet is out, and the previous audio packet again behind this
+        // one, so a lone lost audio packet is back 20 ms later without a round
+        // trip. The encoder tracks frames even with nobody to protect them for.
+        let (block, prev_audio) = match kind {
+            MediaKind::Video => (self.fec.push(&info, data.clone()), None),
+            MediaKind::Audio => (None, self.audio_history.get(info.seq.wrapping_sub(1))),
+        };
 
         let size = data.len() as u64;
         let keyframe = kind == MediaKind::Video && rtp::starts_keyframe(payload, codec);
@@ -1543,15 +1678,36 @@ impl Host {
                 try_send(&viewer.tx, &Frame::Epoch, &self.counters);
             }
             try_send(&viewer.tx, &frame, &self.counters);
+            if let Some(prev) = prev_audio.as_ref().filter(|_| viewer.low_latency) {
+                try_send(&viewer.tx, &Frame::Audio(prev.clone()), &self.counters);
+            }
         }
         if opened > 0 {
             tracing::info!("opened the gate for {opened} viewer(s) at a keyframe");
+        }
+        if let Some(block) = block {
+            self.send_parity(&block);
         }
         let count = self.viewers.len() as u64;
         self.counters.forwarded.fetch_add(count, Ordering::Relaxed);
         self.counters
             .forwarded_bytes
             .fetch_add(frame_len(&frame) as u64 * count, Ordering::Relaxed);
+    }
+
+    /// Send the parity of a finished video frame to the low latency viewers
+    /// that are streaming it.
+    fn send_parity(&self, block: &fec::Block) {
+        let wanted = || self.viewers.iter().filter(|v| v.low_latency && v.streaming);
+        if wanted().next().is_none() {
+            return;
+        }
+        for parity in fec::encode(block) {
+            let frame = Frame::Fec(Bytes::from(parity));
+            for viewer in wanted() {
+                try_send(&viewer.tx, &frame, &self.counters);
+            }
+        }
     }
 
     /// Put or replace the session header entry of a media kind.
@@ -1794,7 +1950,11 @@ fn new_rtc() -> Rtc {
 /// The byte size of a frame, for the counters.
 fn frame_len(frame: &Frame) -> usize {
     match frame {
-        Frame::Header(b) | Frame::Video(b) | Frame::Audio(b) | Frame::Resend(_, b) => b.len(),
+        Frame::Header(b)
+        | Frame::Video(b)
+        | Frame::Audio(b)
+        | Frame::Resend(_, b)
+        | Frame::Fec(b) => b.len(),
         Frame::Epoch => 0,
     }
 }
@@ -1818,6 +1978,7 @@ fn clone_frame(frame: &Frame) -> Frame {
         Frame::Video(b) => Frame::Video(b.clone()),
         Frame::Audio(b) => Frame::Audio(b.clone()),
         Frame::Resend(kind, b) => Frame::Resend(*kind, b.clone()),
+        Frame::Fec(b) => Frame::Fec(b.clone()),
     }
 }
 
@@ -1933,6 +2094,11 @@ pub struct ViewerConfig {
     pub no_launch: bool,
     /// How much jitter buffer to give the player, `None` for lowest latency.
     pub buffer: Option<Duration>,
+    /// Aggressive Low Latency: no player buffer whatever `buffer` says, holes
+    /// held only while a quick resend or the host's parity can fill them, and
+    /// error correction asked of the host. Lower latency for more smearing and
+    /// dropped frames.
+    pub low_latency: bool,
     /// The player's startup volume in percent (0-100), 100 for its own default.
     pub volume: u8,
     /// Whether to log periodic counters.
@@ -2031,6 +2197,19 @@ pub async fn connect_whip(endpoint: Endpoint, cfg: ViewerConfig) -> Result<()> {
     let mut player: Option<PlayerHandle> = None;
     let mut written: Option<String> = None;
     let mut launched = String::new();
+    // A launched player takes a second or so to open its port, and the read
+    // loop must not wait for it: QUIC would queue that second of media and
+    // hand it over in one burst, starting the player a second behind live for
+    // good. Media is dropped until the player listens instead, and the gate
+    // then opens at a fresh keyframe. Each launch has an id, so the probe of a
+    // replaced player cannot open the gate for its successor. The probe binds
+    // the player's port for an instant every few ms, so it lives in a set that
+    // aborts it when replaced or when the viewer stops: a stray one could take
+    // the port from the next player.
+    let (ready_tx, mut ready_rx) = mpsc::channel::<u64>(4);
+    let mut launch_id: u64 = 0;
+    let mut player_ready = false;
+    let mut probe: JoinSet<()> = JoinSet::new();
 
     loop {
         tracing::info!("connecting to {}", cfg.addr.id);
@@ -2045,9 +2224,21 @@ pub async fn connect_whip(endpoint: Endpoint, cfg: ViewerConfig) -> Result<()> {
         // its round-trip time, otherwise the player's zero-buffer RTP receiver
         // drops every reordered packet and the log fills with `max delay
         // reached` and corrupt pictures.
+        // Aggressive Low Latency never buffers in the player: every
+        // millisecond there is a millisecond behind live.
         let rtt = selected_rtt(&conn);
-        let buffer = auto_buffer(cfg.buffer, rtt);
-        if cfg.buffer.is_none() && buffer.is_some() {
+        let buffer = if cfg.low_latency {
+            None
+        } else {
+            auto_buffer(cfg.buffer, rtt)
+        };
+        if cfg.low_latency {
+            tracing::info!(
+                "aggressive low latency (rtt {} ms): no player buffer, lost packets \
+                 are only waited for while they can still be repaired",
+                rtt.unwrap_or_default().as_millis()
+            );
+        } else if cfg.buffer.is_none() && buffer.is_some() {
             eprintln!(
                 "long-distance path (rtt {} ms), buffering {} ms",
                 rtt.unwrap_or_default().as_millis(),
@@ -2081,9 +2272,24 @@ pub async fn connect_whip(endpoint: Endpoint, cfg: ViewerConfig) -> Result<()> {
         // window is sized from `--buffer` so the two reorder stages stay in
         // tandem: a bigger player buffer lets us wait a little longer for a
         // reordered packet, but never long enough to stall on a lost one.
-        let reorder_timeout = reorder_timeout_for(cfg.buffer);
-        let mut video_order = Reorder::with_timeout(reorder_timeout);
-        let mut audio_order = Reorder::with_timeout(reorder_timeout);
+        // Aggressive Low Latency holds much shorter and never emits out of
+        // order, see `Reorder::low_latency`.
+        let (mut video_order, mut audio_order) = if cfg.low_latency {
+            (Reorder::low_latency(true), Reorder::low_latency(false))
+        } else {
+            let reorder_timeout = reorder_timeout_for(cfg.buffer);
+            (
+                Reorder::with_timeout(reorder_timeout),
+                Reorder::with_timeout(reorder_timeout),
+            )
+        };
+        // Low latency only: rebuilds lost video from the host's parity, and
+        // when that parity last arrived (a host that predates it sends none).
+        let mut fec = FecDecoder::default();
+        let mut last_parity: Option<Instant> = None;
+        // The low latency repair state last logged: video and audio resend
+        // tries, and whether parity is coming.
+        let mut repair_logged: Option<(u8, u8, bool)> = None;
 
         // Decouple the QUIC read loop from the localhost UDP send. The read
         // loop pushes packets onto this bounded channel and never waits for the
@@ -2170,7 +2376,11 @@ pub async fn connect_whip(endpoint: Endpoint, cfg: ViewerConfig) -> Result<()> {
         wait_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let mut stats_tick = interval(STATS_INTERVAL);
         stats_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        let mut reorder_tick = interval(REORDER_TICK);
+        let mut reorder_tick = interval(if cfg.low_latency {
+            LOW_LATENCY_REORDER_TICK
+        } else {
+            REORDER_TICK
+        });
         reorder_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut rtt_tick = interval(RTT_INTERVAL);
         rtt_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -2214,13 +2424,25 @@ pub async fn connect_whip(endpoint: Endpoint, cfg: ViewerConfig) -> Result<()> {
                                     let _ = player.stop.send(()).await;
                                 }
                                 launched = signature;
-                                player =
-                                    launch(&cfg, buffer, &sdp_path, ports.video, &kf_tx, &exit_tx)
-                                        .await?;
+                                player = launch(&cfg, buffer, &sdp_path, &exit_tx).await?;
+                                launch_id += 1;
+                                probe.shutdown().await;
+                                // Nothing launched (the user plays the SDP
+                                // themselves): no port to wait for.
+                                player_ready = player.is_none();
+                                if !player_ready {
+                                    forwarding = false;
+                                    let (ready_tx, id, port) =
+                                        (ready_tx.clone(), launch_id, ports.video);
+                                    probe.spawn(async move {
+                                        wait_until_listening(port).await;
+                                        let _ = ready_tx.send(id).await;
+                                    });
+                                }
                             }
                         }
                         Some(TAG_EPOCH) => {
-                            if header.as_ref().is_some_and(|h| h.has_media()) {
+                            if player_ready && header.as_ref().is_some_and(|h| h.has_media()) {
                                 if !forwarding {
                                     forwarding = true;
                                     // Only wipe the buffers when opening the gate.
@@ -2230,6 +2452,7 @@ pub async fn connect_whip(endpoint: Endpoint, cfg: ViewerConfig) -> Result<()> {
                                     reassembler.clear();
                                     video_order.clear();
                                     audio_order.clear();
+                                    fec.clear();
                                     tracing::info!("streaming from a keyframe");
                                     // The gate is open: the player now has a stream to
                                     // show, so the Watch tab can drop the "waiting" label.
@@ -2255,13 +2478,33 @@ pub async fn connect_whip(endpoint: Endpoint, cfg: ViewerConfig) -> Result<()> {
                             let order = if is_video { &mut video_order } else { &mut audio_order };
                             let now = Instant::now();
                             let emit = match rtp::parse_header(packet) {
-                                Some((info, _)) => order.push(info.seq, packet.to_vec(), now),
+                                Some((info, _)) => {
+                                    let mut emit = order.push(info.seq, packet.to_vec(), now);
+                                    // Any video packet may complete a parity
+                                    // group that is one short.
+                                    if is_video && cfg.low_latency {
+                                        for (seq, rebuilt) in fec.on_packet(info.seq, packet, now) {
+                                            counters.recovered.fetch_add(1, Ordering::Relaxed);
+                                            emit.extend(order.push(seq, rebuilt, now));
+                                        }
+                                    }
+                                    emit
+                                }
                                 None => vec![packet.to_vec()],
                             };
                             let nacks = order.take_nacks(now);
                             hand_off(&forward_tx, ports, is_video, emit, &counters);
                             send_nack(&conn, is_video, &nacks, &counters);
                             last_packet = tokio::time::Instant::now();
+                        }
+                        Some(TAG_FEC) if forwarding && cfg.low_latency => {
+                            let now = Instant::now();
+                            last_parity = Some(now);
+                            if let Some((seq, rebuilt)) = fec.on_parity(&data[1..], now) {
+                                counters.recovered.fetch_add(1, Ordering::Relaxed);
+                                let emit = video_order.push(seq, rebuilt, now);
+                                hand_off(&forward_tx, ports, true, emit, &counters);
+                            }
                         }
                         _ => {}
                     }
@@ -2280,7 +2523,34 @@ pub async fn connect_whip(endpoint: Endpoint, cfg: ViewerConfig) -> Result<()> {
                 // Keep the hole timing in step with the path: a resend takes a
                 // round trip, and the round trip moves.
                 _ = rtt_tick.tick() => {
-                    if let Some(rtt) = selected_rtt(&conn) {
+                    let rtt = selected_rtt(&conn);
+                    if cfg.low_latency {
+                        // Ask (again) for error correction: datagrams are
+                        // unreliable, and the first tick is right away.
+                        send_datagram(&conn, TAG_LOW_LATENCY, &counters);
+                        let parity = last_parity.is_some_and(|at| at.elapsed() < FEC_ACTIVE);
+                        let (video_hold, video_tries) = low_latency_timing(rtt, true, parity);
+                        let (audio_hold, audio_tries) = low_latency_timing(rtt, false, parity);
+                        video_order.set_timing(video_hold, video_hold);
+                        video_order.set_nack_tries(video_tries);
+                        audio_order.set_timing(audio_hold, audio_hold);
+                        audio_order.set_nack_tries(audio_tries);
+                        let repair = (video_tries, audio_tries, parity);
+                        if repair_logged != Some(repair) {
+                            repair_logged = Some(repair);
+                            let on = |b: bool| if b { "on" } else { "off" };
+                            tracing::info!(
+                                "aggressive low latency: video holds a lost packet up to {} ms \
+                                 (resends {}), audio up to {} ms (resends {}), error \
+                                 correction {}",
+                                video_hold.as_millis(),
+                                on(video_tries > 0),
+                                audio_hold.as_millis(),
+                                on(audio_tries > 0),
+                                on(parity),
+                            );
+                        }
+                    } else if let Some(rtt) = rtt {
                         let (timeout, renack) = nack_timing(cfg.buffer, rtt);
                         video_order.set_timing(timeout, renack);
                         audio_order.set_timing(timeout, renack);
@@ -2288,6 +2558,14 @@ pub async fn connect_whip(endpoint: Endpoint, cfg: ViewerConfig) -> Result<()> {
                 }
                 Some(()) = kf_rx.recv() => {
                     send_datagram(&conn, TAG_KEYFRAME_REQ, &counters);
+                }
+                // The player is listening: start it on a keyframe made for it,
+                // rather than wait for the publisher's next one.
+                Some(id) = ready_rx.recv() => {
+                    if id == launch_id && !player_ready {
+                        player_ready = true;
+                        send_datagram(&conn, TAG_KEYFRAME_REQ, &counters);
+                    }
                 }
                 Some(()) = exit_rx.recv() => {
                     tracing::info!("the player exited, waiting for the next keyframe");
@@ -2307,6 +2585,11 @@ pub async fn connect_whip(endpoint: Endpoint, cfg: ViewerConfig) -> Result<()> {
                 _ = wait_tick.tick() => {
                     if !forwarding {
                         tracing::info!("waiting for media from {}", cfg.addr.id);
+                        // The request sent when the player came up may have
+                        // been lost: ask again rather than wait out a long GOP.
+                        if player_ready && player.is_some() {
+                            send_datagram(&conn, TAG_KEYFRAME_REQ, &counters);
+                        }
                     }
                 }
                 _ = stats_tick.tick(), if cfg.stats => counters.log_periodic(),
@@ -2413,7 +2696,8 @@ async fn stage_mpv_script(player: Player) -> Option<PathBuf> {
     }
 }
 
-/// Launch the player and ask the host for a keyframe once it is listening.
+/// Launch the player, without waiting for it to open its port (see
+/// [`wait_until_listening`]).
 ///
 /// `buffer` is the jitter buffer for this path, see [`auto_buffer`].
 /// Returns `None` when no player is to be launched.
@@ -2421,8 +2705,6 @@ async fn launch(
     cfg: &ViewerConfig,
     buffer: Option<Duration>,
     sdp_path: &Path,
-    video_port: u16,
-    kf_tx: &mpsc::Sender<()>,
     exit_tx: &mpsc::Sender<()>,
 ) -> Result<Option<PlayerHandle>> {
     if !cfg.player.launches() {
@@ -2440,24 +2722,26 @@ async fn launch(
         tracing::info!(
             "not launching a player, play with: {}",
             cfg.player
-                .command(
+                .command_for(
                     sdp_path,
                     buffer,
                     cfg.player_path.as_deref(),
                     cfg.volume,
                     script.as_deref(),
+                    cfg.low_latency,
                 )
                 .join(" ")
         );
         return Ok(None);
     }
     let script = stage_mpv_script(cfg.player).await;
-    let command = cfg.player.command(
+    let command = cfg.player.command_for(
         sdp_path,
         buffer,
         cfg.player_path.as_deref(),
         cfg.volume,
         script.as_deref(),
+        cfg.low_latency,
     );
     let mut child = Command::new(&command[0])
         .args(&command[1..])
@@ -2480,8 +2764,6 @@ async fn launch(
         }
     });
 
-    wait_until_listening(video_port).await;
-    let _ = kf_tx.try_send(());
     Ok(Some(PlayerHandle { stop: stop_tx }))
 }
 

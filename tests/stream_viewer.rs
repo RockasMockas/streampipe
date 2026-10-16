@@ -89,6 +89,13 @@ fn player_commands_are_low_latency() {
         .unwrap();
     let abuf_i = mpv.iter().position(|a| a == "--audio-buffer=0.5").unwrap();
     assert!(abuf_i > profile_i, "audio-buffer must override the profile");
+    // The profile's latency hacks stop mpv dropping late frames, so the picture
+    // never catches up with the audio after a stall or a speed-up.
+    let hacks_i = mpv
+        .iter()
+        .position(|a| a == "--video-latency-hacks=no")
+        .unwrap_or_else(|| panic!("latency hacks left on: {mpv:?}"));
+    assert!(hacks_i > profile_i, "must override the profile");
     assert!(mpv.contains(&"--no-resume-playback".to_string()));
     assert_eq!(mpv.last().unwrap(), "/tmp/x.sdp");
 
@@ -253,6 +260,7 @@ fn a_buffer_switches_the_player_out_of_zero_buffering() {
     assert!(mpv.contains(&"--cache=yes".to_string()));
     assert!(mpv.contains(&"--no-resume-playback".to_string()));
     assert!(mpv.iter().any(|a| a.contains("max_delay=300000")));
+    assert!(!mpv.iter().any(|a| a.starts_with("--video-latency-hacks")));
 
     let ffplay = Player::Ffplay.command(path, Some(ms), None, 100, None);
     assert!(!ffplay.iter().any(|a| a == "nobuffer"));
@@ -261,6 +269,86 @@ fn a_buffer_switches_the_player_out_of_zero_buffering() {
 
     let vlc = Player::Vlc.command(path, Some(ms), None, 100, None);
     assert!(vlc.contains(&"--network-caching=300".to_string()));
+}
+
+/// Aggressive Low Latency: no player buffer even when one was asked for, no RTP
+/// reorder queue in the player (the viewer already orders the packets), a small
+/// mpv audio buffer, late frames still dropped, and the speed script told to
+/// chase the live edge.
+#[test]
+fn low_latency_player_commands_drop_every_buffer() {
+    let path = Path::new("/tmp/x.sdp");
+    let script = Some(Path::new("/tmp/bs.lua"));
+    let pair = |cmd: &[String], name: &str| {
+        let i = cmd
+            .iter()
+            .position(|a| a == name)
+            .unwrap_or_else(|| panic!("no {name} in {cmd:?}"));
+        cmd[i + 1].clone()
+    };
+    for buffer in [None, Some(Duration::from_millis(300))] {
+        let mpv = Player::Mpv.command_for(path, buffer, None, 100, script, true);
+        assert!(mpv.contains(&"--no-cache".to_string()), "{mpv:?}");
+        assert!(!mpv.contains(&"--cache=yes".to_string()), "{mpv:?}");
+        let profile = mpv
+            .iter()
+            .position(|a| a == "--profile=low-latency")
+            .expect("the low-latency profile");
+        // One lavf list (a second would replace the first), restating the
+        // profile's own fflags.
+        let lavf: Vec<&String> = mpv
+            .iter()
+            .filter(|a| a.starts_with("--demuxer-lavf-o"))
+            .collect();
+        assert_eq!(lavf.len(), 1, "{mpv:?}");
+        for opt in [
+            "fflags=+nobuffer",
+            "max_delay=0",
+            "reorder_queue_size=0",
+            "buffer_size=4194304",
+        ] {
+            assert!(lavf[0].contains(opt), "{opt} missing from {}", lavf[0]);
+        }
+        let audio = mpv
+            .iter()
+            .position(|a| a == "--audio-buffer=0.1")
+            .unwrap_or_else(|| panic!("no small audio buffer in {mpv:?}"));
+        assert!(
+            audio > profile,
+            "the audio buffer must override the profile"
+        );
+        assert!(!mpv.contains(&"--audio-buffer=0.5".to_string()));
+        let hacks = mpv
+            .iter()
+            .position(|a| a == "--video-latency-hacks=no")
+            .unwrap_or_else(|| panic!("latency hacks left on: {mpv:?}"));
+        assert!(hacks > profile, "must override the profile");
+        assert!(mpv.contains(&"--script-opts=streampipe-aggressive=yes".to_string()));
+        assert!(mpv.contains(&"--script=/tmp/bs.lua".to_string()));
+        assert_eq!(mpv.last().unwrap(), "/tmp/x.sdp");
+
+        let ffplay = Player::Ffplay.command_for(path, buffer, None, 100, None, true);
+        assert_eq!(pair(&ffplay, "-max_delay"), "0");
+        assert_eq!(pair(&ffplay, "-reorder_queue_size"), "0");
+        assert_eq!(pair(&ffplay, "-flags"), "low_delay");
+        assert_eq!(pair(&ffplay, "-fflags"), "nobuffer");
+        assert!(!ffplay.contains(&"+discardcorrupt".to_string()));
+        assert_eq!(ffplay.last().unwrap(), "/tmp/x.sdp");
+
+        let vlc = Player::Vlc.command_for(path, buffer, None, 100, None, true);
+        assert!(vlc.contains(&"--network-caching=30".to_string()), "{vlc:?}");
+    }
+    // The standard tuning is `command_for(.., false)`, and never carries the
+    // aggressive script option.
+    assert_eq!(
+        Player::Ffplay.command(path, None, None, 100, None),
+        Player::Ffplay.command_for(path, None, None, 100, None, false)
+    );
+    let mpv = Player::Mpv.command(path, None, None, 100, script);
+    assert!(
+        !mpv.iter().any(|a| a.starts_with("--script-opts")),
+        "{mpv:?}"
+    );
 }
 
 #[test]
@@ -492,4 +580,179 @@ async fn wait_until_listening_does_not_hog_the_port() {
         .await
         .expect("wait_until_listening did not return after the player bound")
         .unwrap();
+}
+
+/// A player that is slow to open its port starts at the live edge.
+///
+/// mpv takes a second or so to open its RTP port. The viewer used to wait for
+/// it inside its datagram loop, so QUIC queued that second of media and the
+/// player got it in one burst once it listened: it started a second behind
+/// live, and the speed-up that drained it pulled the audio away from the
+/// picture. The media in the meantime is dropped now; once the port is open
+/// the viewer asks for a keyframe, and the player starts there.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_slow_player_starts_at_the_live_edge() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::Mutex;
+
+    use bytes::Bytes;
+    use iroh::{endpoint::presets, Endpoint, EndpointAddr};
+    use streampipe::{
+        rtp::{ParameterSets, TAG_EPOCH, TAG_KEYFRAME_REQ, TAG_SESSION, TAG_VIDEO},
+        sdp::{MediaHeader, SessionHeader},
+        stream::{connect_whip, ViewerConfig},
+    };
+
+    let loopback = || {
+        Endpoint::builder(presets::Minimal)
+            .clear_ip_transports()
+            .bind_addr("127.0.0.1:0")
+            .unwrap()
+    };
+    let host = loopback()
+        .alpns(vec![streampipe::STREAM_ALPN.to_vec()])
+        .bind()
+        .await
+        .unwrap();
+    let viewer = loopback().bind().await.unwrap();
+    let host_addr = EndpointAddr::new(host.id()).with_ip_addr(host.bound_sockets()[0]);
+
+    // The "player" only records that it was started; the test opens its port
+    // for it, a second later.
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("player.pid");
+    let script = dir.path().join("player.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\necho $$ > '{}'\nexec sleep 30\n",
+            pid_file.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let probe = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let play = probe.local_addr().unwrap().port() & !1;
+    drop(probe);
+
+    let cfg = ViewerConfig {
+        addr: host_addr,
+        alpn: streampipe::STREAM_ALPN.to_vec(),
+        play: (Ipv4Addr::LOCALHOST, play).into(),
+        sdp: Some(dir.path().join("x.sdp")),
+        sdp_here: false,
+        player: Player::Mpv,
+        player_path: Some(script),
+        no_launch: false,
+        buffer: None,
+        low_latency: false,
+        volume: 100,
+        stats: false,
+        media_state: None,
+    };
+    let viewing = tokio::spawn(connect_whip(viewer, cfg));
+
+    // The host: a session header, then one video packet every 5 ms, with an
+    // epoch (a keyframe) at the start and whenever the viewer asks for one.
+    let conn = host
+        .accept()
+        .await
+        .expect("an incoming viewer")
+        .accept()
+        .expect("accepting")
+        .await
+        .expect("a connection");
+    let (_send, mut recv) = conn.accept_bi().await.unwrap();
+    let mut hello = [0u8; 5];
+    recv.read_exact(&mut hello).await.unwrap();
+    assert_eq!(hello, streampipe::HANDSHAKE);
+    let header = SessionHeader {
+        gen: 1,
+        media: vec![MediaHeader {
+            kind: MediaKind::Video,
+            pt: 96,
+            codec: "H264".into(),
+            clock: 90_000,
+            channels: 1,
+            fmtp: String::new(),
+            sets: ParameterSets::default(),
+        }],
+    }
+    .encode();
+    let tagged = |tag: u8, body: &[u8]| Bytes::from([&[tag][..], body].concat());
+    let sent: Arc<Mutex<Vec<Instant>>> = Arc::default();
+    let hosting = {
+        let (conn, sent) = (conn.clone(), sent.clone());
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_millis(5));
+            let mut keyframe = true;
+            let mut seq = 0u16;
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => {}
+                    datagram = conn.read_datagram() => {
+                        match datagram {
+                            Ok(d) if d.first() == Some(&TAG_KEYFRAME_REQ) => keyframe = true,
+                            Ok(_) => {}
+                            Err(_) => return,
+                        }
+                        continue;
+                    }
+                }
+                if seq.is_multiple_of(200) {
+                    let _ = conn.send_datagram(tagged(TAG_SESSION, &header));
+                }
+                if std::mem::take(&mut keyframe) {
+                    let _ = conn.send_datagram(tagged(TAG_EPOCH, &[]));
+                }
+                let packet = rtp::serialize_rtp(&info(96, seq), &[0x65, 0x88, 0x84]);
+                sent.lock().unwrap().push(Instant::now());
+                let _ = conn.send_datagram(tagged(TAG_VIDEO, &packet));
+                seq += 1;
+            }
+        })
+    };
+
+    // The player starts, then takes a second to open its port.
+    let started = Instant::now();
+    while !pid_file.exists() {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "no player launched"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let player = loop {
+        // The viewer's own probe holds the port for an instant now and then.
+        match UdpSocket::bind((Ipv4Addr::LOCALHOST, play)).await {
+            Ok(socket) => break socket,
+            Err(_) => tokio::time::sleep(Duration::from_millis(5)).await,
+        }
+    };
+    let listening = Instant::now();
+
+    let mut buf = [0u8; 2048];
+    let (len, _) = tokio::time::timeout(Duration::from_secs(5), player.recv_from(&mut buf))
+        .await
+        .expect("no media reached the player")
+        .unwrap();
+    let (first, _) = rtp::parse_header(&buf[..len]).expect("an rtp packet");
+    let sent_at = sent.lock().unwrap()[first.seq as usize];
+    assert!(
+        sent_at >= listening,
+        "the player's first packet is {:?} older than its port",
+        listening - sent_at
+    );
+
+    hosting.abort();
+    viewing.abort();
+    if let Ok(pid) = std::fs::read_to_string(&pid_file) {
+        // Usually gone already: the viewer stops its player when dropped.
+        let _ = std::process::Command::new("kill")
+            .arg(pid.trim())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
 }

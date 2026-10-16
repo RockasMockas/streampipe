@@ -96,6 +96,9 @@ pub struct Config {
     pub player_paths: PlayerPaths,
     /// The jitter buffer in milliseconds, `None` for lowest latency.
     pub buffer_ms: Option<u64>,
+    /// Whether the Watch tab's "Aggressive Low Latency" is ticked (see
+    /// [`crate::stream::ViewerConfig::low_latency`]).
+    pub low_latency: bool,
     /// The player's initial volume in percent (0-100), used on every launch.
     /// 100 means "leave the player at its own default" (see [`Player::command`]).
     pub volume: u8,
@@ -169,6 +172,7 @@ impl Default for Config {
             default_player: player_key(Player::Mpv).to_string(),
             player_paths: PlayerPaths::default(),
             buffer_ms: None,
+            low_latency: false,
             volume: DEFAULT_VOLUME,
             play_addr: crate::stream::DEFAULT_PLAY_ADDR.to_string(),
             broadcast_host: "127.0.0.1".to_string(),

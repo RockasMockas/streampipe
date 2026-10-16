@@ -369,6 +369,17 @@ pub struct ConnectWhipArgs {
     #[clap(long)]
     pub buffer: Option<u64>,
 
+    /// Aggressive low latency: lower latency at the cost of more smearing and
+    /// dropped frames.
+    ///
+    /// The player runs with no buffer (`--buffer` is ignored) and no reorder
+    /// queue of its own, a lost packet is only waited for while a quick resend
+    /// or the host's error correction can still repair it, and mpv catches up
+    /// to the live edge faster. The host is asked for parity on the video and a
+    /// duplicate of every audio packet, about 10% more of its upload.
+    #[clap(long)]
+    pub low_latency: bool,
+
     /// The player's initial volume, in percent (0=mute, 100=full). Defaults to 50.
     ///
     /// Every player can be told where to start, so the launched window opens at
@@ -1138,6 +1149,7 @@ async fn connect_whip(args: ConnectWhipArgs) -> Result<()> {
         player_path: args.player_path.clone(),
         no_launch: args.no_launch,
         buffer: args.buffer.map(Duration::from_millis),
+        low_latency: args.low_latency,
         volume: args.volume,
         stats: stats_enabled(args.common.verbosity()),
         // The CLI has no live status label to drive.

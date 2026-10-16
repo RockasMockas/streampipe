@@ -8,6 +8,7 @@ pub const HANDSHAKE: [u8; 5] = *b"hello";
 pub const STREAM_ALPN: &[u8] = b"STREAMPIPE_WEBRTC_V0";
 
 pub mod common;
+pub mod fec;
 pub mod gui;
 pub mod pace;
 pub mod rtp;

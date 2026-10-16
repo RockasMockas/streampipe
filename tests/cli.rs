@@ -966,4 +966,39 @@ mod whip_tests {
         host.kill().ok();
         host.wait().ok();
     }
+
+    /// A `--low-latency` viewer asks the host for error correction over the real
+    /// connection, and the host takes it up.
+    #[test]
+    fn connect_whip_low_latency_asks_for_error_correction() {
+        let (_port, mut host, host_out) = listen(&["-v"]);
+        let ticket = ticket(&host_out).to_string();
+
+        let play = random_port() & !1;
+        let play_addr = format!("127.0.0.1:{play}");
+        let mut viewer = Command::new(streampipe_bin())
+            .args([
+                "connect-whip",
+                "-v",
+                "--addr",
+                &play_addr,
+                "--no-launch",
+                "--low-latency",
+            ])
+            .arg(&ticket)
+            .env_remove("RUST_LOG")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn connect-whip");
+        let viewer_out = collect(&mut viewer);
+
+        wait_for(&viewer_out, "aggressive low latency", READY);
+        wait_for(&host_out, "runs aggressive low latency", READY);
+
+        viewer.kill().ok();
+        viewer.wait().ok();
+        host.kill().ok();
+        host.wait().ok();
+    }
 }

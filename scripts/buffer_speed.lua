@@ -9,14 +9,26 @@
 
 local mp = require("mp")
 local msg = require("mp.msg")
+local options = require("mp.options")
+
+-- `--script-opts=streampipe-aggressive=yes`: Streampipe's Aggressive Low
+-- Latency. There is no player buffer to keep, so anything queued in the
+-- demuxer is latency: chase it from 50 ms on, harder and sooner.
+local opts = { aggressive = false }
+options.read_options(opts, "streampipe")
 
 ---------------------------------------------------------------------
 
 local LOW, HIGH = 0.2, 1.0 -- the law's operating range, in seconds
 local FLOOR, CEIL = 1.0, 1.10 -- the speed is clamped to this, always
+local SLEW_UP, SLEW_DOWN = 0.02, 0.20 -- speed units per second, asymmetric
+if opts.aggressive then
+	LOW, HIGH = 0.05, 0.30
+	CEIL = 1.20
+	SLEW_UP = 0.10
+end
 local MAX = CEIL - FLOOR -- the most speed-up there is
 local ALPHA = 0.35 -- low-pass weight of a new reading
-local SLEW_UP, SLEW_DOWN = 0.02, 0.20 -- speed units per second, asymmetric
 local SLEW_DT_MAX = 1.0 -- the slew rate is per wall-clock second
 local WRITE_EPS = 0.02 -- only write a speed the player can notice; keep speed
 local BASE, SPREAD, CAP = 1.0, 120.0, 60.0 -- watchdog interval policy

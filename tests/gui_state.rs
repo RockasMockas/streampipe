@@ -56,6 +56,7 @@ fn spawn_watch_arms_starting_before_it_comes_online() {
             player_path: None,
             play_addr: "127.0.0.1:0".into(),
             buffer_ms: None,
+            low_latency: false,
             volume: DEFAULT_VOLUME,
         },
     );
@@ -350,6 +351,7 @@ fn restarting_a_watch_tears_the_previous_session_down_first() {
             player_path: None,
             play_addr: "127.0.0.1:0".into(),
             buffer_ms: Some(120),
+            low_latency: true,
             volume: DEFAULT_VOLUME,
         },
     );
@@ -358,8 +360,8 @@ fn restarting_a_watch_tears_the_previous_session_down_first() {
         assert_eq!(g.watch, Mode::Starting, "the restart arms `Starting`");
         assert_eq!(
             g.watch_applied,
-            Some((Player::Vlc, Some(120))),
-            "the record moves to the pair the new session was launched with"
+            Some((Player::Vlc, Some(120), true)),
+            "the record moves to the settings the new session was launched with"
         );
     }
 

@@ -18,6 +18,7 @@ use str0m::{
 use tokio::{net::UdpSocket, sync::mpsc, time::sleep_until};
 
 use streampipe::{
+    fec::FecDecoder,
     rtp::{self, RtpInfo},
     sdp::{self, render_player_sdp, MediaKind},
     stream::{parse_candidate, Frame, Host, ViewerEvent, ICE_BUF},
@@ -283,6 +284,108 @@ async fn nack_from_a_gated_viewer_is_ignored() {
     assert!(rx.try_recv().is_err());
 }
 
+/// Everything queued for a viewer, in order.
+fn frames(rx: &mut mpsc::Receiver<Frame>) -> Vec<Frame> {
+    let mut out = Vec::new();
+    while let Ok(frame) = rx.try_recv() {
+        out.push(frame);
+    }
+    out
+}
+
+#[tokio::test]
+async fn a_low_latency_viewer_gets_parity_and_audio_twice() {
+    let mut host = host().await;
+    host.negotiate(&offer(), false).expect("an answer");
+    let (tx, mut fast) = mpsc::channel(64);
+    host.on_viewer_event(ViewerEvent::Joined {
+        id: 1,
+        port: 5004,
+        tx,
+    });
+    host.on_viewer_event(ViewerEvent::LowLatency { id: 1 });
+    // Repeated every second by the viewer; must stay harmless.
+    host.on_viewer_event(ViewerEvent::LowLatency { id: 1 });
+    let (tx, mut plain) = mpsc::channel(64);
+    host.on_viewer_event(ViewerEvent::Joined {
+        id: 2,
+        port: 5008,
+        tx,
+    });
+
+    // One frame of three packets, the marker on the last, then two audio packets.
+    host.handle_media(info(96, 100), &keyframe());
+    host.handle_media(info(96, 101), &nal(1, b"slice-101"));
+    let mut last = info(96, 102);
+    last.marker = true;
+    host.handle_media(last, &nal(1, b"slice-102"));
+    host.handle_media(info(111, 7), b"opus-7");
+    host.handle_media(info(111, 8), b"opus-8");
+
+    let seqs = |frames: &[Frame], audio: bool| -> Vec<u16> {
+        frames
+            .iter()
+            .filter_map(|f| match f {
+                Frame::Audio(b) if audio => Some(rtp::parse_header(b).unwrap().0.seq),
+                Frame::Video(b) if !audio => Some(rtp::parse_header(b).unwrap().0.seq),
+                _ => None,
+            })
+            .collect()
+    };
+
+    let fast = frames(&mut fast);
+    let fast_kinds: Vec<&str> = fast
+        .iter()
+        .filter_map(|f| match f {
+            Frame::Video(_) => Some("video"),
+            Frame::Fec(_) => Some("fec"),
+            Frame::Audio(_) => Some("audio"),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        fast_kinds,
+        ["video", "video", "video", "fec", "audio", "audio", "audio"],
+        "parity right behind the frame, the previous audio packet behind each one"
+    );
+    assert_eq!(seqs(&fast, true), vec![7, 8, 7]);
+
+    let plain = frames(&mut plain);
+    assert!(
+        !plain.iter().any(|f| matches!(f, Frame::Fec(_))),
+        "a standard viewer gets no parity"
+    );
+    assert_eq!(
+        seqs(&plain, true),
+        vec![7, 8],
+        "and every audio packet once"
+    );
+
+    // The host's parity rebuilds a lost packet of the frame exactly.
+    let video: Vec<_> = fast
+        .iter()
+        .filter_map(|f| match f {
+            Frame::Video(b) => Some(b.clone()),
+            _ => None,
+        })
+        .collect();
+    let parity = fast
+        .iter()
+        .find_map(|f| match f {
+            Frame::Fec(b) => Some(b.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let mut decoder = FecDecoder::default();
+    let now = Instant::now();
+    decoder.on_packet(100, &video[0], now);
+    decoder.on_packet(102, &video[2], now);
+    assert_eq!(
+        decoder.on_parity(&parity, now),
+        Some((101, video[1].to_vec()))
+    );
+}
+
 #[tokio::test]
 async fn a_new_offer_forgets_the_history() {
     // A new publisher session starts a new sequence space: an old packet must
@@ -497,6 +600,7 @@ async fn a_real_publisher_reaches_a_viewer() {
             Frame::Video(_) => "video",
             Frame::Audio(_) => "audio",
             Frame::Resend(..) => "resend",
+            Frame::Fec(_) => "fec",
         })
         .collect();
     assert_eq!(kinds.first().copied(), Some("header"), "{kinds:?}");

@@ -17,6 +17,10 @@
 //!   single QUIC datagram, see [`fragment_all`] and [`Reassembler`].
 //! * [`TAG_NACK`]: viewer to host, please resend these lost packets, see
 //!   [`encode_nack`] and [`History`].
+//! * [`TAG_LOW_LATENCY`]: viewer to host, this viewer runs Aggressive Low
+//!   Latency, send it error correction.
+//! * [`TAG_FEC`]: host to a low latency viewer, parity for the video, see
+//!   [`crate::fec`].
 //!
 //! RTP header extensions and CSRCs are dropped when re-framing, the generated
 //! player SDP advertises neither.
@@ -57,6 +61,14 @@ pub const NACK_AUDIO: u8 = 1;
 /// The most sequence numbers in one [`TAG_NACK`] datagram, so it always fits
 /// the smallest datagram limit QUIC allows.
 pub const NACK_MAX: usize = 256;
+/// A viewer running Aggressive Low Latency, asking the host for [`TAG_FEC`]
+/// parity and a duplicate of every audio packet.
+///
+/// It carries no payload and is repeated every second: datagrams are
+/// unreliable, and a host that predates it simply ignores it.
+pub const TAG_LOW_LATENCY: u8 = 7;
+/// Parity for the video of a low latency viewer, see [`crate::fec`].
+pub const TAG_FEC: u8 = 8;
 
 /// Frame a NACK for `seqs` of one media, at most [`NACK_MAX`] of them.
 pub fn encode_nack(media: u8, seqs: &[u16]) -> Vec<u8> {
@@ -327,6 +339,55 @@ pub fn nack_timing(buffer: Option<Duration>, rtt: Duration) -> (Duration, Durati
     (timeout, renack)
 }
 
+/// Aggressive Low Latency: the shortest a [`Reorder`] holds a hole, enough for
+/// the reordering of a single path.
+pub const LOW_LATENCY_REORDER: Duration = Duration::from_millis(20);
+/// Aggressive Low Latency: the longest a [`Reorder`] holds a video hole.
+///
+/// The player shows video against the audio clock, so a video hole held this
+/// long is a brief freeze it catches up from by dropping a few frames, not
+/// latency it keeps; a hole left unrepaired smears the picture until the next
+/// keyframe instead.
+pub const LOW_LATENCY_HOLD_MAX: Duration = Duration::from_millis(80);
+/// Aggressive Low Latency: the longest a [`Reorder`] holds an audio hole.
+///
+/// Audio is the player's clock and runs on a small output buffer, so it only
+/// waits for a resend on a very short path. The host's duplicate of a lost
+/// audio packet arrives right behind the next one and needs no wait at all.
+pub const LOW_LATENCY_AUDIO_HOLD_MAX: Duration = Duration::from_millis(40);
+/// Aggressive Low Latency: how long a video hole waits for the parity of its
+/// frame ([`crate::fec`]). The rest of a P frame is milliseconds away, the
+/// rest of a paced keyframe tens of milliseconds.
+pub const LOW_LATENCY_FEC_HOLD: Duration = Duration::from_millis(60);
+/// Slack on top of the round trip for a low latency resend to arrive.
+const LOW_LATENCY_NACK_SLACK: Duration = Duration::from_millis(15);
+
+/// How long a low latency [`Reorder`] holds a hole, and how often it asks for
+/// a resend (0 or 1), on a path with round-trip time `rtt`.
+///
+/// A resend is only asked for when it can land within the hold cap: a later
+/// one would find its hole already given up on, and a player with no reorder
+/// buffer can do nothing with a packet that arrives out of order. With `fec`
+/// (the host sends parity) a video hole also waits for its frame's parity.
+pub fn low_latency_timing(rtt: Option<Duration>, video: bool, fec: bool) -> (Duration, u8) {
+    let cap = if video {
+        LOW_LATENCY_HOLD_MAX
+    } else {
+        LOW_LATENCY_AUDIO_HOLD_MAX
+    };
+    let resend = rtt
+        .map(|rtt| rtt + LOW_LATENCY_NACK_SLACK)
+        .filter(|wait| *wait <= cap);
+    let mut timeout = LOW_LATENCY_REORDER;
+    if let Some(wait) = resend {
+        timeout = timeout.max(wait);
+    }
+    if video && fec {
+        timeout = timeout.max(LOW_LATENCY_FEC_HOLD);
+    }
+    (timeout.min(cap), u8::from(resend.is_some()))
+}
+
 /// The most packets the [`Reorder`] holds per media at once.
 const REORDER_CAP: usize = 8192;
 
@@ -363,6 +424,9 @@ const ABANDONED_CAP: usize = 512;
 /// once more if the resend does not arrive in time. If a hole is not filled
 /// within the configured timeout, everything held is flushed in order and the
 /// hole is abandoned (genuine loss the player conceals).
+///
+/// [`Reorder::low_latency`] is the Aggressive Low Latency variant: short holds,
+/// at most one resend, and strictly in order output.
 pub struct Reorder {
     /// The next sequence number to emit, `None` until the first packet.
     next: Option<u16>,
@@ -379,6 +443,11 @@ pub struct Reorder {
     /// Holes a flush gave up on, so a very late packet for one of them can
     /// still be handed on, while a duplicate of an emitted packet is dropped.
     abandoned: VecDeque<u16>,
+    /// How often one hole is asked for, see [`Reorder::set_nack_tries`].
+    tries: u8,
+    /// Whether a very late packet for an abandoned hole is handed on at all,
+    /// see [`Reorder::low_latency`].
+    pass_late: bool,
 }
 
 impl Default for Reorder {
@@ -391,6 +460,8 @@ impl Default for Reorder {
             missing: Vec::new(),
             renack: REORDER_TIMEOUT / 2,
             abandoned: VecDeque::new(),
+            tries: NACK_TRIES,
+            pass_late: true,
         }
     }
 }
@@ -408,6 +479,24 @@ impl Reorder {
         }
     }
 
+    /// A reorder for Aggressive Low Latency, timed by [`low_latency_timing`]
+    /// for the video or the audio before the round trip is known.
+    ///
+    /// It never hands a packet on out of order: the player behind it runs
+    /// without a reorder queue of its own, so a packet that arrives after its
+    /// hole was given up on would land in the middle of a later frame and
+    /// corrupt it. Such a packet is dropped instead.
+    pub fn low_latency(video: bool) -> Self {
+        let (timeout, tries) = low_latency_timing(None, video, false);
+        Self {
+            timeout,
+            renack: timeout,
+            tries,
+            pass_late: false,
+            ..Default::default()
+        }
+    }
+
     /// Change how long a hole is held, and how long a resend may take before
     /// the hole is asked for again. See [`nack_timing`].
     pub fn set_timing(&mut self, timeout: Duration, renack: Duration) {
@@ -415,13 +504,20 @@ impl Reorder {
         self.renack = renack;
     }
 
+    /// Change how often one hole is asked for, [`NACK_TRIES`] by default; 0
+    /// never asks.
+    pub fn set_nack_tries(&mut self, tries: u8) {
+        self.tries = tries;
+    }
+
     /// Feed one packet by its RTP sequence number.
     ///
     /// Returns the packets to hand to the player now: the packet itself if it
     /// closes the gap, plus any held packets it unblocks. A packet for a hole
     /// that was already abandoned is passed through untouched, so a downstream
-    /// jitter buffer can still recover it; a duplicate of a packet that was
-    /// already emitted (a resend racing a delayed original) is dropped.
+    /// jitter buffer can still recover it (not by a [`Reorder::low_latency`],
+    /// which has none behind it); a duplicate of a packet that was already
+    /// emitted (a resend racing a delayed original) is dropped.
     pub fn push(&mut self, seq: u16, packet: Vec<u8>, now: Instant) -> Vec<Vec<u8>> {
         let mut out = Vec::new();
         let Some(next) = self.next else {
@@ -439,6 +535,9 @@ impl Reorder {
             return self.push(seq, packet, now);
         }
         if ahead < 0 {
+            if !self.pass_late {
+                return out;
+            }
             if let Some(i) = self.abandoned.iter().position(|s| *s == seq) {
                 self.abandoned.remove(i);
                 out.push(packet);
@@ -472,7 +571,7 @@ impl Reorder {
     ///
     /// A new hole is returned on the first call after it appears, then again
     /// if its resend has not arrived within the renack interval, up to
-    /// [`NACK_TRIES`] times in all.
+    /// [`NACK_TRIES`] times in all (see [`Reorder::set_nack_tries`]).
     pub fn take_nacks(&mut self, now: Instant) -> Vec<u16> {
         let Some(next) = self.next else {
             return Vec::new();
@@ -483,7 +582,7 @@ impl Reorder {
         let mut seqs = Vec::new();
         for (seq, asked, tries) in &mut self.missing {
             let due = asked.is_none_or(|at| now.duration_since(at) >= self.renack);
-            if *tries < NACK_TRIES && due {
+            if *tries < self.tries && due {
                 *asked = Some(now);
                 *tries += 1;
                 seqs.push(*seq);
