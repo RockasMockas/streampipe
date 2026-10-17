@@ -44,7 +44,7 @@ local player.
 3. Pick a **Player** from the dropdown (`mpv` by default, `ffplay`, `vlc`, or
    `none` to get just the stream description and open it yourself). (Note `ffplay` has lowest delay, followed my `mpv`, followed by `vlc`)
 4. *(Optional)* Set a **Buffer (ms)** jitter buffer. Leave it blank for the
-   lowest latency; raise it to 500-1000ms if issues arise.
+   lower latency; raise it to 500-1000ms if issues arise. (You can also tick the `Aggressive Low Latency` checkbox for even lower latency, at the cost of possibly a less stable/lower quality viewing experience)
 5. Press **Watch Stream** (or press Enter). The app launches your chosen player, forwarding the stream to it.
 
 The ticket box remembers the last ticket you used, so restarting a recent stream is just an Enter press away.
